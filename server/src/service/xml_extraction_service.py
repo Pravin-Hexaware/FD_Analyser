@@ -170,7 +170,7 @@ def apply_decimals(value_text: str, decimals_text: Optional[str]) -> Any:
 
     if d < 0:
         # divide by 10^abs(d)
-        adj = num / (10 ** abs(d))
+        adj = num / (10 ** (abs(d)+1))
         return adj
     elif d > 0:
         # multiply by 10^d

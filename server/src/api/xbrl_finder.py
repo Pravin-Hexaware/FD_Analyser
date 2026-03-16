@@ -2,8 +2,7 @@
 """
 BSE Corporate Results -> Locate FIRST XBRL/iXBRL link for a company
 Option C: Keep Smart Search UX but fix CORS by routing the SmartSearch XHR via Playwright.
-
-Page: https://www.bseindia.com/corporates/Comp_Resultsnew.aspx
+This version fixes the `javascript:__doPostBack(...)` case by capturing the popup instead of resolving the href.
 """
 
 import asyncio
@@ -103,7 +102,6 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
     input_sel = await _find_company_input(page)
     if not input_sel:
         print("[ERROR] Smart Search input NOT found.")
-        # diagnostics
         try:
             await page.screenshot(path="debug_no_input.png", full_page=True)
             html = await page.content()
@@ -113,19 +111,6 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
         except Exception as e:
             print(f"[DEBUG] Failed saving diagnostics: {e}")
         print(f"[DEBUG] Current URL: {page.url}")
-
-        # Probe visible inputs
-        try:
-            summary = await page.evaluate("""
-                () => {
-                    const nodes = Array.from(document.querySelectorAll('input[type="text"]'));
-                    return nodes.slice(0, 10).map(n => ({
-                        id: n.id, name: n.name, placeholder: n.placeholder, cls: n.className
-                    }));
-                }
-            """)
-        except Exception:
-            pass
         raise RuntimeError("Smart Search input not found; see debug artifacts.")
 
     print(f"[OK] Smart Search input located via selector: {input_sel}")
@@ -135,26 +120,29 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
     await page.click(input_sel, timeout=1500)
     await page.click(input_sel, click_count=3, timeout=800)
     await page.keyboard.press("Delete")
-    print(f"[STEP] Typing company: {company}")
-    await page.type(input_sel, company, delay=40)
+
+    # SPEED: type minimal characters to trigger suggestions
+    company_for_typing = company if len(company) <= 5 else company[:5]
+    print(f"[STEP] Typing company: {company_for_typing}")
+    await page.type(input_sel, company_for_typing, delay=10)
 
     print("[STEP] Waiting for suggestions...")
-    has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=500)
+    has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=600)
 
     if not has_suggestions:
         try:
-            await page.type(input_sel, " ", delay=20)
+            await page.type(input_sel, " ", delay=10)
             await page.keyboard.press("Backspace")
         except Exception:
             pass
         await _dispatch_input_keyup(page, input_sel)
-        has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=800)
+        has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=600)
 
     if not has_suggestions:
         try:
             await page.focus(input_sel)
             await page.keyboard.press("ArrowDown")
-            has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=600)
+            has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=500)
         except Exception:
             pass
 
@@ -162,7 +150,7 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
     if has_suggestions:
         suggestions = page.locator(f"{sugg_box} a, {sugg_box} li, {sugg_box} div, {sugg_box} span")
         try:
-            await suggestions.first.wait_for(timeout=1500)
+            await suggestions.first.wait_for(timeout=900)
             count = await suggestions.count()
             for i in range(count):
                 el = suggestions.nth(i)
@@ -195,8 +183,7 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
                 const bv = (b && b.value || '').trim();
                 return (av.length > 0) || (bv.length > 0);
             }""",
-            timeout=2500
-        )
+        timeout=1600)
         print("[OK] Hidden scrip code present.")
     except PWTimeoutError:
         print("[WARN] Hidden scrip code did not populate. Proceeding anyway.")
@@ -204,38 +191,32 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
 async def set_result_period_quarterly(page) -> None:
     print("[STEP] Setting Result Period = Quarterly...")
     sel = "#ContentPlaceHolder1_periioddd"
-    await page.wait_for_selector(sel, timeout=600)
+    await page.wait_for_selector(sel, timeout=1200)
     await page.select_option(sel, value="3")
     print("[OK] Result Period set.")
 
 async def set_broadcast_period_beyond_1yr(page) -> None:
     print("[STEP] Setting Broadcast Period = Beyond last 1 year...")
     sel = "#ContentPlaceHolder1_broadcastdd"
-    await page.wait_for_selector(sel, timeout=600)
+    await page.wait_for_selector(sel, timeout=1200)
     await page.select_option(sel, value="7")
     print("[OK] Broadcast Period set.")
 
 async def click_submit(page) -> None:
     print("[STEP] Submitting the form...")
     btn_sel = '#ContentPlaceHolder1_btnSubmit'
-    await page.wait_for_selector(btn_sel, timeout=600)
+    await page.wait_for_selector(btn_sel, timeout=1200)
     async with page.expect_navigation(wait_until="domcontentloaded"):
         await page.click(btn_sel)
-    try:
-        #await page.wait_for_load_state("networkidle", timeout=800)
-        # networkidle slows pages with background scripts
-        await page.wait_for_load_state("domcontentloaded")
-    except Exception:
-        pass
     print("[OK] Submitted.")
 
 async def wait_for_results(page) -> None:
     try:
-        await page.wait_for_selector('#ContentPlaceHolder1_gvData', timeout=3000)
+        await page.wait_for_selector('#ContentPlaceHolder1_gvData', timeout=4000)
         return
     except PWTimeoutError:
         try:
-            await page.get_by_text(re.compile(r"No\s+Record\s+Found", re.I)).first.wait_for(timeout=800)
+            await page.get_by_text(re.compile(r"No\s+Record\s+Found", re.I)).first.wait_for(timeout=1200)
             print("[OK] 'No Record Found' message detected.")
             return
         except PWTimeoutError:
@@ -255,16 +236,24 @@ async def resolve_absolute_url(page, href: str) -> str:
     base = page.url.rstrip("/")
     return base + "/" + href
 
+# ---------- FAST & CORRECT XBRL extraction ----------
 async def get_first_xbrl_url(page) -> Optional[str]:
+    """
+    FAST path with correct handling of javascript:__doPostBack(...) anchors:
+      1) Prefer direct-link anchors (href contains file/host)
+      2) Else anchors with text 'XBRL' -> parse href/onclick
+      3) For javascript:__doPostBack(...) -> click and capture popup (short timeout)
+    """
+    # Find the grid
     grid_candidates = [
         '#ContentPlaceHolder1_gvData',
         'table:has(th:has-text("XBRL"))',
-        'table:has-text("Std XBRL"), table:has-text("Con XBRL")'
+        'table:has-text("Std XBRL"), table:has-text("Con XBRL")',
     ]
     grid = None
     for sel in grid_candidates:
         try:
-            await page.wait_for_selector(sel, timeout=1500)
+            await page.wait_for_selector(sel, timeout=800)
             grid = page.locator(sel).first
             break
         except PWTimeoutError:
@@ -276,65 +265,70 @@ async def get_first_xbrl_url(page) -> Optional[str]:
             return None
         raise RuntimeError("Could not locate results table. Inspect DOM and update selectors.")
 
-    rows = grid.locator("tr")
-    n = await rows.count()
-    print(f"[DEBUG] Rows in grid: {n}")
+    # ---- A) DIRECT URL anchors (fastest, no click) ----
+    direct_sel = (
+        'a[href*="XBRLFILES" i], '
+        'a[href$=".xml" i], '
+        'a[href$=".html" i], '
+        'a[href$=".zip" i]'
+    )
+    direct = grid.locator(direct_sel).first
+    if await direct.count():
+        href = (await direct.get_attribute("href")) or ""
+        if href and not href.lower().startswith("javascript:"):
+            return await resolve_absolute_url(page, href)
+        # if direct matched but href is javascript (rare), fall through to click/popup
 
-    for i in range(n):
-        row = rows.nth(i)
-        if await row.locator("th").count():
-            continue
+    # ---- B) lnkXML / label-based anchors ----
+    # Prefer typical ASP.NET link IDs first
+    candidate = grid.locator('a[id*="lnkXML"]').first
+    if not await candidate.count():
+        # fallback to any 'XBRL' labeled anchor
+        candidate = grid.locator("a").filter(has_text=re.compile(r"\bXBRL\b", re.I)).first
 
-        anchors = row.locator("a")
-        a_count = await anchors.count()
-        for j in range(a_count):
-            a = anchors.nth(j)
+    if await candidate.count():
+        href = ((await candidate.get_attribute("href")) or "").strip()
+        onclick = ((await candidate.get_attribute("onclick")) or "").strip()
 
+        # If href is a real URL, return it
+        if href and not href.lower().startswith("javascript:"):
+            return await resolve_absolute_url(page, href)
+
+        # If onclick contains window.open('...'), extract
+        open_url = extract_window_open_url(onclick)
+        if open_url:
+            return await resolve_absolute_url(page, open_url)
+
+        # If it's a javascript:__doPostBack(...) -> click and capture popup
+        try:
+            async with page.expect_popup() as pop_info:
+                await candidate.click()
+            pop = await pop_info.value
             try:
-                atxt = (await a.inner_text() or "").strip().lower()
+                await pop.wait_for_load_state("domcontentloaded", timeout=1200)
             except Exception:
-                atxt = ""
-
-            href = await a.get_attribute("href")
-            onclick = await a.get_attribute("onclick")
-            href_l = (href or "").lower()
-
-            # Case 1: direct link
-            if href and (("xbrlfiles" in href_l) or href_l.endswith((".xml", ".html", ".zip"))):
-                url = await resolve_absolute_url(page, href)
-                return url
-
-            # Case 1b: onclick has window.open('...')
-            open_url = extract_window_open_url(onclick)
-            if open_url:
-                url = await resolve_absolute_url(page, open_url)
-                print(f"[OK] Extracted XBRL link from onclick: {url}")
-                return url
-
-            # Case 2: popup
+                pass
+            url = pop.url
             try:
-                async with page.expect_popup() as pop_info:
-                    await a.click()
-                pop = await pop_info.value
-                try:
-                    await pop.wait_for_load_state("domcontentloaded", timeout=500)
-                except Exception:
-                    pass
-                url = pop.url
-                try:
-                    await pop.close()
-                except Exception:
-                    pass
-                if url and not url.startswith(("about:", "javascript:")):
-                    print(f"[OK] Captured XBRL from popup: {url}")
-                    return url
+                await pop.close()
             except Exception:
-                if href and not href_l.startswith("javascript:"):
-                    url = await resolve_absolute_url(page, href)
-                    print(f"[OK] Resolved relative XBRL link: {url}")
-                    return url
+                pass
+            if url and not url.startswith(("about:", "javascript:")):
+                return url
+        except Exception:
+            # As a last resort, try clicking without popup and then inspect new anchors
+            try:
+                await candidate.click()
+                # After postback, sometimes the hrefs become resolvable — try direct anchors again quickly
+                direct2 = grid.locator(direct_sel).first
+                if await direct2.count():
+                    href2 = (await direct2.get_attribute("href")) or ""
+                    if href2 and not href2.lower().startswith("javascript:"):
+                        return await resolve_absolute_url(page, href2)
+            except Exception:
+                pass
 
-    print("[INFO] No XBRL link found in the grid.")
+    print("[INFO] No XBRL link found via fast selectors.")
     return None
 
 # ---------- Main runner ----------
@@ -388,16 +382,15 @@ async def run(company: str) -> Optional[str]:
 
         page = await ctx.new_page()
 
-        # Debug listeners (Python API: .type and .text are PROPERTIES)
-        page.on("console", lambda msg: print(f"[BROWSER CONSOLE]"))
-        page.on("requestfailed", lambda req: print(f"[REQ FAIL]"))
-        page.on("response", lambda res: print(f"[RESP] {res.status} {res.url}") if res.status >= 400 else None)
+        # Block heavy resources (keeps HTML + XHR only)
+        await page.route("**/*", lambda route, req:
+            route.abort() if req.resource_type in ["image", "font", "media"] else route.continue_()
+        )
 
         # === CORS fix: route PeerSmartSearch to APIRequestContext ===
         async def smartsearch_proxy(route, request):
             if SMART_API_PART in request.url:
                 try:
-                    # Fetch via API client with browser-like headers
                     resp: APIResponse = await ctx.request.get(
                         request.url,
                         headers={
@@ -412,7 +405,6 @@ async def run(company: str) -> Optional[str]:
                     )
                     body = await resp.body()
                     status = resp.status
-                    # Fulfill back to the page as if CORS succeeded
                     await route.fulfill(
                         status=status,
                         body=body,
@@ -421,27 +413,26 @@ async def run(company: str) -> Optional[str]:
                     return
                 except Exception as e:
                     print(f"[ROUTE WARN] SmartSearch proxy failed: {e}")
-                    # Let it continue (will likely CORS-fail, but we tried)
             await route.continue_()
 
         await page.route("**/BseIndiaAPI/api/PeerSmartSearch/**", smartsearch_proxy)
 
-        # ---- Navigation with 403 warm-up ----
-        async def goto_with_status(url: str, timeout_ms: int = 2000) -> int:
-            resp = await page.goto(url, timeout=timeout_ms, wait_until="load")
+        # ---- Navigation with a realistic timeout ----
+        async def goto_with_status(url: str, timeout_ms: int = 8000) -> int:
+            resp = await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
             return resp.status if resp else 0
 
         status = 0
         try:
-            status = await goto_with_status(BSE_URL, 2000)
+            status = await goto_with_status(BSE_URL, 8000)
         except Exception as e:
             print(f"[WARN] Initial goto failed: {e}")
 
         if status == 403:
             try:
-                await goto_with_status(BSE_HOME, 2000)
-                await page.wait_for_timeout(1500)
-                status = await goto_with_status(BSE_URL, 2000)
+                await goto_with_status(BSE_HOME, 8000)
+                await page.wait_for_timeout(1000)
+                status = await goto_with_status(BSE_URL, 8000)
             except Exception as e:
                 print(f"[WARN] Warm-up attempt failed: {e}")
 
@@ -463,7 +454,7 @@ async def run(company: str) -> Optional[str]:
             except Exception:
                 continue
 
-        # 1) Smart Search -> pick first suggestion (now backed by our route proxy)
+        # 1) Smart Search -> pick first suggestion (backed by our route proxy)
         await fill_company_smart_search_and_pick_first(page, company)
 
         # 2) Result Period = Quarterly
@@ -478,7 +469,7 @@ async def run(company: str) -> Optional[str]:
         # 5) Wait results
         await wait_for_results(page)
 
-        # 6) Get only the FIRST XBRL link
+        # 6) FAST & CORRECT XBRL extraction
         first_url = await get_first_xbrl_url(page)
 
         await ctx.close()
@@ -494,7 +485,12 @@ async def get_xbrl_link(request: GetXBRLRequest):
     Returns JSON with the XBRL URL or null if not found.
     """
     try:
-        xbrl_url = await run(request.company)
+        company = (request.company or "").strip()
+        if not company:
+            raise HTTPException(status_code=400, detail="company is required")
+        xbrl_url = await run(company)
         return GetXBRLResponse(xbrl_url=xbrl_url)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

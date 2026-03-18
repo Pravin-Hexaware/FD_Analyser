@@ -3,8 +3,6 @@
 BSE Corporate Results -> Locate FIRST XBRL/iXBRL link for a company
 Option C: Keep Smart Search UX but fix CORS by routing the SmartSearch XHR via Playwright.
 This version fixes the `javascript:__doPostBack(...)` case by capturing the popup instead of resolving the href.
-Also: if the incoming value looks like a numeric BSE scrip code (4–6 digits),
-we bypass Smart Search and inject the scrip directly to avoid wrong matches (e.g., 500325 -> 500327).
 """
 
 import asyncio
@@ -19,7 +17,7 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeoutErro
 router = APIRouter()
 
 class GetXBRLRequest(BaseModel):
-    company: str  # can be a company name OR a numeric BSE scrip code
+    company: str
 
 class GetXBRLResponse(BaseModel):
     xbrl_url: Optional[str]
@@ -42,43 +40,6 @@ def extract_window_open_url(onclick: Optional[str]) -> Optional[str]:
     if m:
         return m.group(2)
     return None
-
-def looks_like_scrip(text: str) -> bool:
-    """
-    Return True if text is a pure 4–6 digit BSE scrip code (e.g., '500325', '532540').
-    """
-    return bool(re.fullmatch(r"\d{4,6}", (text or "").strip()))
-
-# ---------- Direct scrip injection ----------
-async def inject_scrip_code(page, scrip_code: str, display_name: Optional[str] = None) -> None:
-    """
-    Bypass Smart Search and inject scrip code directly in the hidden fields.
-    This avoids first-suggestion mismatches when the user passed an exact numeric scrip.
-    """
-    display = display_name or scrip_code
-    # Ensure the visible input exists (for UX consistency), then set hidden fields.
-    await page.evaluate(
-        """({ code, name }) => {
-            const inpt = document.getElementById('ContentPlaceHolder1_SmartSearch_smartSearch');
-            const h1 = document.getElementById('ContentPlaceHolder1_SmartSearch_hdnCode');
-            const h2 = document.getElementById('ContentPlaceHolder1_hf_scripcode');
-            const hn = document.getElementById('ContentPlaceHolder1_hf_scripname');
-            if (inpt) inpt.value = name || '';
-            if (h1) h1.value = code || '';
-            if (h2) h2.value = code || '';
-            if (hn) hn.value = name || '';
-        }""",
-        {"code": scrip_code.strip(), "name": display},
-    )
-    # Quick check that injection stuck
-    ok = await page.evaluate("""
-        () => {
-            const b = document.getElementById('ContentPlaceHolder1_hf_scripcode');
-            return !!(b && (b.value || '').trim().length > 0);
-        }
-    """)
-    if not ok:
-        raise RuntimeError("Failed to inject scrip code into hidden fields.")
 
 # ---------- Page actions ----------
 async def _wait_suggestions_have_text(page, sugg_box: str, timeout_ms: int = 600) -> bool:
@@ -137,23 +98,22 @@ async def _find_company_input(page) -> Optional[str]:
     return None
 
 async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
-    """
-    If `company` looks like a pure numeric scrip code, inject directly.
-    Otherwise, use Smart Search suggestions and click the first viable one (as before).
-    """
-    # ---- NEW: numeric scrip? -> direct injection, no Smart Search ----
-    if looks_like_scrip(company):
-        # Ensure the input exists (page loaded) before injecting
-        await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=4000)
-        await inject_scrip_code(page, company)
-        # Done; skip Smart Search path entirely
-        return
-
-    # ---- Original Smart Search flow for NAME input ----
+    print("[STEP] Locating Smart Search input...")
     input_sel = await _find_company_input(page)
     if not input_sel:
-        # (Diagnostics omitted for brevity)
+        print("[ERROR] Smart Search input NOT found.")
+        try:
+            await page.screenshot(path="debug_no_input.png", full_page=True)
+            html = await page.content()
+            with open("debug_no_input.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            print("[DEBUG] Saved debug_no_input.png and debug_no_input.html")
+        except Exception as e:
+            print(f"[DEBUG] Failed saving diagnostics: {e}")
+        print(f"[DEBUG] Current URL: {page.url}")
         raise RuntimeError("Smart Search input not found; see debug artifacts.")
+
+    print(f"[OK] Smart Search input located via selector: {input_sel}")
 
     sugg_box = "#ajax_response_smart"
 
@@ -163,8 +123,10 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
 
     # SPEED: type minimal characters to trigger suggestions
     company_for_typing = company if len(company) <= 5 else company[:5]
+    print(f"[STEP] Typing company: {company_for_typing}")
     await page.type(input_sel, company_for_typing, delay=10)
 
+    print("[STEP] Waiting for suggestions...")
     has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=600)
 
     if not has_suggestions:
@@ -206,6 +168,7 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
             pass
 
     if not clicked:
+        print("[WARN] Suggestion click failed; selecting via keyboard Enter...")
         await page.focus(input_sel)
         await page.keyboard.press("ArrowDown")
         await page.keyboard.press("Enter")
@@ -220,26 +183,32 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
                 const bv = (b && b.value || '').trim();
                 return (av.length > 0) || (bv.length > 0);
             }""",
-            timeout=1600
-        )
+        timeout=1600)
+        print("[OK] Hidden scrip code present.")
     except PWTimeoutError:
-        pass
+        print("[WARN] Hidden scrip code did not populate. Proceeding anyway.")
 
 async def set_result_period_quarterly(page) -> None:
+    print("[STEP] Setting Result Period = Quarterly...")
     sel = "#ContentPlaceHolder1_periioddd"
     await page.wait_for_selector(sel, timeout=1200)
     await page.select_option(sel, value="3")
+    print("[OK] Result Period set.")
 
 async def set_broadcast_period_beyond_1yr(page) -> None:
+    print("[STEP] Setting Broadcast Period = Beyond last 1 year...")
     sel = "#ContentPlaceHolder1_broadcastdd"
     await page.wait_for_selector(sel, timeout=1200)
     await page.select_option(sel, value="7")
+    print("[OK] Broadcast Period set.")
 
 async def click_submit(page) -> None:
+    print("[STEP] Submitting the form...")
     btn_sel = '#ContentPlaceHolder1_btnSubmit'
     await page.wait_for_selector(btn_sel, timeout=1200)
     async with page.expect_navigation(wait_until="domcontentloaded"):
         await page.click(btn_sel)
+    print("[OK] Submitted.")
 
 async def wait_for_results(page) -> None:
     try:
@@ -248,6 +217,7 @@ async def wait_for_results(page) -> None:
     except PWTimeoutError:
         try:
             await page.get_by_text(re.compile(r"No\s+Record\s+Found", re.I)).first.wait_for(timeout=1200)
+            print("[OK] 'No Record Found' message detected.")
             return
         except PWTimeoutError:
             await page.screenshot(path="debug_wait_for_results.png", full_page=True)
@@ -283,7 +253,7 @@ async def get_first_xbrl_url(page) -> Optional[str]:
     grid = None
     for sel in grid_candidates:
         try:
-            await page.wait_for_selector(sel, timeout=800)
+            await page.wait_for_selector(sel, timeout=2000)
             grid = page.locator(sel).first
             break
         except PWTimeoutError:
@@ -291,6 +261,7 @@ async def get_first_xbrl_url(page) -> Optional[str]:
 
     if grid is None:
         if await page.locator('text=/No\\s+Record\\s+Found/i').count():
+            print("[INFO] No records found for the given filters.")
             return None
         raise RuntimeError("Could not locate results table. Inspect DOM and update selectors.")
 
@@ -306,10 +277,13 @@ async def get_first_xbrl_url(page) -> Optional[str]:
         href = (await direct.get_attribute("href")) or ""
         if href and not href.lower().startswith("javascript:"):
             return await resolve_absolute_url(page, href)
+        # if direct matched but href is javascript (rare), fall through to click/popup
 
     # ---- B) lnkXML / label-based anchors ----
+    # Prefer typical ASP.NET link IDs first
     candidate = grid.locator('a[id*="lnkXML"]').first
     if not await candidate.count():
+        # fallback to any 'XBRL' labeled anchor
         candidate = grid.locator("a").filter(has_text=re.compile(r"\bXBRL\b", re.I)).first
 
     if await candidate.count():
@@ -325,7 +299,7 @@ async def get_first_xbrl_url(page) -> Optional[str]:
         if open_url:
             return await resolve_absolute_url(page, open_url)
 
-        # javascript:__doPostBack(...) -> click and capture popup
+        # If it's a javascript:__doPostBack(...) -> click and capture popup
         try:
             async with page.expect_popup() as pop_info:
                 await candidate.click()
@@ -345,6 +319,7 @@ async def get_first_xbrl_url(page) -> Optional[str]:
             # As a last resort, try clicking without popup and then inspect new anchors
             try:
                 await candidate.click()
+                # After postback, sometimes the hrefs become resolvable — try direct anchors again quickly
                 direct2 = grid.locator(direct_sel).first
                 if await direct2.count():
                     href2 = (await direct2.get_attribute("href")) or ""
@@ -353,6 +328,7 @@ async def get_first_xbrl_url(page) -> Optional[str]:
             except Exception:
                 pass
 
+    print("[INFO] No XBRL link found via fast selectors.")
     return None
 
 # ---------- Main runner ----------
@@ -478,7 +454,7 @@ async def run(company: str) -> Optional[str]:
             except Exception:
                 continue
 
-        # 1) If numeric -> inject; else Smart Search (backed by our route proxy)
+        # 1) Smart Search -> pick first suggestion (backed by our route proxy)
         await fill_company_smart_search_and_pick_first(page, company)
 
         # 2) Result Period = Quarterly
@@ -505,7 +481,7 @@ async def run(company: str) -> Optional[str]:
 async def get_xbrl_link(request: GetXBRLRequest):
     """
     Get the first XBRL link for a company from BSE Corporate Results page.
-    Expects JSON payload: {"company": "<Name or BSE scrip code>"}
+    Expects JSON payload: {"company": "Company Name"}
     Returns JSON with the XBRL URL or null if not found.
     """
     try:

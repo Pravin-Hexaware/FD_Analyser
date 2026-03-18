@@ -40,7 +40,6 @@ class GetXBRLRequest(BaseModel):
 
 class GetXBRLResponse(BaseModel):
     xbrl_url: Optional[str]
-    period: Optional[str] = None
     error: Optional[str] = None
     attempts: int = 0
     duration_ms: int = 0
@@ -59,7 +58,6 @@ class BatchGetXBRLRequest(BaseModel):
 class BatchItemResult(BaseModel):
     company: str
     xbrl_url: Optional[str] = None
-    period: Optional[str] = None
     error: Optional[str] = None
     attempts: int = 0
     duration_ms: int = 0
@@ -437,72 +435,10 @@ async def pick_std_con_column_anchor(grid, prefer: str):
         # First data row
         first_row = grid.locator("tbody tr").nth(0)
         return first_row.locator("td").nth(target_col).locator("a")
-        
     except Exception:
         return None
 
-async def _extract_period_from_anchor(anchor) -> Optional[str]:
-    """Try to extract a period token (e.g. DQ2025-2026) from the same row as the given anchor."""
-    if not anchor:
-        return None
-    try:
-        row = anchor.locator("xpath=ancestor::tr").first
-
-        # Prefer a canonical period token in the row (e.g. DQ2025-2026)
-        row_text = (await row.inner_text() or "").strip()
-        if row_text:
-            m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", row_text)
-            if m:
-                return m.group(0)
-
-        # Prefer the 3rd column (index 2) which often contains the period
-        tds = row.locator("td")
-        n = await tds.count()
-        if n >= 3:
-            td3 = tds.nth(2)
-            txt = (await td3.inner_text() or "").strip()
-            if txt:
-                m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", txt)
-                if m:
-                    return m.group(0)
-                return txt
-
-        # Prefer a dedicated "period" column if present (e.g., <td class="tdcolumn">...)</td>).
-        period_td = row.locator('td.tdcolumn').first
-        if await period_td.count():
-            txt = (await period_td.inner_text() or "").strip()
-            if txt:
-                m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", txt)
-                if m:
-                    return m.group(0)
-                return txt
-
-        # Fallback: look for the first cell containing a period-like token
-        for i in range(n):
-            td = tds.nth(i)
-            if await td.locator("a").count():
-                continue
-            txt = (await td.inner_text() or "").strip()
-            if not txt:
-                continue
-            m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", txt)
-            if m:
-                return m.group(0)
-
-        # Last fallback: return first non-link cell (shorten if huge)
-        for i in range(n):
-            td = tds.nth(i)
-            if await td.locator("a").count():
-                continue
-            txt = (await td.inner_text() or "").strip()
-            if txt:
-                return txt.strip().splitlines()[0]
-    except Exception:
-        pass
-    return None
-
-
-async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], Optional[str]]:
+async def get_first_xbrl_url(page, prefer: str = "any") -> Optional[str]:
     """
     Exhaustive strategy:
       1) If Std/Con header recognized (prefer), pick exact cell anchor.
@@ -512,8 +448,6 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
       5) Scan network for /XBRLFILES/ requests.
       6) Same-tab navigation check -> wait_for_url(regex).
       7) Re-scan direct anchors.
-
-    Returns (xbrl_url, period)
     """
     # 0) Locate grid
     grid = None
@@ -531,7 +465,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
     if grid is None:
         # maybe 'No Record Found'
         if await page.locator('text=/No\\s+Record\\s+Found/i').count():
-            return None, None
+            return None
         raise RuntimeError("Could not locate results table.")
 
     async def _resolve(url: Optional[str]) -> Optional[str]:
@@ -553,7 +487,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
             if href0 and not href0.lower().startswith("javascript:"):
                 url0 = await _resolve(href0)
                 if url0:
-                    return url0, await _extract_period_from_anchor(c_anchor.first)
+                    return url0
             # else click this exact anchor and continue the general flow using candidate
             candidate = c_anchor.first
         else:
@@ -574,7 +508,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         if href and not href.lower().startswith("javascript:"):
             url = await _resolve(href)
             if url:
-                return url, await _extract_period_from_anchor(direct)
+                return url
 
     # 3) Candidate anchor selection if not already chosen
     if candidate is None:
@@ -582,7 +516,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         if not await candidate.count():
             candidate = grid.locator("a").filter(has_text=re.compile(r"\bXBRL\b", re.I)).first
         if not await candidate.count():
-            return None, None
+            return None
 
     # Clear previous window.open captures
     try:
@@ -619,14 +553,14 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
     if popup_url:
         url = await _resolve(popup_url)
         if url:
-            return url, await _extract_period_from_anchor(candidate)
+            return url
 
     # 5) window.open captured URL
     try:
         opened = await page.evaluate("() => (window.__openedWindows__ || []).slice(-1)[0] || ''")
         url = await _resolve(opened)
         if url:
-            return url, await _extract_period_from_anchor(candidate)
+            return url
     except Exception:
         pass
 
@@ -635,7 +569,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         await page.wait_for_url(re.compile(r".*XBRLFILES.*", re.I), timeout=1500)
         url = await _resolve(page.url)
         if url:
-            return url, await _extract_period_from_anchor(candidate)
+            return url
     except Exception:
         pass
 
@@ -645,7 +579,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         if candidates:
             url = await _resolve(candidates[-1])
             if url:
-                return url, await _extract_period_from_anchor(candidate)
+                return url
     except Exception:
         pass
 
@@ -657,16 +591,183 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
             if href2 and not href2.lower().startswith("javascript:"):
                 url = await _resolve(href2)
                 if url:
-                    return url, await _extract_period_from_anchor(direct2)
+                    return url
     except Exception:
         pass
 
-    return None, None
+    return None
+
+async def get_latest_std_xbrl_urls(page, max_urls: int = 5) -> List[str]:
+    """Return up to `max_urls` URLs from the Std XBRL column (latest first)."""
+
+    # Reuse grid detection logic from get_first_xbrl_url
+    grid = None
+    for sel in [
+        '#ContentPlaceHolder1_gvData',
+        'table:has(th:has-text("XBRL"))',
+        'table:has-text("Std XBRL"), table:has-text("Con XBRL")',
+    ]:
+        try:
+            await page.wait_for_selector(sel, timeout=1500)
+            grid = page.locator(sel).first
+            break
+        except PWTimeoutError:
+            continue
+    if grid is None:
+        return []
+
+    async def _resolve(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        low = strip_lower(url)
+        if low.endswith("comp_resultsnew.aspx"):
+            return None
+        if url.startswith("http"):
+            return url
+        return await resolve_absolute_url(page, url)
+
+    # Determine Std XBRL column index (prefer std, but fallback to any xbrl link)
+    col_index = None
+    try:
+        header_cells = grid.locator("thead tr th")
+        n_th = await header_cells.count()
+        for i in range(n_th):
+            txt = strip_lower(await header_cells.nth(i).inner_text() or "")
+            if "std" in txt and "xbrl" in txt:
+                col_index = i
+                break
+    except Exception:
+        col_index = None
+
+    urls: List[str] = []
+    rows = grid.locator("tbody tr")
+    row_count = await rows.count()
+
+    # Helper to click an anchor and capture any resulting XBRL URL(s).
+    async def _capture_from_click(anchor) -> Optional[str]:
+        # Try direct href first
+        href = (await anchor.get_attribute("href")) or ""
+        if href and not href.lower().startswith("javascript:"):
+            resolved = await _resolve(href)
+            if resolved:
+                return resolved
+
+        # Reset captured sources
+        try:
+            await page.evaluate("() => { window.__openedWindows__ = []; }")
+        except Exception:
+            pass
+
+        initial_url = page.url
+        popup_url = None
+
+        # Try popup click (if any)
+        try:
+            async with page.expect_popup() as pop_info:
+                await anchor.click()
+            pop = await pop_info.value
+            try:
+                await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
+            except Exception:
+                pass
+            popup_url = pop.url
+            try:
+                await pop.close()
+            except Exception:
+                pass
+        except Exception:
+            # Fallback: click normally
+            try:
+                await anchor.click()
+            except Exception:
+                pass
+
+        await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
+
+        # 1) Popup URL
+        if popup_url:
+            resolved = await _resolve(popup_url)
+            if resolved:
+                return resolved
+
+        # 2) window.open captured
+        try:
+            opened = await page.evaluate("() => (window.__openedWindows__ || []).slice(-1)[0] || ''")
+            resolved = await _resolve(opened)
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+
+        # 3) Network sniff
+        try:
+            candidates = [u for u in getattr(page, "__xbrl_requests__", []) if "XBRLFILES" in u.upper()]
+            if candidates:
+                resolved = await _resolve(candidates[-1])
+                if resolved:
+                    return resolved
+        except Exception:
+            pass
+
+        # 4) Same-tab navigation (unlikely for Std XBRL, but safe)
+        try:
+            if "XBRLFILES" in page.url.upper():
+                resolved = await _resolve(page.url)
+                if resolved:
+                    return resolved
+        except Exception:
+            pass
+
+        # Try to return to previous results page if we navigated away
+        try:
+            if page.url != initial_url and "XBRLFILES" not in page.url.upper():
+                await page.go_back()
+                await page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+        return None
+
+    # Iterate over rows, collecting URLs (stop when max_urls reached)
+    for i in range(min(row_count, max_urls * 3)):
+        if len(urls) >= max_urls:
+            break
+        try:
+            row = rows.nth(i)
+            if col_index is not None:
+                cell = row.locator("td").nth(col_index)
+                anchors = cell.locator("a")
+            else:
+                anchors = row.locator(
+                    'a[href*="XBRLFILES" i], '
+                    'a[href$=".xml" i], '
+                    'a[href$=".html" i], '
+                    'a[href$=".zip" i]'
+                )
+
+            if not await anchors.count():
+                # Try fallback: elements with inline onclick that may trigger XBRL download
+                anchors = cell.locator("*[onclick*='XBRL' i], *[onclick*='xbrl' i]")
+                if not await anchors.count():
+                    continue
+
+            for j in range(await anchors.count()):
+                if len(urls) >= max_urls:
+                    break
+                anchor = anchors.nth(j)
+                resolved = await _capture_from_click(anchor)
+                if resolved and resolved not in urls:
+                    urls.append(resolved)
+        except Exception:
+            continue
+
+    return urls[:max_urls]
+
 
 # -------------------- Core per-company attempt loop --------------------
-async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tuple[Optional[str], Optional[str], int]:
+async def fetch_hist_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tuple[Optional[str], int]:
     """
-    Returns (url, period, attempts_used). Tries multiple broadcast periods and multiple attempts until found.
+    Returns (url, attempts_used). Tries multiple broadcast periods and multiple attempts until found.
     """
     attempts = 0
     start_t = time.perf_counter()
@@ -701,21 +802,20 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 await submit_form(page)
                 await wait_grid_ready(page)
 
-                url, period = await get_first_xbrl_url(page, prefer=prefer)
+                url = await get_first_xbrl_url(page, prefer=prefer)
                 # Guard: never return Comp_Results page
                 if url:
                     low_curr = strip_lower(page.url)
                     low_url  = strip_lower(url)
                     if low_url == low_curr or low_url.endswith("comp_resultsnew.aspx"):
                         url = None
-                        period = None
                 if url:
                     # success
                     try:
                         await page.close()
                     except Exception:
                         pass
-                    return url, period, attempts
+                    return url, attempts
 
             # no url; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
@@ -732,7 +832,77 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 pass
 
     # All attempts exhausted
-    return None, None, attempts
+    return None, attempts
+
+
+async def fetch_hist_xbrl_for_company_multi(
+    ctx,
+    company: str,
+    prefer: str = "any",
+    max_urls: int = 5,
+) -> Tuple[List[str], int]:
+    """Returns (urls, attempts_used). Tries multiple broadcast periods and multiple attempts until found.
+
+    The returned list is (up to) `max_urls` results from the Std XBRL column for the latest filings.
+    """
+    attempts = 0
+
+    # Outer attempt loop
+    while attempts < MAX_ATTEMPTS_PER_COMPANY:
+        attempts += 1
+        page = await prepare_page(ctx)
+        try:
+            await navigate_and_prepare(page)
+
+            # if numeric -> inject; else resolve scrip via API, else UI SmartSearch
+            if looks_like_scrip(company):
+                await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
+                await inject_scrip_code(page, company)
+            else:
+                # try server-side API for deterministic scrip
+                scrip = await resolve_scrip_via_api(ctx, company)
+                if scrip:
+                    await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
+                    await inject_scrip_code(page, scrip, display_name=company)
+                else:
+                    # UI SmartSearch
+                    await smartsearch_fill(page, company)
+
+            # Set result period
+            await set_result_period(page)
+
+            # try multiple broadcast periods (beyond 1y -> 1y -> 6m -> 3m -> 1m)
+            for bp in BROADCAST_PERIODS:
+                await set_broadcast_period(page, bp)
+                await submit_form(page)
+                await wait_grid_ready(page)
+
+                urls = await get_latest_std_xbrl_urls(page, max_urls=max_urls)
+                urls = [u for u in urls if u and not strip_lower(u).endswith("comp_resultsnew.aspx")]
+                if urls:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                    return urls, attempts
+
+            # no urls; next attempt after cooldown
+            await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
+
+        except Exception:
+            try:
+                await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
+            except Exception:
+                pass
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    # All attempts exhausted
+    return [], attempts
+
 
 # -------------------- Public single-company runner --------------------
 async def run_single(company: str, prefer: str = "any") -> GetXBRLResponse:
@@ -740,96 +910,11 @@ async def run_single(company: str, prefer: str = "any") -> GetXBRLResponse:
     async with async_playwright() as p:
         browser, ctx = await create_browser_and_context(p)
         try:
-            url, period, attempts = await fetch_xbrl_for_company(ctx, company, prefer=prefer)
+            url, attempts = await fetch_hist_xbrl_for_company(ctx, company, prefer=prefer)
             dur = int((time.perf_counter() - started) * 1000)
             if url:
-                return GetXBRLResponse(
-                    xbrl_url=url,
-                    period=period,
-                    error=None,
-                    attempts=attempts,
-                    duration_ms=dur,
-                )
-            return GetXBRLResponse(
-                xbrl_url=None,
-                period=None,
-                error="No XBRL link found after exhaustive attempts.",
-                attempts=attempts,
-                duration_ms=dur,
-            )
+                return GetXBRLResponse(xbrl_url=url, error=None, attempts=attempts, duration_ms=dur)
+            return GetXBRLResponse(xbrl_url=None, error="No XBRL link found after exhaustive attempts.", attempts=attempts, duration_ms=dur)
         finally:
             await ctx.close()
             await browser.close()
-
-# -------------------- FastAPI endpoints --------------------
-@router.post("/get-xbrl-link", response_model=GetXBRLResponse)
-async def get_xbrl_link(request: GetXBRLRequest):
-    """
-    Get the first XBRL link for a single company/scrip.
-    Body: {"company": "<Name or BSE scrip code>", "prefer": "Std|Con|Any"}
-    """
-    company = (request.company or "").strip()
-    if not company:
-        raise HTTPException(status_code=400, detail="company is required")
-    return await run_single(company, prefer=request.prefer)
-
-@router.post("/get-xbrl-links", response_model=BatchGetXBRLResponse)
-async def get_xbrl_links(request: BatchGetXBRLRequest):
-    """
-    Batch: Get the first XBRL link for many companies/scrip codes.
-    Body:
-    {
-      "companies": ["500325", "Tata Consultancy Services Ltd", "Hexaware Technologies Limited"],
-      "prefer": "Any",
-      "parallel": 2
-    }
-    """
-    companies = [c.strip() for c in (request.companies or []) if c and c.strip()]
-    if not companies:
-        raise HTTPException(status_code=400, detail="companies must be a non-empty list")
-
-    parallel = request.parallel or 2
-    prefer   = request.prefer
-
-    results: List[BatchItemResult] = []
-    async with async_playwright() as p:
-        browser, ctx = await create_browser_and_context(p)
-        sem = asyncio.Semaphore(parallel)
-
-        async def work(name: str) -> BatchItemResult:
-            started = time.perf_counter()
-            attempts_used = 0
-            try:
-                async with sem:
-                    url, period, attempts_used = await fetch_xbrl_for_company(ctx, name, prefer=prefer)
-                dur = int((time.perf_counter() - started) * 1000)
-                if url:
-                    return BatchItemResult(
-                        company=name,
-                        xbrl_url=url,
-                        period=period,
-                        error=None,
-                        attempts=attempts_used,
-                        duration_ms=dur,
-                    )
-                return BatchItemResult(
-                    company=name,
-                    xbrl_url=None,
-                    period=None,
-                    error="No XBRL link found after exhaustive attempts.",
-                    attempts=attempts_used,
-                    duration_ms=dur,
-                )
-            except Exception as e:
-                dur = int((time.perf_counter() - started) * 1000)
-                return BatchItemResult(company=name, xbrl_url=None, period=None, error=str(e), attempts=attempts_used, duration_ms=dur)
-
-        try:
-            tasks = [asyncio.create_task(work(c)) for c in companies]
-            per = await asyncio.gather(*tasks)
-            results.extend(per)
-        finally:
-            await ctx.close()
-            await browser.close()
-
-    return BatchGetXBRLResponse(results=results)

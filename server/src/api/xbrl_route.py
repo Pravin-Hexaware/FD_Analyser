@@ -191,9 +191,22 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     def G(key: str) -> Optional[Decimal]:
         return _first_by_keys(oned, NUMERIC_SYNONYMS.get(key, []))
 
+    # Fallback fuzzy lookup for missing numbers (tries to match key fragments)
+    def fuzzy_numeric(key: str, patterns: List[str]) -> Optional[Decimal]:
+        if key in oned and oned[key] is not None:
+            return oned[key]
+        low_keys = list(oned.keys())
+        for p in patterns:
+            for k in low_keys:
+                if p in k:
+                    v = oned.get(k)
+                    if v is not None:
+                        return v
+        return None
+
     # 3) Resolve fields
-    Sales = G("sales")
-    OtherIncome = G("other_income")
+    Sales = G("sales") or fuzzy_numeric("sales", ["revenue", "turnover", "sales"])
+    OtherIncome = G("other_income") or fuzzy_numeric("other_income", ["otherincome", "nonoperating"])
 
     CostMaterials = G("cost_of_materials") or Decimal(0)
     PurchasesTraded = G("purchases_traded") or Decimal(0)
@@ -205,12 +218,12 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Screener-style Operating Expenses (before depreciation)
     Expenses = CostMaterials + PurchasesTraded + InventoryChange + Employee + PowerFuel + OtherExpenses
 
-    FinanceCosts = G("finance_costs")
-    Depreciation = G("depreciation")
-    PBT = G("pbt")
-    TaxAmount = G("tax_expense")
-    NetProfit = G("net_profit")
-    EPS = G("eps_basic")
+    FinanceCosts = G("finance_costs") or fuzzy_numeric("finance_costs", ["interest", "finance"])
+    Depreciation = G("depreciation") or fuzzy_numeric("depreciation", ["depreciation", "amortisation"])
+    PBT = G("pbt") or fuzzy_numeric("pbt", ["profitbeforetax", "pbt"])
+    TaxAmount = G("tax_expense") or fuzzy_numeric("tax_expense", ["taxexpense", "tax"])
+    NetProfit = G("net_profit") or fuzzy_numeric("net_profit", ["netprofit", "profitloss"])
+    EPS = G("eps_basic") or fuzzy_numeric("eps_basic", ["eps", "earningspershare"])
 
     # OperatingProfit = EBITDA = Sales - Expenses
     OperatingProfit = None

@@ -1,7 +1,7 @@
 import asyncio
 import csv
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -10,6 +10,9 @@ from api.batch_xbrl_finder import (
     create_browser_and_context,
     fetch_xbrl_for_company,
 )
+from api.xbrl_route import calculate_metrics
+from service.html_extraction_service import extract_html_data
+from service.xml_extraction_service import extract_xbrl_data
 
 router = APIRouter()
 
@@ -116,6 +119,98 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
 
     except WebSocketDisconnect:
         # Client disconnected
+        pass
+    except Exception as e:
+        await websocket.send_json({"error": str(e)})
+        await websocket.close()
+    finally:
+        try:
+            repo.close()
+        except Exception:
+            pass
+
+
+@router.websocket("/ws/xbrl-extract-from-db")
+async def websocket_extract_from_db(websocket: WebSocket) -> None:
+    """WebSocket endpoint: read XBRL URLs from DB, extract metrics, and store them in a second table."""
+    await websocket.accept()
+
+    repo = SqliteRepository()
+
+    try:
+        await websocket.send_json({"status": "starting"})
+
+        filings = repo.get_xbrl_filings()
+        await websocket.send_json({"status": "found_filings", "count": len(filings)})
+
+        for idx, f in enumerate(filings, start=1):
+            scrip_code = f.get("scrip_code")
+            xbrl_link = f.get("xbrl_link")
+
+            if not scrip_code or not xbrl_link:
+                continue
+
+            if repo.xbrl_extraction_exists(scrip_code, xbrl_link):
+                await websocket.send_json({
+                    "idx": idx,
+                    "scrip_code": scrip_code,
+                    "xbrl_link": xbrl_link,
+                    "status": "skipped_already_extracted",
+                })
+                continue
+
+            try:
+                if xbrl_link.lower().endswith(".xml"):
+                    extracted = extract_xbrl_data(xbrl_link, only_prefix=None)
+                    data_type = "xml"
+                else:
+                    extracted = extract_html_data(xbrl_link)
+                    data_type = "html"
+
+                metrics = calculate_metrics(extracted)
+
+                repo.insert_xbrl_extraction(
+                    scrip_code=scrip_code,
+                    xbrl_link=xbrl_link,
+                    company_name=metrics.get("company_name"),
+                    company_symbol=metrics.get("company_symbol"),
+                    currency=metrics.get("currency"),
+                    level_of_rounding=metrics.get("level_of_rounding"),
+                    reporting_type=metrics.get("reporting_type"),
+                    nature_of_report=metrics.get("NatureOfReport"),
+                    sales=metrics.get("Sales"),
+                    expenses=metrics.get("Expenses"),
+                    operating_profit=metrics.get("OperatingProfit"),
+                    opm_percentage=metrics.get("OPM_percentage"),
+                    other_income=metrics.get("OtherIncome"),
+                    interest=metrics.get("Interest"),
+                    depreciation=metrics.get("Depreciation"),
+                    profit_before_tax=metrics.get("ProfitBeforeTax"),
+                    tax=metrics.get("Tax"),
+                    tax_percent=metrics.get("Tax_percent"),
+                    net_profit=metrics.get("NetProfit"),
+                    eps_in_rs=metrics.get("EPS_in_RS"),
+                )
+
+                await websocket.send_json({
+                    "idx": idx,
+                    "scrip_code": scrip_code,
+                    "xbrl_link": xbrl_link,
+                    "status": "extracted",
+                    "metrics": metrics,
+                })
+
+            except Exception as e:
+                await websocket.send_json({
+                    "idx": idx,
+                    "scrip_code": scrip_code,
+                    "xbrl_link": xbrl_link,
+                    "error": str(e),
+                })
+
+        await websocket.send_json({"status": "complete"})
+
+    except WebSocketDisconnect:
         pass
     except Exception as e:
         await websocket.send_json({"error": str(e)})

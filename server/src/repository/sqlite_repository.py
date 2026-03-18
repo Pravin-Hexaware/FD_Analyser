@@ -42,6 +42,34 @@ class SqliteRepository:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS xbrl_extraction_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scrip_code TEXT,
+                xbrl_link TEXT,
+                company_name TEXT,
+                company_symbol TEXT,
+                currency TEXT,
+                level_of_rounding TEXT,
+                reporting_type TEXT,
+                nature_of_report TEXT,
+                sales REAL,
+                expenses REAL,
+                operating_profit REAL,
+                opm_percentage REAL,
+                other_income REAL,
+                interest REAL,
+                depreciation REAL,
+                profit_before_tax REAL,
+                tax REAL,
+                tax_percent REAL,
+                net_profit REAL,
+                eps_in_rs REAL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
         self._conn.commit()
 
     def upsert_company(
@@ -85,6 +113,104 @@ class SqliteRepository:
             (scrip_code, xbrl_link),
         )
         return cur.fetchone() is not None
+
+    def get_xbrl_filings(self, scrip_code: str | None = None) -> list[dict]:
+        cur = self._conn.cursor()
+        if scrip_code:
+            cur.execute(
+                "SELECT scrip_code, symbol, xbrl_link FROM xbrl_filing_table WHERE scrip_code = ?",
+                (scrip_code,),
+            )
+        else:
+            cur.execute(
+                "SELECT scrip_code, symbol, xbrl_link FROM xbrl_filing_table"
+            )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def xbrl_extraction_exists(self, scrip_code: str, xbrl_link: str) -> bool:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM xbrl_extraction_table WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
+            (scrip_code, xbrl_link),
+        )
+        return cur.fetchone() is not None
+
+    def insert_xbrl_extraction(
+        self,
+        scrip_code: str,
+        xbrl_link: str,
+        company_name: Optional[str] = None,
+        company_symbol: Optional[str] = None,
+        currency: Optional[str] = None,
+        level_of_rounding: Optional[str] = None,
+        reporting_type: Optional[str] = None,
+        nature_of_report: Optional[str] = None,
+        sales: Optional[float] = None,
+        expenses: Optional[float] = None,
+        operating_profit: Optional[float] = None,
+        opm_percentage: Optional[float] = None,
+        other_income: Optional[float] = None,
+        interest: Optional[float] = None,
+        depreciation: Optional[float] = None,
+        profit_before_tax: Optional[float] = None,
+        tax: Optional[float] = None,
+        tax_percent: Optional[float] = None,
+        net_profit: Optional[float] = None,
+        eps_in_rs: Optional[float] = None,
+    ) -> int:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO xbrl_extraction_table (
+                scrip_code,
+                xbrl_link,
+                company_name,
+                company_symbol,
+                currency,
+                level_of_rounding,
+                reporting_type,
+                nature_of_report,
+                sales,
+                expenses,
+                operating_profit,
+                opm_percentage,
+                other_income,
+                interest,
+                depreciation,
+                profit_before_tax,
+                tax,
+                tax_percent,
+                net_profit,
+                eps_in_rs
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scrip_code,
+                xbrl_link,
+                company_name,
+                company_symbol,
+                currency,
+                level_of_rounding,
+                reporting_type,
+                nature_of_report,
+                sales,
+                expenses,
+                operating_profit,
+                opm_percentage,
+                other_income,
+                interest,
+                depreciation,
+                profit_before_tax,
+                tax,
+                tax_percent,
+                net_profit,
+                eps_in_rs,
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
 
     def insert_xbrl_filing(
         self,

@@ -68,44 +68,81 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
                                 industry=industry,
                             )
 
-                        # Fetch XBRL URL using the comprehensive batch_xbrl_finder strategy
-                        xbrl_url = None
-                        period = None
-                        attempts = 0
+                        # Fetch quarterly report first and store each result separately
+                        q_url = None
+                        q_period = None
+                        q_attempts = 0
+                        q_id = None
                         try:
-                            xbrl_url, period, attempts = await fetch_xbrl_for_company(ctx, scrip_code, prefer="any")
+                            q_url, q_period, q_attempts, _, _ = await fetch_xbrl_for_company(ctx, scrip_code, prefer="quarterly")
                         except Exception as e:
-                            await websocket.send_json(
-                                {
-                                    "idx": idx,
-                                    "scrip_code": scrip_code,
-                                    "symbol": symbol,
-                                    "error": str(e),
-                                }
-                            )
+                            await websocket.send_json({"idx": idx, "scrip_code": scrip_code, "symbol": symbol, "report_type": "quarterly", "error": str(e)})
 
-                        stored = False
-                        if xbrl_url:
-                            if repo.xbrl_filing_exists(scrip_code, xbrl_url):
-                                stored = True
+                        q_stored = False
+                        if q_url:
+                            if repo.xbrl_filing_exists(scrip_code, q_url, report_type="quarterly"):
+                                q_stored = True
+                                q_id = repo.get_xbrl_filing_id(scrip_code, q_url, report_type="quarterly")
                             else:
-                                repo.insert_xbrl_filing(
+                                q_id = repo.insert_xbrl_filing(
                                     scrip_code=scrip_code,
                                     symbol=symbol,
-                                    xbrl_link=xbrl_url,
-                                    publication_date=period,
+                                    xbrl_link=q_url,
+                                    publication_date=q_period,
+                                    report_type="quarterly",
                                 )
-                                stored = True
+                                q_stored = True
 
                         await websocket.send_json(
                             {
                                 "idx": idx,
                                 "scrip_code": scrip_code,
                                 "symbol": symbol,
-                                "xbrl_url": xbrl_url,
-                                "period": period,
-                                "stored": stored,
-                                "attempts": attempts,
+                                "report_type": "quarterly",
+                                "period": q_period,
+                                "url": q_url,
+                                "id": q_id,
+                                "stored": q_stored,
+                                "attempts": q_attempts,
+                            }
+                        )
+
+                        # Fetch annual report after quarterly and store it too
+                        a_url = None
+                        a_period = None
+                        a_attempts = 0
+                        a_id = None
+                        try:
+                            a_url, a_period, a_attempts, _, _ = await fetch_xbrl_for_company(ctx, scrip_code, prefer="annual")
+                        except Exception as e:
+                            await websocket.send_json({"idx": idx, "scrip_code": scrip_code, "symbol": symbol, "report_type": "annual", "error": str(e)})
+
+                        a_stored = False
+                        if a_url:
+                            if repo.xbrl_filing_exists(scrip_code, a_url, report_type="annual"):
+                                a_stored = True
+                                a_id = repo.get_xbrl_filing_id(scrip_code, a_url, report_type="annual")
+                            else:
+                                a_id = repo.insert_xbrl_filing(
+                                    scrip_code=scrip_code,
+                                    symbol=symbol,
+                                    xbrl_link=a_url,
+                                    publication_date=a_period,
+                                    report_type="annual",
+                                )
+                                a_stored = True
+
+                        await websocket.send_json(
+                            {
+                                "idx": idx,
+                                "scrip_code": scrip_code,
+                                "symbol": symbol,
+                                "report_type": "annual",
+                                "period": a_period,
+                                "url": a_url,
+                                "id": a_id,
+                                "stored": a_stored,
+                                "attempts": a_attempts,
                             }
                         )
 

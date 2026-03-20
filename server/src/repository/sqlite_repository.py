@@ -38,6 +38,7 @@ class SqliteRepository:
                 symbol TEXT,
                 xbrl_link TEXT,
                 publication_date TEXT,
+                report_type TEXT,
                 created_at TEXT DEFAULT (datetime('now'))
             );
             """
@@ -106,13 +107,34 @@ class SqliteRepository:
         )
         return cur.fetchone() is not None
 
-    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str) -> bool:
+    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None) -> bool:
         cur = self._conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
-            (scrip_code, xbrl_link),
-        )
+        if report_type is None:
+            cur.execute(
+                "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
+                (scrip_code, xbrl_link),
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? AND report_type = ? LIMIT 1",
+                (scrip_code, xbrl_link, report_type),
+            )
         return cur.fetchone() is not None
+
+    def get_xbrl_filing_id(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None) -> Optional[int]:
+        cur = self._conn.cursor()
+        if report_type is None:
+            cur.execute(
+                "SELECT id FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
+                (scrip_code, xbrl_link),
+            )
+        else:
+            cur.execute(
+                "SELECT id FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? AND report_type = ? LIMIT 1",
+                (scrip_code, xbrl_link, report_type),
+            )
+        row = cur.fetchone()
+        return row[0] if row else None
 
     def get_xbrl_filings(self, scrip_code: str | None = None) -> list[dict]:
         cur = self._conn.cursor()
@@ -218,14 +240,15 @@ class SqliteRepository:
         symbol: Optional[str],
         xbrl_link: str,
         publication_date: Optional[str] = None,
+        report_type: Optional[str] = None,
     ) -> int:
         cur = self._conn.cursor()
         cur.execute(
             """
-            INSERT INTO xbrl_filing_table (scrip_code, symbol, xbrl_link, publication_date)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO xbrl_filing_table (scrip_code, symbol, xbrl_link, publication_date, report_type)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (scrip_code, symbol, xbrl_link, publication_date),
+            (scrip_code, symbol, xbrl_link, publication_date, report_type),
         )
         self._conn.commit()
         return cur.lastrowid

@@ -242,16 +242,21 @@ def extract_ix_facts_from_root(root: ET._Element) -> List[Dict[str, Any]]:
         pre = getattr(ix, "prefix", None)
         if pre is not None and pre.lower() not in ALLOWED_INLINE_PREFIXES:
             continue
-        # must have @name (QName of concept)
-        qn = get_attr(ix, "name")
-        if not qn:
-            continue
 
         contextref = get_attr(ix, "contextRef", "contextref")
         unitref    = get_attr(ix, "unitRef", "unitref")
         scale      = get_attr(ix, "scale")
         decimals   = get_attr(ix, "decimals")
-        _, loc     = split_qname(qn)
+
+        # Prefer concept QName from @name; otherwise fall back to element tag
+        qn = get_attr(ix, "name")
+        if qn:
+            _, loc = split_qname(qn)
+        else:
+            tag_local = ix.tag.split("}")[-1] if isinstance(ix.tag, str) else ""
+            qn = f"{pre}:{tag_local}" if pre else tag_local
+            loc = tag_local
+
         value_text = text_content(ix)
 
         is_nonfraction = isinstance(ix.tag, str) and ix.tag.lower().endswith("nonfraction")
@@ -276,6 +281,44 @@ def extract_ix_facts_from_root(root: ET._Element) -> List[Dict[str, Any]]:
                 "decimals": decimals,
                 "value": value_text,
             })
+    if not rows:
+        # Fallback: some iXBRL variants use direct taxonomy elements with contextRef/unitRef, not ix:nonfraction/nonnumeric wrappers.
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            local = el.tag.split('}')[-1].lower() if '}' in el.tag else el.tag.lower()
+            if local in ('html', 'head', 'body', 'div', 'span', 'script', 'style', 'meta', 'link', 'title', 'a', 'p', 'br'):
+                continue
+            if local in ('context', 'entity', 'period', 'scenario', 'segment', 'identifier'):
+                continue
+            contextref = get_attr(el, 'contextRef', 'contextref')
+            if not contextref:
+                continue
+            unitref = get_attr(el, 'unitRef', 'unitref')
+            scale = get_attr(el, 'scale')
+            decimals = get_attr(el, 'decimals')
+            qn = get_attr(el, 'name')
+            if qn:
+                _, loc = split_qname(qn)
+            else:
+                qn = f"{el.prefix}:{local}" if getattr(el, 'prefix', None) else local
+                loc = local
+
+            value = text_content(el).strip()
+            if value == '':
+                continue
+            is_nonfraction = unitref is not None or local not in ('ix:header', 'ix:references')
+            parsed = parse_indian_number(value) if is_nonfraction else None
+            rows.append({
+                'qname': qn,
+                'localname': loc,
+                'contextref': contextref,
+                'unitref': unitref,
+                'scale': scale,
+                'decimals': decimals,
+                'value': parsed if (parsed is not None) else value,
+            })
+
     return rows
 
 
@@ -414,5 +457,6 @@ def extract_html_data(url: str) -> List[Dict[str, Any]]:
         # Nothing found
         return []
 
-    except Exception:
-        return []
+    except Exception as e:
+        log(f"extract_html_data failed for {url}: {type(e).__name__}: {e}")
+        raise

@@ -27,19 +27,35 @@ class CompanyMetrics(BaseModel):
     level_of_rounding: Optional[str] = None
     reporting_type: Optional[str] = None
     NatureOfReport: Optional[str] = None
-    Sales: Optional[float] = None
-    Expenses: Optional[float] = None            # Screener-style Operating Expenses (before depreciation)
-    OperatingProfit: Optional[float] = None     # EBITDA (Screener shows this as Operating Profit)
-    OPM_percentage: Optional[float] = None      # EBITDA / Sales * 100
+
+    # Top-line & operating block
+    Sales: Optional[float] = None                     # Revenue from operations
+    Expenses: Optional[float] = None                  # Operating expenses (before depreciation)
+    OperatingProfit: Optional[float] = None           # EBITDA
+    OPM_percentage: Optional[float] = None            # EBITDA / Sales * 100
+
+    # Components explicitly requested
     OtherIncome: Optional[float] = None
-    Interest: Optional[float] = None            # Finance Costs
+    CostOfMaterialsConsumed: Optional[float] = None
+    EmployeeBenefitExpense: Optional[float] = None
+    OtherExpenses: Optional[float] = None
+
+    # Below operating line
+    Interest: Optional[float] = None                  # Finance Costs
     Depreciation: Optional[float] = None
+
+    # Profit & tax
     ProfitBeforeTax: Optional[float] = None
-    Tax: Optional[float] = None                 # Tax Amount
-    Tax_percent: Optional[float] = None         # (Tax / PBT) * 100
-    NetProfit: Optional[float] = None           # ProfitLossForPeriod
+    CurrentTax: Optional[float] = None
+    DeferredTax: Optional[float] = None
+    Tax: Optional[float] = None                       # Total tax expense
+    Tax_percent: Optional[float] = None               # (Tax / PBT) * 100
+
+    # Bottom-line & EPS
+    NetProfit: Optional[float] = None                 # ProfitLossForPeriod
     EPS_in_RS: Optional[float] = None
-    error: Optional[str] = None                 # optional error info
+
+    error: Optional[str] = None                       # optional error info
 
 
 # -------------------- Helpers --------------------
@@ -82,7 +98,7 @@ def _first_by_keys(data_map: Dict[str, Decimal], keys: List[str]) -> Optional[De
 
 
 # -------------------- Canonical Synonyms (ALL LOWERCASE localnames) --------------------
-# IMPORTANT: localnames in your extractors are lowercased in this module.
+# IMPORTANT: localnames in your extractors should be lowercased in this module.
 
 STRING_SYNONYMS = {
     "company_name": [
@@ -92,13 +108,13 @@ STRING_SYNONYMS = {
         "symbol", "scripcode", "mseisymbol", "stockticker", "stockcode"
     ],
     "currency": [
-        "descriptionofpresentationcurrency", "reportingcurrency", "currency","DescriptionOfPresentationCurrency"
+        "descriptionofpresentationcurrency", "reportingcurrency", "currency", "descriptionofpresentationcurrency"
     ],
     "level_of_rounding": [
-        "levelofrounding", "unitofmeasure","LevelOfRoundingUsedInFinancialStatements","levelofroundingusedinfinancialstatements"
+        "levelofrounding", "unitofmeasure", "levelofroundingusedinfinancialstatements"
     ],
     "reporting_type": [
-        "typeofreportingperiod", "reportingtype", "reportingperiodtype","reportingquarter"
+        "typeofreportingperiod", "reportingtype", "reportingperiodtype", "reportingquarter"
     ],
     "nature_of_report": [
         "natureofreportstandaloneconsolidated", "natureofreport"
@@ -107,7 +123,7 @@ STRING_SYNONYMS = {
 
 NUMERIC_SYNONYMS = {
     # Top line
-    "sales": ["revenuefromoperations", "revenuefromoperation", "sales"],
+    "sales": ["revenuefromoperations", "revenuefromoperation", "sales", "revenue"],
 
     # Operating costs
     "cost_of_materials": ["costofmaterialsconsumed", "rawmaterialconsumed"],
@@ -121,7 +137,7 @@ NUMERIC_SYNONYMS = {
     "other_expenses": ["otherexpenses", "otherexpense"],
 
     # Non-operating
-    "other_income": ["otherincome"],
+    "other_income": ["otherincome", "otherincomes"],
 
     # Below operating line
     "finance_costs": ["financecosts", "financecost", "interestexpense", "interestcost"],
@@ -131,16 +147,26 @@ NUMERIC_SYNONYMS = {
         "depreciationexpense", "amortisationexpense"
     ],
 
-    # Bottom line
-    "pbt": ["profitbeforetax", "profitlossbeforetax", "pbt"],
+    # Profit
+    "pbt": [
+        "profitbeforetax", "profitlossbeforetax", "pbt",
+        "profitbeforeexceptionalitemsandtax"  # sometimes used; we may adjust with exceptional items if needed
+    ],
+    "exceptional": ["exceptionalitemsbefortax", "exceptionalitemsbeforetax", "exceptionalitems"],
+
+    # Tax (total and components)
     "tax_expense": ["taxexpense", "totaltaxexpenses", "taxexpenses"],
+    "current_tax": ["currenttax", "currenttaxexpense", "currenttaxexpenses", "currenttaxes"],
+    "deferred_tax": ["deferredtax", "deferredtaxexpense", "deferredtaxexpenses", "deferredtaxes"],
+
+    # Bottom line
     "net_profit": ["profitlossforperiod", "profitlossforperiodfromcontinuingoperations"],
 
     # EPS
     "eps_basic": [
         "basicearningslosspersharefromcontinuinganddiscontinuedoperations",
         "basicearningslosspersharefromcontinuingoperations",
-        "basicearningspershare"
+        "basicearningspershare", "earningspershare"
     ],
 }
 
@@ -204,8 +230,8 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
                         return v
         return None
 
-    # 3) Resolve fields
-    Sales = G("sales") or fuzzy_numeric("sales", ["revenue", "turnover", "sales"])
+    # 3) Resolve fields (raw components)
+    Sales = G("sales") or fuzzy_numeric("sales", ["revenuefromoperations", "revenue", "turnover", "sales"])
     OtherIncome = G("other_income") or fuzzy_numeric("other_income", ["otherincome", "nonoperating"])
 
     CostMaterials = G("cost_of_materials") or Decimal(0)
@@ -213,29 +239,54 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     InventoryChange = G("inventory_change") or Decimal(0)
     Employee = G("employee") or Decimal(0)
     PowerFuel = G("power_fuel") or Decimal(0)
-    OtherExpenses = G("other_expenses") or Decimal(0)
+    OtherExp = G("other_expenses") or Decimal(0)
 
     # Screener-style Operating Expenses (before depreciation)
-    Expenses = CostMaterials + PurchasesTraded + InventoryChange + Employee + PowerFuel + OtherExpenses
+    Expenses = CostMaterials + PurchasesTraded + InventoryChange + Employee + PowerFuel + OtherExp
 
     FinanceCosts = G("finance_costs") or fuzzy_numeric("finance_costs", ["interest", "finance"])
     Depreciation = G("depreciation") or fuzzy_numeric("depreciation", ["depreciation", "amortisation"])
+
+    # Profit before tax (prefer true PBT; if only PBEIT + Exceptional available, we could adjust)
     PBT = G("pbt") or fuzzy_numeric("pbt", ["profitbeforetax", "pbt"])
-    TaxAmount = G("tax_expense") or fuzzy_numeric("tax_expense", ["taxexpense", "tax"])
-    NetProfit = G("net_profit") or fuzzy_numeric("net_profit", ["netprofit", "profitloss"])
+
+    # Tax pieces
+    TaxTotal = G("tax_expense") or fuzzy_numeric("tax_expense", ["taxexpense", "taxexpenses"])
+    CurrentTax = G("current_tax") or fuzzy_numeric("current_tax", ["currenttax"])
+    DeferredTax = G("deferred_tax") or fuzzy_numeric("deferred_tax", ["deferredtax"])
+
+    # Infer missing components from available totals (without overriding explicit facts)
+    if TaxTotal is not None:
+        if CurrentTax is None and DeferredTax is not None:
+            CurrentTax = TaxTotal - DeferredTax
+        elif DeferredTax is None and CurrentTax is not None:
+            DeferredTax = TaxTotal - CurrentTax
+    else:
+        # If total not present but both components exist, set total = sum
+        if CurrentTax is not None and DeferredTax is not None:
+            TaxTotal = CurrentTax + DeferredTax
+
+    NetProfit = G("net_profit") or fuzzy_numeric("net_profit", ["profitlossforperiod", "netprofit"])
     EPS = G("eps_basic") or fuzzy_numeric("eps_basic", ["eps", "earningspershare"])
 
     # OperatingProfit = EBITDA = Sales - Expenses
     OperatingProfit = None
     if Sales is not None:
-        # if Sales exists but we had no operating expenses, Expenses will be 0
         OperatingProfit = Sales - Expenses
 
-    # OPM% = EBITDA / Sales * 100
+    # Percentages
     OPM_percentage = _pct(OperatingProfit, Sales) if (OperatingProfit is not None and Sales not in (None, Decimal("0"))) else None
+    Tax_percent = _pct(TaxTotal, PBT) if (TaxTotal is not None and PBT not in (None, Decimal("0"))) else None
 
-    # Tax% (effective tax rate)
-    Tax_percent = _pct(TaxAmount, PBT) if (TaxAmount is not None and PBT not in (None, Decimal("0"))) else None
+    # 4) Build result (return None for components we truly did not find)
+    # For components where we "assumed 0" only for arithmetic, expose None if the exact tag was missing
+    def _as_float_or_none(val: Optional[Decimal], was_present: bool) -> Optional[float]:
+        return float(val) if (val is not None and was_present) else (float(val) if was_present else None)
+
+    # Presence flags for explicit component discovery
+    present_cost = _first_by_keys(oned, NUMERIC_SYNONYMS["cost_of_materials"]) is not None
+    present_emp = _first_by_keys(oned, NUMERIC_SYNONYMS["employee"]) is not None
+    present_otherexp = _first_by_keys(oned, NUMERIC_SYNONYMS["other_expenses"]) is not None
 
     result = {
         "company_name": meta.get("company_name"),
@@ -251,16 +302,25 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         "OPM_percentage": float(OPM_percentage) if OPM_percentage is not None else None,
 
         "OtherIncome": float(OtherIncome) if OtherIncome is not None else None,
+        "CostOfMaterialsConsumed": float(CostMaterials) if present_cost else None,
+        "EmployeeBenefitExpense": float(Employee) if present_emp else None,
+        "OtherExpenses": float(OtherExp) if present_otherexp else None,
+
         "Interest": float(FinanceCosts) if FinanceCosts is not None else None,
         "Depreciation": float(Depreciation) if Depreciation is not None else None,
 
         "ProfitBeforeTax": float(PBT) if PBT is not None else None,
-        "Tax": float(TaxAmount) if TaxAmount is not None else None,
+        "CurrentTax": float(CurrentTax) if CurrentTax is not None else None,
+        "DeferredTax": float(DeferredTax) if DeferredTax is not None else None,
+        "Tax": float(TaxTotal) if TaxTotal is not None else None,
         "Tax_percent": float(Tax_percent) if Tax_percent is not None else None,
+
         "NetProfit": float(NetProfit) if NetProfit is not None else None,
         "EPS_in_RS": float(EPS) if EPS is not None else None,
     }
-    print(result)
+
+    # Optional: print for debug
+    # print(result)
     return result
 
 
@@ -291,10 +351,9 @@ async def extract_xbrl(request: ExtractXBRLRequest):
                 response.append(CompanyMetrics(url=url, type="unknown"))
                 continue
 
-            print(f"Extracted {len(extracted_data)} items from {url} (type: {data_type})")
-
+            # print(f"Extracted {len(extracted_data)} items from {url} (type: {data_type})")
             metrics = calculate_metrics(extracted_data)
-            print(f"Extracted metrics for {url}: {metrics}")
+            # print(f"Extracted metrics for {url}: {metrics}")
 
             # Persist raw extracted facts (optional)
             if data_type == "xml":

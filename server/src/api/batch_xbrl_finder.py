@@ -504,18 +504,139 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
 
 async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], Optional[str]]:
     """
-    Exhaustive strategy:
-      1) If Std/Con header recognized (prefer), pick exact cell anchor.
-      2) Direct href anchors (.html/.xml/.zip or /XBRLFILES/).
-      3) Click anchor -> expect popup (normal) -> read url.
-      4) Post-click small wait -> read window.__openedWindows__.
-      5) Scan network for /XBRLFILES/ requests.
-      6) Same-tab navigation check -> wait_for_url(regex).
-      7) Re-scan direct anchors.
+    Exhaustive strategy (extended):
+      If prefer in {'quarterly','annual'}:
+        - Parse entire grid
+        - Classify Period by 2nd char: 'Q' (quarter) or 'C' (cumulative/annual)
+        - Pick latest by FY end (and quarter order for Q: J=Q1, S=Q2, D=Q3, M=Q4)
+        - Resolve Std XBRL (prefer), else Con XBRL
+      Else original flow:
+        1) If Std/Con header recognized (prefer), pick exact cell anchor.
+        2) Direct href anchors (.html/.xml/.zip or /XBRLFILES/).
+        3) Click anchor -> expect popup (normal) -> read url.
+        4) Post-click small wait -> read window.__openedWindows__.
+        5) Scan network for /XBRLFILES/ requests.
+        6) Same-tab navigation check -> wait_for_url(regex).
+        7) Re-scan direct anchors.
 
     Returns (xbrl_url, period)
     """
-    # 0) Locate grid
+    import re
+
+    # ---------- small local helpers ----------
+    _Q_ORDER = {"J": 1, "S": 2, "D": 3, "M": 4}
+    _PERIOD_RE = re.compile(r"^\s*([MSDJ])([QCHN])(\d{4})-(\d{4})\s*$", re.IGNORECASE)
+
+    def _classify_period(period_text: str):
+        """
+        Returns dict { 'type': 'quarterly'|'annual'|'other', 'fy_end': int|-1, 'q_order': int|None }
+        """
+        if not period_text:
+            return {"type": "other", "fy_end": -1, "q_order": None}
+        m = _PERIOD_RE.match(period_text)
+        if not m:
+            return {"type": "other", "fy_end": -1, "q_order": None}
+        first, second, fy_start, fy_end = m.group(1).upper(), m.group(2).upper(), int(m.group(3)), int(m.group(4))
+        if second == "Q":
+            return {"type": "quarterly", "fy_end": fy_end, "q_order": _Q_ORDER.get(first, 0)}
+        if second == "C":
+            return {"type": "annual", "fy_end": fy_end, "q_order": None}
+        return {"type": "other", "fy_end": fy_end, "q_order": None}
+
+    async def _resolve(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        low = strip_lower(url)
+        if low.endswith("comp_resultsnew.aspx"):
+            return None
+        if url.startswith("http"):
+            return url
+        return await resolve_absolute_url(page, url)
+
+    async def _resolve_from_anchor(a_locator) -> Optional[str]:
+        """
+        Try to resolve URL from an <a> element using:
+          - direct href
+          - popup
+          - same-tab
+          - window.__openedWindows__
+          - network sniffer
+        Mirrors your original fallbacks.
+        """
+        if a_locator is None or not await a_locator.count():
+            return None
+        href = (await a_locator.first.get_attribute("href")) or ""
+        if href and not href.lower().startswith("javascript:"):
+            url = await _resolve(href)
+            if url:
+                return url
+
+        # Clear previous window.open captures
+        try:
+            await page.evaluate("() => { try { window.__openedWindows__ = []; } catch(e){} }")
+        except Exception:
+            pass
+
+        popup_url = None
+        try:
+            async with page.expect_popup() as pop_info:
+                await a_locator.first.click()
+            pop = await pop_info.value
+            try:
+                await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
+            except Exception:
+                pass
+            popup_url = pop.url
+            try:
+                await pop.close()
+            except Exception:
+                pass
+        except Exception:
+            # no popup -> click same tab
+            try:
+                await a_locator.first.click()
+            except Exception:
+                pass
+
+        # settle
+        await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
+
+        if popup_url:
+            url = await _resolve(popup_url)
+            if url:
+                return url
+
+        # window.open captured?
+        try:
+            opened = await page.evaluate("() => (window.__openedWindows__ || []).slice(-1)[0] || ''")
+            url = await _resolve(opened)
+            if url:
+                return url
+        except Exception:
+            pass
+
+        # same-tab navigation recognition
+        try:
+            await page.wait_for_url(re.compile(r".*XBRLFILES.*", re.I), timeout=1500)
+            url = await _resolve(page.url)
+            if url:
+                return url
+        except Exception:
+            pass
+
+        # network sniffer fallback
+        try:
+            candidates = [u for u in getattr(page, "__xbrl_requests__", []) if "XBRLFILES" in u.upper()]
+            if candidates:
+                url = await _resolve(candidates[-1])
+                if url:
+                    return url
+        except Exception:
+            pass
+
+        return None
+
+    # ---------- 0) Locate grid ----------
     grid = None
     for sel in [
         '#ContentPlaceHolder1_gvData',
@@ -529,37 +650,111 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         except PWTimeoutError:
             continue
     if grid is None:
-        # maybe 'No Record Found'
         if await page.locator('text=/No\\s+Record\\s+Found/i').count():
             return None, None
         raise RuntimeError("Could not locate results table.")
 
-    async def _resolve(url: Optional[str]) -> Optional[str]:
-        if not url:
-            return None
-        low = strip_lower(url)
-        if low.endswith("comp_resultsnew.aspx"):
-            return None
-        if url.startswith("http"):
-            return url
-        return await resolve_absolute_url(page, url)
+    # ---------- A) NEW BEHAVIOUR for prefer in {'quarterly','annual'} ----------
+    prefer_mode = strip_lower(prefer)
+    if prefer_mode in {"quarterly", "annual"}:
+        # try to detect header indices (robust to column order)
+        idx_code = 0; idx_name = 1; idx_industry = 2; idx_period = 3; idx_aud = 4; idx_std = 5; idx_con = 6
+        try:
+            header = grid.locator("thead tr").first
+            ths = header.locator("th")
+            hmap = {}
+            for i in range(await ths.count()):
+                txt = (await ths.nth(i).inner_text()).strip().lower()
+                hmap[txt] = i
 
+            def _idx(needle: str, default: int) -> int:
+                for k, v in hmap.items():
+                    if needle in k:
+                        return v
+                return default
+
+            idx_code = _idx("security code", idx_code)
+            idx_name = _idx("security name", idx_name)
+            idx_industry = _idx("industry", idx_industry)
+            idx_period = _idx("period", idx_period)
+            idx_aud = _idx("a/u", idx_aud)
+            idx_std = _idx("std xbrl", idx_std)
+            idx_con = _idx("con xbrl", idx_con)
+        except Exception:
+            pass
+
+        # collect all rows
+        rows_meta: List[dict] = []
+        body_rows = grid.locator("tbody tr")
+        for r in range(await body_rows.count()):
+            tr = body_rows.nth(r)
+            tds = tr.locator("td")
+            try:
+                code = (await tds.nth(idx_code).inner_text()).strip()
+                name = (await tds.nth(idx_name).inner_text()).strip()
+                ind  = (await tds.nth(idx_industry).inner_text()).strip()
+                per  = (await tds.nth(idx_period).inner_text()).strip()
+                aud  = (await tds.nth(idx_aud).inner_text()).strip() if await tds.count() > idx_aud else ""
+                std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
+                con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
+            except Exception:
+                continue
+
+            meta = _classify_period(per)
+            rows_meta.append({
+                "security_code": code,
+                "security_name": name,
+                "industry": ind,
+                "period": per,
+                "audited": aud,
+                "type": meta["type"],
+                "fy_end": meta["fy_end"],
+                "q_order": meta["q_order"],
+                "std_anchor": std_a,
+                "con_anchor": con_a,
+            })
+
+        if not rows_meta:
+            return None, None
+
+        # filter by requested type and pick "latest"
+        if prefer_mode == "quarterly":
+            candidates = [r for r in rows_meta if r["type"] == "quarterly"]
+            latest = max(candidates, key=lambda r: (r["fy_end"], r["q_order"] or 0)) if candidates else None
+        else:  # annual
+            candidates = [r for r in rows_meta if r["type"] == "annual"]
+            latest = max(candidates, key=lambda r: (r["fy_end"], 99)) if candidates else None
+
+        if not latest:
+            return None, None
+
+        # resolve Std first; if missing, Con
+        url_final = await _resolve_from_anchor(latest["std_anchor"])
+        picked_anchor = latest["std_anchor"]
+        if not url_final:
+            url_final = await _resolve_from_anchor(latest["con_anchor"])
+            picked_anchor = latest["con_anchor"]
+
+        if url_final:
+            # if we have the exact row, period is known; but keep anchor extractor fallback if needed
+            period_text = latest["period"] or (await _extract_period_from_anchor(picked_anchor)) if picked_anchor else None
+            return url_final, period_text
+
+        # If still nothing, fall through to original generic strategy.
+        # (This ensures we don't regress if the table acts weird.)
+
+    # ---------- B) ORIGINAL STRATEGY (std/con/any) ----------
     # 1) Prefer exact Std/Con column if requested
-    prefer = strip_lower(prefer)
-    if prefer in {"std", "con"}:
-        c_anchor = await pick_std_con_column_anchor(grid, prefer)
+    candidate = None
+    if prefer_mode in {"std", "con"}:
+        c_anchor = await pick_std_con_column_anchor(grid, prefer_mode)
         if c_anchor is not None and await c_anchor.count():
             href0 = (await c_anchor.first.get_attribute("href")) or ""
             if href0 and not href0.lower().startswith("javascript:"):
                 url0 = await _resolve(href0)
                 if url0:
                     return url0, await _extract_period_from_anchor(c_anchor.first)
-            # else click this exact anchor and continue the general flow using candidate
             candidate = c_anchor.first
-        else:
-            candidate = None
-    else:
-        candidate = None
 
     # 2) Direct anchors (fastest)
     direct_sel = (
@@ -664,9 +859,10 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
     return None, None
 
 # -------------------- Core per-company attempt loop --------------------
-async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tuple[Optional[str], Optional[str], int]:
+async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tuple[Optional[str], Optional[str], int, Optional[str], Optional[str]]:
     """
-    Returns (url, period, attempts_used). Tries multiple broadcast periods and multiple attempts until found.
+    Returns (chosen_url, period, attempts_used, annual_url, quarterly_url).
+    Tries multiple broadcast periods and multiple attempts until found both annual and quarterly (or best fallback).
     """
     attempts = 0
     start_t = time.perf_counter()
@@ -696,26 +892,56 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
             await set_result_period(page)
 
             # try multiple broadcast periods (beyond 1y -> 1y -> 6m -> 3m -> 1m)
+            annual_url = None
+            quarterly_url = None
+            annual_period = None
+            quarterly_period = None
+
             for bp in BROADCAST_PERIODS:
                 await set_broadcast_period(page, bp)
                 await submit_form(page)
                 await wait_grid_ready(page)
 
-                url, period = await get_first_xbrl_url(page, prefer=prefer)
+                url = None
+                period = None
+
+                if prefer == "annual":
+                    annual_url, annual_period = await get_first_xbrl_url(page, prefer="annual")
+                    url, period = annual_url, annual_period
+                elif prefer == "quarterly":
+                    quarterly_url, quarterly_period = await get_first_xbrl_url(page, prefer="quarterly")
+                    url, period = quarterly_url, quarterly_period
+                else:
+                    if annual_url is None:
+                        annual_url, annual_period = await get_first_xbrl_url(page, prefer="annual")
+                    if quarterly_url is None:
+                        quarterly_url, quarterly_period = await get_first_xbrl_url(page, prefer="quarterly")
+
+                    fallback_url = None
+                    fallback_period = None
+                    if (annual_url is None and quarterly_url is None) and prefer not in {"quarterly", "annual"}:
+                        fallback_url, fallback_period = await get_first_xbrl_url(page, prefer=prefer)
+
+                    url = annual_url or quarterly_url or fallback_url
+                    period = annual_period or quarterly_period or fallback_period
+
                 # Guard: never return Comp_Results page
                 if url:
                     low_curr = strip_lower(page.url)
-                    low_url  = strip_lower(url)
+                    low_url = strip_lower(url)
                     if low_url == low_curr or low_url.endswith("comp_resultsnew.aspx"):
                         url = None
                         period = None
+
                 if url:
-                    # success
                     try:
                         await page.close()
                     except Exception:
                         pass
-                    return url, period, attempts
+                    return url, period, attempts, annual_url, quarterly_url
+
+            # no url; next attempt after cooldown
+            await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
 
             # no url; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
@@ -732,7 +958,7 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 pass
 
     # All attempts exhausted
-    return None, None, attempts
+    return None, None, attempts, None, None
 
 # -------------------- Public single-company runner --------------------
 async def run_single(company: str, prefer: str = "any") -> GetXBRLResponse:
@@ -740,7 +966,7 @@ async def run_single(company: str, prefer: str = "any") -> GetXBRLResponse:
     async with async_playwright() as p:
         browser, ctx = await create_browser_and_context(p)
         try:
-            url, period, attempts = await fetch_xbrl_for_company(ctx, company, prefer=prefer)
+            url, period, attempts, annual_url, quarterly_url = await fetch_xbrl_for_company(ctx, company, prefer=prefer)
             dur = int((time.perf_counter() - started) * 1000)
             if url:
                 return GetXBRLResponse(
@@ -801,7 +1027,7 @@ async def get_xbrl_links(request: BatchGetXBRLRequest):
             attempts_used = 0
             try:
                 async with sem:
-                    url, period, attempts_used = await fetch_xbrl_for_company(ctx, name, prefer=prefer)
+                    url, period, attempts_used, annual_url, quarterly_url = await fetch_xbrl_for_company(ctx, name, prefer=prefer)
                 dur = int((time.perf_counter() - started) * 1000)
                 if url:
                     return BatchItemResult(

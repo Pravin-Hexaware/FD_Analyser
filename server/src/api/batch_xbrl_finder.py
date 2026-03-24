@@ -859,9 +859,9 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
     return None, None
 
 # -------------------- Core per-company attempt loop --------------------
-async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tuple[Optional[str], Optional[str], int, Optional[str], Optional[str]]:
+async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tuple[Optional[str], Optional[str], int, Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
-    Returns (chosen_url, period, attempts_used, annual_url, quarterly_url).
+    Returns (chosen_url, period, attempts_used, annual_url, annual_period, quarterly_url, quarterly_period).
     Tries multiple broadcast periods and multiple attempts until found both annual and quarterly (or best fallback).
     """
     attempts = 0
@@ -902,43 +902,65 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 await submit_form(page)
                 await wait_grid_ready(page)
 
-                url = None
-                period = None
-
                 if prefer == "annual":
-                    annual_url, annual_period = await get_first_xbrl_url(page, prefer="annual")
-                    url, period = annual_url, annual_period
+                    if annual_url is None:
+                        annual_url, annual_period = await get_first_xbrl_url(page, prefer="annual")
+                    if annual_url:
+                        break
+
                 elif prefer == "quarterly":
-                    quarterly_url, quarterly_period = await get_first_xbrl_url(page, prefer="quarterly")
-                    url, period = quarterly_url, quarterly_period
+                    if quarterly_url is None:
+                        quarterly_url, quarterly_period = await get_first_xbrl_url(page, prefer="quarterly")
+                    if quarterly_url:
+                        break
+
                 else:
                     if annual_url is None:
                         annual_url, annual_period = await get_first_xbrl_url(page, prefer="annual")
                     if quarterly_url is None:
                         quarterly_url, quarterly_period = await get_first_xbrl_url(page, prefer="quarterly")
 
-                    fallback_url = None
-                    fallback_period = None
-                    if (annual_url is None and quarterly_url is None) and prefer not in {"quarterly", "annual"}:
+                    if annual_url and quarterly_url:
+                        break
+
+                    if (annual_url is None and quarterly_url is None):
+                        # Also attempt user-specified fallback once per broadcast period
                         fallback_url, fallback_period = await get_first_xbrl_url(page, prefer=prefer)
+                        if fallback_url:
+                            # keep fallback candidate if no other found yet
+                            if annual_url is None and quarterly_url is None:
+                                annual_url = fallback_url
+                                annual_period = fallback_period
 
-                    url = annual_url or quarterly_url or fallback_url
-                    period = annual_period or quarterly_period or fallback_period
+                # Quick early-stop if both found for any mode
+                if prefer == "any" and annual_url and quarterly_url:
+                    break
 
-                # Guard: never return Comp_Results page
-                if url:
-                    low_curr = strip_lower(page.url)
-                    low_url = strip_lower(url)
-                    if low_url == low_curr or low_url.endswith("comp_resultsnew.aspx"):
-                        url = None
-                        period = None
+            # done searching in all broadcast periods
+            url = None
+            period = None
+            if prefer == "annual":
+                url, period = annual_url, annual_period
+            elif prefer == "quarterly":
+                url, period = quarterly_url, quarterly_period
+            else:
+                url = annual_url or quarterly_url
+                period = annual_period or quarterly_period
 
-                if url:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-                    return url, period, attempts, annual_url, quarterly_url
+            # Guard: never return Comp_Results page
+            if url:
+                low_curr = strip_lower(page.url)
+                low_url = strip_lower(url)
+                if low_url == low_curr or low_url.endswith("comp_resultsnew.aspx"):
+                    url = None
+                    period = None
+
+            if url:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                return url, period, attempts, annual_url, annual_period, quarterly_url, quarterly_period
 
             # no url; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
@@ -966,7 +988,7 @@ async def run_single(company: str, prefer: str = "any") -> GetXBRLResponse:
     async with async_playwright() as p:
         browser, ctx = await create_browser_and_context(p)
         try:
-            url, period, attempts, annual_url, quarterly_url = await fetch_xbrl_for_company(ctx, company, prefer=prefer)
+            url, period, attempts, annual_url, annual_period, quarterly_url, quarterly_period = await fetch_xbrl_for_company(ctx, company, prefer=prefer)
             dur = int((time.perf_counter() - started) * 1000)
             if url:
                 return GetXBRLResponse(
@@ -1027,7 +1049,7 @@ async def get_xbrl_links(request: BatchGetXBRLRequest):
             attempts_used = 0
             try:
                 async with sem:
-                    url, period, attempts_used, annual_url, quarterly_url = await fetch_xbrl_for_company(ctx, name, prefer=prefer)
+                    url, period, attempts_used, annual_url, annual_period, quarterly_url, quarterly_period = await fetch_xbrl_for_company(ctx, name, prefer=prefer)
                 dur = int((time.perf_counter() - started) * 1000)
                 if url:
                     return BatchItemResult(

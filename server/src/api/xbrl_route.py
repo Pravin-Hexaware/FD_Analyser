@@ -1,7 +1,7 @@
 # server/src/routers/extract.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from decimal import Decimal, InvalidOperation
 
 from service.html_extraction_service import extract_html_data
@@ -16,6 +16,10 @@ router = APIRouter()
 
 class ExtractXBRLRequest(BaseModel):
     url: List[str]
+
+
+class ExtractAnnualRequest(BaseModel):
+    url: str
 
 
 class CompanyMetrics(BaseModel):
@@ -373,3 +377,255 @@ async def extract_xbrl(request: ExtractXBRLRequest):
             ))
 
     return response
+
+
+# -------------------- Annual Report Extraction --------------------
+
+def _classify_context(ctx: str) -> str:
+    """Map contextRef to one of: 'current_year', 'previous_year', 'fourd', 'oned', 'other'."""
+    if not ctx:
+        return "other"
+    lc = ctx.strip().lower()
+    if lc == "fourd":
+        return "fourd"
+    if lc == "oned":
+        return "oned"
+    if "previous" in lc and "year" in lc:
+        return "previous_year"
+    if "current" in lc and "year" in lc:
+        return "current_year"
+    if lc in ("currentyear", "cy", "currentyr"):
+        return "current_year"
+    if lc in ("previousyear", "py", "prioryear"):
+        return "previous_year"
+    return "other"
+
+
+def _collect_current_year_map(extracted_data: List[Dict[str, Any]]) -> Tuple[Dict[str, Decimal], Dict[str, Any]]:
+    """Collect current-year facts and metadata for annual reporting."""
+    cy: Dict[str, Decimal] = {}
+    meta: Dict[str, Any] = {}
+
+    for item in extracted_data:
+        local = str(item.get("localname", "")).strip().lower()
+        raw = item.get("value")
+
+        # Collect metadata from any context
+        if local and raw is not None:
+            sval = str(raw).strip()
+            if local in ["descriptionofpresentationcurrency", "reportingcurrency", "currency"]:
+                meta.setdefault("currency", sval)
+            if local in ["levelofrounding", "unitofmeasure", "levelofroundingusedinfinancialstatements"]:
+                meta.setdefault("level_of_rounding", sval)
+            if local in ["natureofreportstandaloneconsolidated", "natureofreport"]:
+                meta.setdefault("nature_of_report", sval)
+            if local in ["typeofreportingperiod", "reportingtype", "reportingperiodtype"]:
+                meta.setdefault("reporting_type", sval)
+            if local in ["nameofthecompany", "nameofcompany", "entityname"]:
+                meta.setdefault("company_name", sval)
+            if local in ["symbol", "scripcode", "mseisymbol", "stockticker"]:
+                meta.setdefault("company_symbol", sval)
+
+        # Collect current-year numeric data
+        ctx = (item.get("contextRef") or item.get("contextref") or "").strip()
+        if _classify_context(ctx) != "current_year":
+            continue
+
+        val = _to_decimal(item.get("value"))
+        if val is None or not local:
+            continue
+        if local not in cy:
+            cy[local] = val
+
+    return cy, meta
+
+
+def _find_first_decimal_any_context(extracted_data: List[Dict[str, Any]], keys: List[str]) -> Optional[Decimal]:
+    """Find first matching decimal value from any context."""
+    keys_set = set(k.lower() for k in keys)
+    for item in extracted_data:
+        local = str(item.get("localname", "")).strip().lower()
+        if local in keys_set:
+            val = _to_decimal(item.get("value"))
+            if val is not None:
+                return val
+    return None
+
+
+@router.post("/extract/annual")
+async def extract_annual(report: ExtractAnnualRequest):
+    """
+    Extract Annual (or Half-yearly) statements from a single XBRL/iXBRL URL.
+    Returns nested structure with Quarterly_Earnings, Profit and Loss, Balance sheet, Cashflow 
+    with no null metric values (defaulting to 0.0 if missing).
+    """
+    def _to_safe_float(val):
+        if val is None:
+            return 0.0
+        try:
+            return float(val)
+        except Exception:
+            return 0.0
+
+    if not report.url:
+        raise HTTPException(status_code=400, detail="No URL provided")
+
+    url = report.url
+    try:
+        # Parse file
+        if url.endswith(".xml"):
+            only_prefix = None
+            extracted_data = extract_xbrl_data(url, only_prefix)
+            data_type = "xml"
+        elif url.endswith((".html", ".htm", ".xhtml")):
+            extracted_data = extract_html_data(url)
+            data_type = "html"
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file type. Provide .xml or iXBRL (.html/.htm/.xhtml)")
+
+        # Optional persistence
+        repo = XMLDataRepository() if data_type == "xml" else HTMLDataRepository()
+        repo.save_to_json(extracted_data)
+        repo.save_to_csv(extracted_data)
+
+        # Import the FourD calculator from Xbrl_annual_extractor
+        from api.Xbrl_annual_extractor import calculate_metrics_fourd
+
+        # Collect current-year map + meta
+        cy_map, meta = _collect_current_year_map(extracted_data)
+        
+        # Extract metrics from different contexts
+        quarterly = calculate_metrics(extracted_data)  # OneD context
+        fourd = calculate_metrics_fourd(extracted_data)  # FourD context
+        
+        # Helper for metric fallback: prefer FourD -> current_year -> quarterly -> 0.0
+        def _metric_fallback(key):
+            if fourd.get(key) is not None:
+                return _to_safe_float(fourd.get(key))
+            if cy_map.get(key.lower()) is not None:
+                return _to_safe_float(cy_map.get(key.lower()))
+            if quarterly.get(key) is not None:
+                return _to_safe_float(quarterly.get(key))
+            return 0.0
+
+        # Quarterly_Earnings section (from OneD context - no nulls)
+        quarterly_section = {
+            "Sales": _to_safe_float(quarterly.get("Sales")),
+            "Expenses": _to_safe_float(quarterly.get("Expenses")),
+            "OperatingProfit": _to_safe_float(quarterly.get("OperatingProfit")),
+            "OPM_percentage": _to_safe_float(quarterly.get("OPM_percentage")),
+            "OtherIncome": _to_safe_float(quarterly.get("OtherIncome")),
+            "CostOfMaterialsConsumed": _to_safe_float(quarterly.get("CostOfMaterialsConsumed")),
+            "EmployeeBenefitExpense": _to_safe_float(quarterly.get("EmployeeBenefitExpense")),
+            "OtherExpenses": _to_safe_float(quarterly.get("OtherExpenses")),
+            "Interest": _to_safe_float(quarterly.get("Interest")),
+            "Depreciation": _to_safe_float(quarterly.get("Depreciation")),
+            "ProfitBeforeTax": _to_safe_float(quarterly.get("ProfitBeforeTax")),
+            "CurrentTax": _to_safe_float(quarterly.get("CurrentTax")),
+            "DeferredTax": _to_safe_float(quarterly.get("DeferredTax")),
+            "Tax": _to_safe_float(quarterly.get("Tax")),
+            "Tax_percent": _to_safe_float(quarterly.get("Tax_percent")),
+            "NetProfit": _to_safe_float(quarterly.get("NetProfit")),
+            "EPS_in_RS": _to_safe_float(quarterly.get("EPS_in_RS")),
+        }
+
+        # Profit & Loss section (prefer FourD -> annual -> quarterly -> 0.0)
+        pnl_section = {
+            "Sales": _metric_fallback("Sales"),
+            "Expenses": _metric_fallback("Expenses"),
+            "OperatingProfit": _metric_fallback("OperatingProfit"),
+            "OPM_percentage": _metric_fallback("OPM_percentage"),
+            "OtherIncome": _metric_fallback("OtherIncome"),
+            "Interest": _metric_fallback("Interest"),
+            "Depreciation": _metric_fallback("Depreciation"),
+            "ProfitBeforeTax": _metric_fallback("ProfitBeforeTax"),
+            "Tax_percent": _metric_fallback("Tax_percent"),
+            "NetProfit": _metric_fallback("NetProfit"),
+            "EPS_in_RS": _metric_fallback("EPS_in_RS"),
+        }
+
+        # Balance sheet (extract from any context with mapping names)
+        EquityCapital_val = _find_first_decimal_any_context(extracted_data, ["equitysharecapital", "equitycapital", "sharecapital"])
+        Reserves_val = _find_first_decimal_any_context(extracted_data, ["otherequity", "reserves", "retainedearnings"])
+        Borrowings_val = _find_first_decimal_any_context(extracted_data, ["borrowings", "longtermborrowings", "shorttermborrowings"])
+        OtherLiabilities_val = _find_first_decimal_any_context(extracted_data, ["otherliabilities", "otherliability"])
+        TotalLiabilities_val = _find_first_decimal_any_context(extracted_data, ["liabilities", "equityandliabilities", "totalliabilities"])
+
+        PropertyPlantAndEquipment_val = _find_first_decimal_any_context(extracted_data, ["propertyplantandequipment", "ppe"])
+        OtherIntangibleAssets_val = _find_first_decimal_any_context(extracted_data, ["otherintangibleassets", "intangibleassets"])
+        FixedAssets_val = None
+        if PropertyPlantAndEquipment_val is not None or OtherIntangibleAssets_val is not None:
+            FixedAssets_val = (PropertyPlantAndEquipment_val or Decimal(0)) + (OtherIntangibleAssets_val or Decimal(0))
+
+        CWIP_val = _find_first_decimal_any_context(extracted_data, ["capitalworkinprogress"])
+
+        NoncurrentInvestments_val = _find_first_decimal_any_context(extracted_data, ["noncurrentinvestments", "noncurrentinvestment"])
+        CurrentInvestments_val = _find_first_decimal_any_context(extracted_data, ["currentinvestments", "currentinvestment"])
+        Investments_val = None
+        if NoncurrentInvestments_val is not None or CurrentInvestments_val is not None:
+            Investments_val = (NoncurrentInvestments_val or Decimal(0)) + (CurrentInvestments_val or Decimal(0))
+
+        TotalAssets_val = _find_first_decimal_any_context(extracted_data, ["assets", "totalassets"])
+        TotalEquity_val = _find_first_decimal_any_context(extracted_data, ["equity", "totalequity"])
+
+        TradePayablesCurrent_val = _find_first_decimal_any_context(extracted_data, ["tradepayablescurrent"])
+
+        balance_sheet_section = {
+            "EquityCapital": _to_safe_float(EquityCapital_val),
+            "Reserves": _to_safe_float(Reserves_val),
+            "TradePayablesCurrent": _to_safe_float(TradePayablesCurrent_val),
+            "Borrowings": _to_safe_float(Borrowings_val),
+            "OtherLiabilities": _to_safe_float(OtherLiabilities_val),
+            "TotalLiabilities": _to_safe_float(TotalLiabilities_val),
+            "TotalEquity": _to_safe_float(TotalEquity_val),
+            "FixedAssets": _to_safe_float(FixedAssets_val),
+            "CWIP": _to_safe_float(CWIP_val),
+            "Investments": _to_safe_float(Investments_val),
+            "TotalAssets": _to_safe_float(TotalAssets_val),
+        }
+
+        # Cashflow section
+        CashFromOperatingActivity_val = _find_first_decimal_any_context(extracted_data, ["cashflowsfromusedinoperatingactivities", "netcashflowfromoperatingactivities", "cashflowfromoperatingactivities"])
+        CashFromInvestingActivity_val = _find_first_decimal_any_context(extracted_data, ["cashflowsfromusedininvestingactivities", "cashflowfrominvestingactivities"])
+        CashFromFinancingActivity_val = _find_first_decimal_any_context(extracted_data, ["cashflowsfromusedinfinancingactivities", "cashflowfromfinancingactivities"])
+
+        cashflow_section = {
+            "CashFromOperatingActivity": _to_safe_float(CashFromOperatingActivity_val),
+            "CashFromInvestingActivity": _to_safe_float(CashFromInvestingActivity_val),
+            "CashFromFinancingActivity": _to_safe_float(CashFromFinancingActivity_val),
+        }
+
+        return {
+            "url": url,
+            "type": data_type,
+            "company_name": meta.get("company_name"),
+            "company_symbol": meta.get("company_symbol"),
+            "currency": meta.get("currency"),
+            "level_of_rounding": meta.get("level_of_rounding"),
+            "reporting_type": meta.get("reporting_type"),
+            "NatureOfReport": meta.get("nature_of_report"),
+            "Quarterly_Earnings": quarterly_section,
+            "Profit and Loss": pnl_section,
+            "Balance sheet": balance_sheet_section,
+            "Cashflow": cashflow_section,
+            "error": None,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {
+            "url": url,
+            "type": "error",
+            "company_name": None,
+            "company_symbol": None,
+            "currency": None,
+            "level_of_rounding": None,
+            "reporting_type": None,
+            "NatureOfReport": None,
+            "Quarterly_Earnings": {},
+            "Profit and Loss": {},
+            "Balance sheet": {},
+            "Cashflow": {},
+            "error": str(e)[:500],
+        }

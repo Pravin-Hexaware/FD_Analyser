@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Dict, List, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -155,4 +157,110 @@ def generate_analysis_report(records: List[Dict[str, Any]]) -> Tuple[str, Dict[s
             "Please check the model/deployment or reduce input size."
         )
 
-    return report, llm_response_dict
+    return report, llm_response_dict 
+
+
+def analyze_target_companies_from_query(query: str) -> Dict[str, Any]:
+    """Use Azure LLM to parse financial target companies + peers into a JSON schema."""
+    if not query or not query.strip():
+        raise ValueError("Query must not be empty.")
+
+    system_prompt = (
+        "You are a Senior Financial Analyst and Data Extraction Expert specializing in "
+        "parsing financial queries, identifying listed companies, validating market identifiers, "
+        "and structuring data for XBRL-based extraction.\n\n"
+
+        "## Task:\n"
+        "Parse the user query to extract the financial intent and identify all relevant companies, "
+        "including their stock symbols, scrip codes, and industries, along with peers from the same industry.\n\n"
+
+        "## Input Variables:\n"
+        f"- **query**: {query}\n\n"
+
+        "## Requirements:\n"
+        "- Identify the **statement_frequency**: 'quarterly', 'annual', or 'unspecified'.\n"
+        "- Identify the **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.\n"
+        "- Identify the **period**: such as 'latest quarter', 'Q3 2023', or 'unspecified'.\n"
+        "- For each target company:\n"
+        "  - Include the **company name**, **symbol**, **industry**, and **accurate scrip_code**.\n"
+        "  - Include **exactly 3 peers** from the same industry.\n"
+        "- For each peer:\n"
+        "  - Include **company name**, **symbol**, **industry**, and **accurate scrip_code**.\n"
+        "- Always return strictly valid JSON with *no explanation or additional text*.\n"
+        "- The scrip_code must be accurate and correspond to the correct BSE listing.\n\n"
+
+        "## Output Format:\n"
+        "Return the data as a valid JSON object using the schema below.\n\n"
+
+        "### JSON Schema:\n"
+        """
+        {
+          "intent": {
+            "statement_frequency": "quarterly | annual | unspecified",
+            "statement_type": "balance_sheet | cash_flow | income_statement | ratios | unspecified",
+            "period": "string or unspecified"
+          },
+          "target_companies": {
+            "1": {
+              "company": "company_name",
+              "symbol": "company_symbol",
+              "scrip_code": "company_scrip_code",
+              "industry": "company_industry",
+              "peers": {
+                "1": {
+                  "company": "peer_company_name",
+                  "symbol": "peer_company_symbol",
+                  "scrip_code": "peer_company_scrip_code",
+                  "industry": "peer_company_industry"
+                },
+                "2": {
+                  "company": "peer_company_name",
+                  "symbol": "peer_company_symbol",
+                  "scrip_code": "peer_company_scrip_code",
+                  "industry": "peer_company_industry"
+                },
+                "3": {
+                  "company": "peer_company_name",
+                  "symbol": "peer_company_symbol",
+                  "scrip_code": "peer_company_scrip_code",
+                  "industry": "peer_company_industry"
+                }
+              }
+            }
+          }
+        }
+        """
+    )
+
+    response = _invoke_llm(system_prompt, "", max_tokens=600)  # Combined prompt, empty user_prompt
+    normalized = _normalize_llm_response(response)
+    text = normalized.get("content", "")
+
+    # Try strict JSON parse first and fallback to substring extraction.
+    parsed: Dict[str, Any] = {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        # extract JSON object between first { and last }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                parsed = {
+                    "error": "LLM output is not valid JSON",
+                    "raw_output": text,
+                }
+        else:
+            parsed = {
+                "error": "LLM output does not contain JSON object",
+                "raw_output": text,
+            }
+
+    return {
+        "query": query,
+        "parsed": parsed,
+        "raw_llm_response": normalized,
+    }

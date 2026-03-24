@@ -10,13 +10,13 @@ from api.batch_xbrl_finder import router as batch_inter_router
 from api.xbrl_ws_route import router as xbrl_ws_router
 from api.xbrl_ws_hist import router as xbrl_ws_hist_router
 from api.Xbrl_annual_extractor import router as xbrl_annual_router
+from api.llm_route import router as llm_router
 
-# Load environment variables from .env (if present)
+
 load_dotenv()
 
 app = FastAPI(title="Financial Data Extractor API")
 
-# Include routers
 app.include_router(xbrl_router, prefix="/api", tags=["xbrl"])
 app.include_router(xml_router, prefix="/api", tags=["xml"])
 app.include_router(html_router, prefix="/api", tags=["html"])
@@ -26,6 +26,7 @@ app.include_router(analysis_router, prefix="/api", tags=["analysis"])
 app.include_router(xbrl_ws_router, prefix="/api", tags=["xbrl_ws"])
 app.include_router(xbrl_ws_hist_router, prefix="/api", tags=["xbrl_ws_hist"])
 app.include_router(xbrl_annual_router, prefix="/api", tags=["xbrl_annual"])
+app.include_router(llm_router, prefix="/api", tags=["llm"])
 
 if __name__ == "__main__":
     import uvicorn

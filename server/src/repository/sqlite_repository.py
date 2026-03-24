@@ -16,6 +16,14 @@ class SqliteRepository:
         p = Path(self.db_path)
         p.parent.mkdir(parents=True, exist_ok=True)
 
+    def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(f"PRAGMA table_info({table})")
+        columns = [row[1] for row in cur.fetchall()]
+        if column not in columns:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            self._conn.commit()
+
     def _init_tables(self) -> None:
         cur = self._conn.cursor()
         cur.execute(
@@ -71,20 +79,104 @@ class SqliteRepository:
             );
             """
         )
+
+        # New tables for quarterly and annual extractions
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS symbol_extraction_results (
+            CREATE TABLE IF NOT EXISTS quarterly_table (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query_id INTEGER,
-                query TEXT,
-                symbol TEXT,
-                name TEXT,
-                peers TEXT,
+                scrip_code TEXT,
+                xbrl_link TEXT,
+                period TEXT,
+                company_name TEXT,
+                company_symbol TEXT,
+                currency TEXT,
+                level_of_rounding TEXT,
+                reporting_type TEXT,
+                nature_of_report TEXT,
+                sales REAL,
+                expenses REAL,
+                operating_profit REAL,
+                opm_percentage REAL,
+                other_income REAL,
+                cost_of_materials_consumed REAL,
+                employee_benefit_expense REAL,
+                other_expenses REAL,
+                interest REAL,
+                depreciation REAL,
+                profit_before_tax REAL,
+                current_tax REAL,
+                deferred_tax REAL,
+                tax REAL,
+                tax_percent REAL,
+                net_profit REAL,
+                eps_in_rs REAL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS annual_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scrip_code TEXT,
+                xbrl_link TEXT,
+                period TEXT,
+                company_name TEXT,
+                company_symbol TEXT,
+                currency TEXT,
+                level_of_rounding TEXT,
+                reporting_type TEXT,
+                nature_of_report TEXT,
+
+                -- Profit and Loss / annual P&L section
+                sales REAL,
+                expenses REAL,
+                operating_profit REAL,
+                opm_percentage REAL,
+                other_income REAL,
+                interest REAL,
+                depreciation REAL,
+                profit_before_tax REAL,
+                tax_percent REAL,
+                net_profit REAL,
+                eps_in_rs REAL,
+
+                -- Balance Sheet section
+                equity_capital REAL,
+                reserves REAL,
+                trade_payables_current REAL,
+                borrowings REAL,
+                other_liabilities REAL,
+                total_liabilities REAL,
+                total_equity REAL,
+                fixed_assets REAL,
+                cwip REAL,
+                investments REAL,
+                total_assets REAL,
+
+                -- Cashflow section
+                cash_from_operating_activity REAL,
+                cash_from_investing_activity REAL,
+                cash_from_financing_activity REAL,
+
                 created_at TEXT DEFAULT (datetime('now'))
             );
             """
         )
         self._conn.commit()
+
+        # If annual_table existed from earlier version, ensure new columns exist
+        for col_name, col_type in [
+            ("period", "TEXT"),
+            ("trade_payables_current", "REAL"),
+            ("total_equity", "REAL"),
+        ]:
+            self._ensure_column("annual_table", col_name, col_type)
+        
+        # Ensure period column in quarterly_table
+        self._ensure_column("quarterly_table", "period", "TEXT")
 
     def upsert_company(
         self,
@@ -153,20 +245,106 @@ class SqliteRepository:
         cur = self._conn.cursor()
         if scrip_code:
             cur.execute(
-                "SELECT scrip_code, symbol, xbrl_link FROM xbrl_filing_table WHERE scrip_code = ?",
+                "SELECT scrip_code, symbol, xbrl_link, report_type FROM xbrl_filing_table WHERE scrip_code = ?",
                 (scrip_code,),
             )
         else:
             cur.execute(
-                "SELECT scrip_code, symbol, xbrl_link FROM xbrl_filing_table"
+                "SELECT scrip_code, symbol, xbrl_link, report_type FROM xbrl_filing_table"
             )
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
-    def xbrl_extraction_exists(self, scrip_code: str, xbrl_link: str) -> bool:
+    def get_period_by_xbrl_link(self, xbrl_link: str) -> Optional[str]:
+        """Retrieve the publication_date (period) from xbrl_filing_table by xbrl_link."""
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT 1 FROM xbrl_extraction_table WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
+            "SELECT publication_date FROM xbrl_filing_table WHERE xbrl_link = ? LIMIT 1",
+            (xbrl_link,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def find_peers(self, symbol: str) -> dict:
+        """Find peers for the given company symbol based on annual sales +/-20% in same sector."""
+        cur = self._conn.cursor()
+
+        # Step 1: find sector for input symbol
+        cur.execute(
+            "SELECT sector FROM company_table WHERE symbol = ? LIMIT 1",
+            (symbol,),
+        )
+        row = cur.fetchone()
+        if not row or not row["sector"]:
+            return {"sector": None, "target_sales": None, "target_level_of_rounding": None, "peers": []}
+
+        sector = row["sector"]
+
+        # Step 2: find latest annual record for input symbol
+        cur.execute(
+            "SELECT sales, level_of_rounding FROM annual_table WHERE company_symbol = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            (symbol,),
+        )
+        annual_row = cur.fetchone()
+        if not annual_row or annual_row["sales"] is None:
+            return {"sector": sector, "target_sales": None, "target_level_of_rounding": None, "peers": []}
+
+        target_sales = float(annual_row["sales"])
+        target_level = annual_row["level_of_rounding"]
+
+        low = target_sales * 0.8
+        high = target_sales * 1.2
+
+        # Step 3: find peers in same sector and within +/-20% sales, using latest annual record per candidate
+        cur.execute(
+            """
+            SELECT c.company_name, c.symbol, a.sales, a.level_of_rounding
+            FROM annual_table a
+            JOIN company_table c ON c.symbol = a.company_symbol
+            WHERE c.sector = ?
+              AND c.symbol != ?
+              AND a.sales BETWEEN ? AND ?
+              AND a.created_at = (
+                  SELECT MAX(a2.created_at)
+                  FROM annual_table a2
+                  WHERE a2.company_symbol = a.company_symbol
+              )
+            """,
+            (sector, symbol, low, high),
+        )
+
+        peer_rows = cur.fetchall()
+        peers = [
+            {
+                "company_name": pr["company_name"],
+                "symbol": pr["symbol"],
+                "sales": float(pr["sales"]),
+                "level_of_rounding": pr["level_of_rounding"],
+            }
+            for pr in peer_rows
+            if pr["symbol"] != symbol
+        ]
+
+        return {
+            "sector": sector,
+            "target_sales": target_sales,
+            "target_level_of_rounding": target_level,
+            "peers": peers,
+        }
+
+    def xbrl_filing_recent(self, scrip_code: str, days: int = 10) -> bool:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND datetime(created_at) >= datetime('now', ? ) LIMIT 1",
+            (scrip_code, f'-{days} days'),
+        )
+        return cur.fetchone() is not None
+
+    def xbrl_extraction_exists(self, scrip_code: str, xbrl_link: str, report_type: str = "quarterly") -> bool:
+        cur = self._conn.cursor()
+        table = "quarterly_table" if report_type == "quarterly" else "annual_table"
+        cur.execute(
+            f"SELECT 1 FROM {table} WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
             (scrip_code, xbrl_link),
         )
         return cur.fetchone() is not None
@@ -247,6 +425,220 @@ class SqliteRepository:
         self._conn.commit()
         return cur.lastrowid
 
+    def insert_quarterly_extraction(
+        self,
+        scrip_code: str,
+        xbrl_link: str,
+        period: Optional[str] = None,
+        company_name: Optional[str] = None,
+        company_symbol: Optional[str] = None,
+        currency: Optional[str] = None,
+        level_of_rounding: Optional[str] = None,
+        reporting_type: Optional[str] = None,
+        nature_of_report: Optional[str] = None,
+        sales: Optional[float] = None,
+        expenses: Optional[float] = None,
+        operating_profit: Optional[float] = None,
+        opm_percentage: Optional[float] = None,
+        other_income: Optional[float] = None,
+        cost_of_materials_consumed: Optional[float] = None,
+        employee_benefit_expense: Optional[float] = None,
+        other_expenses: Optional[float] = None,
+        interest: Optional[float] = None,
+        depreciation: Optional[float] = None,
+        profit_before_tax: Optional[float] = None,
+        current_tax: Optional[float] = None,
+        deferred_tax: Optional[float] = None,
+        tax: Optional[float] = None,
+        tax_percent: Optional[float] = None,
+        net_profit: Optional[float] = None,
+        eps_in_rs: Optional[float] = None,
+    ) -> int:
+        cur = self._conn.cursor()
+        columns = [
+            "scrip_code",
+            "xbrl_link",
+            "period",
+            "company_name",
+            "company_symbol",
+            "currency",
+            "level_of_rounding",
+            "reporting_type",
+            "nature_of_report",
+            "sales",
+            "expenses",
+            "operating_profit",
+            "opm_percentage",
+            "other_income",
+            "cost_of_materials_consumed",
+            "employee_benefit_expense",
+            "other_expenses",
+            "interest",
+            "depreciation",
+            "profit_before_tax",
+            "current_tax",
+            "deferred_tax",
+            "tax",
+            "tax_percent",
+            "net_profit",
+            "eps_in_rs",
+        ]
+        values = [
+            scrip_code,
+            xbrl_link,
+            period,
+            company_name,
+            company_symbol,
+            currency,
+            level_of_rounding,
+            reporting_type,
+            nature_of_report,
+            sales,
+            expenses,
+            operating_profit,
+            opm_percentage,
+            other_income,
+            cost_of_materials_consumed,
+            employee_benefit_expense,
+            other_expenses,
+            interest,
+            depreciation,
+            profit_before_tax,
+            current_tax,
+            deferred_tax,
+            tax,
+            tax_percent,
+            net_profit,
+            eps_in_rs,
+        ]
+        placeholder = ", ".join(["?"] * len(columns))
+        cur.execute(
+            f"INSERT INTO quarterly_table ({', '.join(columns)}) VALUES ({placeholder})",
+            values,
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def insert_annual_extraction(
+        self,
+        scrip_code: str,
+        xbrl_link: str,
+        period: Optional[str] = None,
+        company_name: Optional[str] = None,
+        company_symbol: Optional[str] = None,
+        currency: Optional[str] = None,
+        level_of_rounding: Optional[str] = None,
+        reporting_type: Optional[str] = None,
+        nature_of_report: Optional[str] = None,
+        sales: Optional[float] = None,
+        expenses: Optional[float] = None,
+        operating_profit: Optional[float] = None,
+        opm_percentage: Optional[float] = None,
+        other_income: Optional[float] = None,
+        interest: Optional[float] = None,
+        depreciation: Optional[float] = None,
+        profit_before_tax: Optional[float] = None,
+        tax_percent: Optional[float] = None,
+        net_profit: Optional[float] = None,
+        eps_in_rs: Optional[float] = None,
+        equity_capital: Optional[float] = None,
+        reserves: Optional[float] = None,
+        trade_payables_current: Optional[float] = None,
+        borrowings: Optional[float] = None,
+        other_liabilities: Optional[float] = None,
+        total_liabilities: Optional[float] = None,
+        total_equity: Optional[float] = None,
+        fixed_assets: Optional[float] = None,
+        cwip: Optional[float] = None,
+        investments: Optional[float] = None,
+        total_assets: Optional[float] = None,
+        cash_from_operating_activity: Optional[float] = None,
+        cash_from_investing_activity: Optional[float] = None,
+        cash_from_financing_activity: Optional[float] = None,
+    ) -> int:
+        cur = self._conn.cursor()
+        columns = [
+            "scrip_code",
+            "xbrl_link",
+            "period",
+            "company_name",
+            "company_symbol",
+            "currency",
+            "level_of_rounding",
+            "reporting_type",
+            "nature_of_report",
+            "sales",
+            "expenses",
+            "operating_profit",
+            "opm_percentage",
+            "other_income",
+            "interest",
+            "depreciation",
+            "profit_before_tax",
+            "tax_percent",
+            "net_profit",
+            "eps_in_rs",
+            "equity_capital",
+            "reserves",
+            "trade_payables_current",
+            "borrowings",
+            "other_liabilities",
+            "total_liabilities",
+            "total_equity",
+            "fixed_assets",
+            "cwip",
+            "investments",
+            "total_assets",
+            "cash_from_operating_activity",
+            "cash_from_investing_activity",
+            "cash_from_financing_activity",
+        ]
+
+        values = [
+            scrip_code,
+            xbrl_link,
+            period,
+            company_name,
+            company_symbol,
+            currency,
+            level_of_rounding,
+            reporting_type,
+            nature_of_report,
+            sales,
+            expenses,
+            operating_profit,
+            opm_percentage,
+            other_income,
+            interest,
+            depreciation,
+            profit_before_tax,
+            tax_percent,
+            net_profit,
+            eps_in_rs,
+            equity_capital,
+            reserves,
+            trade_payables_current,
+            borrowings,
+            other_liabilities,
+            total_liabilities,
+            total_equity,
+            fixed_assets,
+            cwip,
+            investments,
+            total_assets,
+            cash_from_operating_activity,
+            cash_from_investing_activity,
+            cash_from_financing_activity,
+        ]
+
+        placeholders = ", ".join(["?"] * len(columns))
+        cur.execute(
+            f"INSERT INTO annual_table ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
     def insert_xbrl_filing(
         self,
         scrip_code: str,
@@ -271,51 +663,4 @@ class SqliteRepository:
             self._conn.close()
         except Exception:
             pass
-
-    def get_next_query_id(self) -> int:
-        """Get the next available query_id based on the maximum existing id.
-        
-        Returns:
-            The next query_id to use
-        """
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT MAX(query_id) as max_id FROM symbol_extraction_results
-            """
-        )
-        result = cur.fetchone()
-        max_id = result[0] if result and result[0] else 0
-        return max_id + 1
-
-    def save_symbol_extraction_result(
-        self,
-        query_id: int,
-        query: str,
-        symbol: str,
-        name: str,
-        peers: str,
-    ) -> int:
-        """Save symbol extraction result to database.
-        
-        Args:
-            query_id: The query ID (group identifier)
-            query: The user query
-            symbol: Stock symbol
-            name: Company name
-            peers: JSON string of peer companies
-            
-        Returns:
-            The inserted row ID
-        """
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO symbol_extraction_results (query_id, query, symbol, name, peers)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (query_id, query, symbol, name, peers),
-        )
-        self._conn.commit()
-        return cur.lastrowid
 

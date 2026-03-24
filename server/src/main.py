@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from api.xbrl_route import router as xbrl_router
@@ -11,25 +10,13 @@ from api.batch_xbrl_finder import router as batch_inter_router
 from api.xbrl_ws_route import router as xbrl_ws_router
 from api.xbrl_ws_hist import router as xbrl_ws_hist_router
 from api.Xbrl_annual_extractor import router as xbrl_annual_router
-from api.symbol_extraction_route import router as symbol_extraction_router
-from api.peer_company_route import router as peer_company_router
-from api.symbol_with_peers_route import router as symbol_with_peers_router
+from api.llm_route import router as llm_router
 
-# Load environment variables from .env (if present)
+
 load_dotenv()
 
 app = FastAPI(title="Financial Data Extractor API")
 
-# Add CORS middleware to allow WebSocket and cross-origin requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (adjust for production)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include routers
 app.include_router(xbrl_router, prefix="/api", tags=["xbrl"])
 app.include_router(xml_router, prefix="/api", tags=["xml"])
 app.include_router(html_router, prefix="/api", tags=["html"])
@@ -39,9 +26,7 @@ app.include_router(analysis_router, prefix="/api", tags=["analysis"])
 app.include_router(xbrl_ws_router, prefix="/api", tags=["xbrl_ws"])
 app.include_router(xbrl_ws_hist_router, prefix="/api", tags=["xbrl_ws_hist"])
 app.include_router(xbrl_annual_router, prefix="/api", tags=["xbrl_annual"])
-app.include_router(symbol_extraction_router, prefix="/api", tags=["symbol_extraction"])
-app.include_router(peer_company_router, prefix="/api", tags=["peer_company"])
-app.include_router(symbol_with_peers_router, prefix="/api", tags=["symbol_with_peers"])
+app.include_router(llm_router, prefix="/api", tags=["llm"])
 
 if __name__ == "__main__":
     import uvicorn

@@ -71,6 +71,19 @@ class SqliteRepository:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS symbol_extraction_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_id INTEGER,
+                query TEXT,
+                symbol TEXT,
+                name TEXT,
+                peers TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
         self._conn.commit()
 
     def upsert_company(
@@ -258,3 +271,51 @@ class SqliteRepository:
             self._conn.close()
         except Exception:
             pass
+
+    def get_next_query_id(self) -> int:
+        """Get the next available query_id based on the maximum existing id.
+        
+        Returns:
+            The next query_id to use
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT MAX(query_id) as max_id FROM symbol_extraction_results
+            """
+        )
+        result = cur.fetchone()
+        max_id = result[0] if result and result[0] else 0
+        return max_id + 1
+
+    def save_symbol_extraction_result(
+        self,
+        query_id: int,
+        query: str,
+        symbol: str,
+        name: str,
+        peers: str,
+    ) -> int:
+        """Save symbol extraction result to database.
+        
+        Args:
+            query_id: The query ID (group identifier)
+            query: The user query
+            symbol: Stock symbol
+            name: Company name
+            peers: JSON string of peer companies
+            
+        Returns:
+            The inserted row ID
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO symbol_extraction_results (query_id, query, symbol, name, peers)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (query_id, query, symbol, name, peers),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+

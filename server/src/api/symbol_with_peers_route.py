@@ -1,9 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
+import json
 
 from service.symbol_extraction_service import extract_company_symbol
 from service.peer_company_service import get_peer_companies
+from repository.sqlite_repository import SqliteRepository
 
 router = APIRouter()
 
@@ -14,75 +16,58 @@ class PeerInfo(BaseModel):
     symbol: str
 
 
-class ExtractedCompany(BaseModel):
-    """Model for extracted company information."""
+class CompanyInfo(BaseModel):
+    """Model for company information with peers."""
     symbol: str
     name: str
+    peers: List[PeerInfo]
 
 
-class CompanyWithPeersResponse(BaseModel):
-    """Response model combining symbol extraction and peer companies."""
-    query: str
-    extracted_companies: List[ExtractedCompany]
-    companies_with_peers: List[Dict[str, Any]]
-
-
-class ExtractSymbolAndPeersRequest(BaseModel):
+class SymbolWithPeersRequest(BaseModel):
     """Request model for extracting symbols and fetching peers."""
     query: str
     peer_type: str = "sector"
 
 
-@router.post("/extract-symbol-with-peers", response_model=CompanyWithPeersResponse)
-async def extract_symbol_with_peers(request: ExtractSymbolAndPeersRequest):
+class SymbolWithPeersResponse(BaseModel):
+    """Response model with extracted companies and their peers."""
+    companies: List[CompanyInfo]
+
+
+@router.post("/extract-symbol-with-peers", response_model=SymbolWithPeersResponse)
+async def extract_symbol_with_peers(request: SymbolWithPeersRequest):
     """Extract company symbols from query and fetch their peer companies.
     
-    This endpoint combines symbol extraction with peer company fetching.
-    It identifies companies from the user query and returns both the
-    extracted companies and their peer companies.
-    
     Args:
-        request: ExtractSymbolAndPeersRequest with query and peer_type
+        request: SymbolWithPeersRequest with query and peer_type
         
     Returns:
-        CompanyWithPeersResponse with extracted companies and their peers
+        SymbolWithPeersResponse with extracted companies and their peers
         
     Example:
         Request Body:
         {
-            "query": "What is the revenue of Apple and Microsoft?",
-            "peer_type": "sector"
+            "query": "What is the revenue of Hexaware and Coforge?"
         }
         
         Response:
         {
-            "query": "What is the revenue of Apple and Microsoft?",
-            "extracted_companies": [
-                {"symbol": "AAPL", "name": "Apple Inc."},
-                {"symbol": "MSFT", "name": "Microsoft Corporation"}
-            ],
-            "companies_with_peers": [
+            "companies": [
                 {
-                    "symbol": "AAPL",
-                    "company_name": "Apple Inc.",
-                    "sector": "Technology",
-                    "industry": "Consumer Electronics",
-                    "peer_type": "sector",
+                    "symbol": "HEXT",
+                    "name": "Hexaware Technologies Limited",
                     "peers": [
-                        {"name": "Microsoft Corporation", "symbol": "MSFT"}
-                    ],
-                    "peer_count": 1
+                        {"name": "TCS Limited", "symbol": "TCS"},
+                        {"name": "Infosys Limited", "symbol": "INFY"}
+                    ]
                 },
                 {
-                    "symbol": "MSFT",
-                    "company_name": "Microsoft Corporation",
-                    "sector": "Technology",
-                    "industry": "Software",
-                    "peer_type": "sector",
+                    "symbol": "COFORGE",
+                    "name": "Coforge Limited",
                     "peers": [
-                        {"name": "Apple Inc.", "symbol": "AAPL"}
-                    ],
-                    "peer_count": 1
+                        {"name": "TCS Limited", "symbol": "TCS"},
+                        {"name": "Hexaware Technologies Limited", "symbol": "HEXT"}
+                    ]
                 }
             ]
         }
@@ -97,46 +82,57 @@ async def extract_symbol_with_peers(request: ExtractSymbolAndPeersRequest):
         # Step 1: Extract symbols from the query
         symbols_dict, llm_response, raw_content = extract_company_symbol(request.query)
         
-        # Convert extracted symbols to list format
-        extracted_companies = [
-            ExtractedCompany(symbol=symbol, name=company_name)
-            for symbol, company_name in symbols_dict.items()
-        ]
+        # Initialize database repository
+        repo = SqliteRepository()
         
-        # Step 2: For each extracted symbol, fetch peer companies
-        companies_with_peers = []
+        # Get the next query_id
+        query_id = repo.get_next_query_id()
+        
+        # Step 2: For each extracted symbol, fetch peer companies and save to DB
+        companies = []
         for symbol, company_name in symbols_dict.items():
             try:
                 peer_result = get_peer_companies(symbol, request.peer_type)
                 peers = [PeerInfo(name=p["name"], symbol=p["symbol"]) for p in peer_result["peers"]]
                 
-                companies_with_peers.append({
-                    "symbol": peer_result["symbol"],
-                    "company_name": peer_result["company_name"],
-                    "sector": peer_result.get("sector"),
-                    "industry": peer_result.get("industry"),
-                    "peer_type": peer_result["peer_type"],
-                    "peers": [p.dict() for p in peers],
-                    "peer_count": peer_result["peer_count"]
-                })
+                company_info = CompanyInfo(
+                    symbol=symbol,
+                    name=company_name,
+                    peers=peers
+                )
+                companies.append(company_info)
+                
+                # Save to database with query_id
+                peers_json = json.dumps([{"name": p.name, "symbol": p.symbol} for p in peers])
+                repo.save_symbol_extraction_result(
+                    query_id=query_id,
+                    query=request.query,
+                    symbol=symbol,
+                    name=company_name,
+                    peers=peers_json
+                )
+                
             except Exception as e:
-                # If peer lookup fails, still include the extracted company
-                companies_with_peers.append({
-                    "symbol": symbol,
-                    "company_name": company_name,
-                    "sector": None,
-                    "industry": None,
-                    "peer_type": request.peer_type,
-                    "peers": [],
-                    "peer_count": 0,
-                    "error": str(e)
-                })
+                # If peer lookup fails, still include the extracted company with empty peers
+                company_info = CompanyInfo(
+                    symbol=symbol,
+                    name=company_name,
+                    peers=[]
+                )
+                companies.append(company_info)
+                
+                # Save to database without peers
+                repo.save_symbol_extraction_result(
+                    query_id=query_id,
+                    query=request.query,
+                    symbol=symbol,
+                    name=company_name,
+                    peers="[]"
+                )
         
-        return CompanyWithPeersResponse(
-            query=request.query,
-            extracted_companies=extracted_companies,
-            companies_with_peers=companies_with_peers
-        )
+        repo.close()
+        
+        return SymbolWithPeersResponse(companies=companies)
         
     except HTTPException:
         raise

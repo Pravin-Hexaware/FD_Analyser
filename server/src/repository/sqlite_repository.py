@@ -265,6 +265,26 @@ class SqliteRepository:
         row = cur.fetchone()
         return row[0] if row else None
 
+    def get_latest_annual_data(self, scrip_code: str) -> Optional[dict]:
+        """Get the latest annual data for a scrip_code."""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT * FROM annual_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            (scrip_code,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_latest_quarterly_data(self, scrip_code: str) -> Optional[dict]:
+        """Get the latest quarterly data for a scrip_code."""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT * FROM quarterly_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            (scrip_code,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def find_peers(self, symbol: str) -> dict:
         """Find peers for the given company symbol based on annual sales +/-20% in same sector."""
         cur = self._conn.cursor()

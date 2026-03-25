@@ -160,88 +160,53 @@ def generate_analysis_report(records: List[Dict[str, Any]]) -> Tuple[str, Dict[s
     return report, llm_response_dict 
 
 
-def analyze_target_companies_from_query(query: str) -> Dict[str, Any]:
-    """Use Azure LLM to parse financial target companies + peers into a JSON schema."""
+def parse_query_and_get_companies(query: str) -> Dict[str, Any]:
+    """Use Azure LLM to break down the user query and generate structured response with companies and peers in one call."""
     if not query or not query.strip():
         raise ValueError("Query must not be empty.")
 
     system_prompt = (
-        "You are a Senior Financial Analyst and Data Extraction Expert specializing in "
-        "parsing financial queries, identifying listed companies, validating market identifiers, "
-        "and structuring data for XBRL-based extraction.\n\n"
-
-        "## Task:\n"
-        "Parse the user query to extract the financial intent and identify all relevant companies, "
-        "including their stock symbols, scrip codes, and industries, along with peers from the same industry.\n\n"
-
-        "## Input Variables:\n"
-        f"- **query**: {query}\n\n"
-
-        "## Requirements:\n"
-        "- Identify the **statement_frequency**: 'quarterly', 'annual', or 'unspecified'.\n"
-        "- Identify the **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.\n"
-        "- Identify the **period**: such as 'latest quarter', 'Q3 2023', or 'unspecified'.\n"
-        "- For each target company:\n"
-        "  - Include the **company name**, **symbol**, **industry**, and **accurate scrip_code**.\n"
-        "  - Include **exactly 3 peers** from the same industry.\n"
-        "- For each peer:\n"
-        "  - Include **company name**, **symbol**, **industry**, and **accurate scrip_code**.\n"
-        "- Always return strictly valid JSON with *no explanation or additional text*.\n"
-        "- The scrip_code must be accurate and correspond to the correct BSE listing.\n\n"
-
-        "## Output Format:\n"
-        "Return the data as a valid JSON object using the schema below.\n\n"
-
-        "### JSON Schema:\n"
-        """
-        {
-          "intent": {
-            "statement_frequency": "quarterly | annual | unspecified",
-            "statement_type": "balance_sheet | cash_flow | income_statement | ratios | unspecified",
-            "period": "string or unspecified"
-          },
-          "target_companies": {
-            "1": {
-              "company": "company_name",
-              "symbol": "company_symbol",
-              "scrip_code": "company_scrip_code",
-              "industry": "company_industry",
-              "peers": {
-                "1": {
-                  "company": "peer_company_name",
-                  "symbol": "peer_company_symbol",
-                  "scrip_code": "peer_company_scrip_code",
-                  "industry": "peer_company_industry"
-                },
-                "2": {
-                  "company": "peer_company_name",
-                  "symbol": "peer_company_symbol",
-                  "scrip_code": "peer_company_scrip_code",
-                  "industry": "peer_company_industry"
-                },
-                "3": {
-                  "company": "peer_company_name",
-                  "symbol": "peer_company_symbol",
-                  "scrip_code": "peer_company_scrip_code",
-                  "industry": "peer_company_industry"
-                }
-              }
-            }
-          }
-        }
-        """
+        "You are a Senior Financial Analyst and Data Extraction Expert. Your task is to analyze a user query for financial data extraction.\n\n"
+        "First, break down the query into key components:\n"
+        "- **statement_frequency**: 'quarterly', 'annual', or 'unspecified'.\n"
+        "- **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.\n"
+        "- **period**: Specific period like 'latest quarter', 'Q3 2023', or 'unspecified'.\n"
+        "- **target_companies**: List of company names mentioned.\n"
+        "- **industries**: Any industries mentioned.\n"
+        "- **other_requirements**: Any other specific requirements or questions.\n\n"
+        "Then, based on the breakdown, generate a structured JSON response identifying target companies and their peers.\n"
+        "For each target company, include exactly 3 peers from the same industry. Ensure scrip_codes are accurate BSE codes.\n\n"
+        "Return strictly valid JSON with no additional text.\n\n"
+        "JSON Schema:\n"
+        "{\n"
+        "  \"intent\": {\n"
+        "    \"statement_frequency\": \"string\",\n"
+        "    \"statement_type\": \"string\",\n"
+        "    \"period\": \"string\"\n"
+        "  },\n"
+        "  \"target_companies\": {\n"
+        "    \"1\": {\n"
+        "      \"company\": \"company_name\",\n"
+        "      \"symbol\": \"company_symbol\",\n"
+        "      \"scrip_code\": \"company_scrip_code\",\n"
+        "      \"industry\": \"company_industry\",\n"
+        "      \"peers\": {\n"
+        "        \"1\": {\"company\": \"peer_name\", \"symbol\": \"peer_symbol\", \"scrip_code\": \"peer_scrip\", \"industry\": \"industry\"},\n"
+        "        \"2\": {...},\n"
+        "        \"3\": {...}\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
     )
 
-    response = _invoke_llm(system_prompt, "", max_tokens=600)  # Combined prompt, empty user_prompt
+    response = _invoke_llm(system_prompt, query, max_tokens=800)
     normalized = _normalize_llm_response(response)
     text = normalized.get("content", "")
 
-    # Try strict JSON parse first and fallback to substring extraction.
-    parsed: Dict[str, Any] = {}
     try:
         parsed = json.loads(text)
     except Exception:
-        # extract JSON object between first { and last }
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -249,18 +214,22 @@ def analyze_target_companies_from_query(query: str) -> Dict[str, Any]:
             try:
                 parsed = json.loads(candidate)
             except Exception:
-                parsed = {
-                    "error": "LLM output is not valid JSON",
-                    "raw_output": text,
-                }
-        else:
-            parsed = {
-                "error": "LLM output does not contain JSON object",
-                "raw_output": text,
-            }
+                parsed = {"error": "Failed to parse JSON"}
 
-    return {
-        "query": query,
-        "parsed": parsed,
-        "raw_llm_response": normalized,
-    }
+    return parsed
+
+
+def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
+    """Use LLM to generate an answer based on the query and fetched data."""
+    system_prompt = f"""
+You are a Financial Analyst. Answer the user's query using the provided financial data.
+The data is for {frequency} financial statements, including {statement_type.replace('_', ' ')} metrics where available.
+
+Provide a clear, concise answer to the query. If data is missing for some companies, note that.
+"""
+
+    user_prompt = f"Query: {query}\n\nData: {json.dumps(data, indent=2)}"
+
+    response = _invoke_llm(system_prompt, user_prompt, max_tokens=800)
+    normalized = _normalize_llm_response(response)
+    return normalized.get("content", "No answer generated.")

@@ -25,7 +25,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
     """WebSocket endpoint that reads companies from CSV, fetches XBRL URLs, and stores them in SQLite."""
     await websocket.accept()
 
-    csv_path = Path(__file__).resolve().parents[1] / "Data" / "Company_metadata.csv"
+    csv_path = Path(__file__).resolve().parents[1] / "Data" / "input_companies.csv"
     if not csv_path.exists():
         await websocket.send_json({"error": f"CSV file not found: {csv_path}"})
         await websocket.close()

@@ -6,7 +6,7 @@ import {
   Database, Shield, Zap, TrendingDown
 } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { trendingCompanies, searchCompanies, companies } from "../data/companies";
+import { apiClient, type CompanySuggestion } from "../../api/apiClient";
 
 const tickerItems = [
   { symbol: "RELIANCE", price: "₹2,945", change: "+2.5%", up: true },
@@ -70,9 +70,25 @@ function GitCompareFeature({ className }: { className?: string }) {
 export default function LandingPage() {
   const navigate = useNavigate();
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searchResults, setSearchResults] = useState<CompanySuggestion[]>([]);
+  const [companies, setCompanies] = useState<any[]>([]);
   const [tickerPos, setTickerPos] = useState(0);
+  const [isSearching, setIsSearching] = useState(false);
   const tickerRef = useRef<number | null>(null);
+
+  // Fetch all companies on component mount
+  useEffect(() => {
+    const fetchCompanies = async () => {
+      try {
+        const data = await apiClient.getAllCompanies();
+        setCompanies(data);
+      } catch (error) {
+        console.error("Failed to fetch companies:", error);
+      }
+    };
+
+    fetchCompanies();
+  }, []);
 
   useEffect(() => {
     let pos = 0;
@@ -87,10 +103,19 @@ export default function LandingPage() {
     return () => { if (tickerRef.current) cancelAnimationFrame(tickerRef.current); };
   }, []);
 
-  const handleSearch = (query: string) => {
+  const handleSearch = async (query: string) => {
     setSearchQuery(query);
     if (query.length > 1) {
-      setSearchResults(searchCompanies(query));
+      setIsSearching(true);
+      try {
+        const results = await apiClient.searchCompanies(query);
+        setSearchResults(results);
+      } catch (error) {
+        console.error("Search failed:", error);
+        setSearchResults([]);
+      } finally {
+        setIsSearching(false);
+      }
     } else {
       setSearchResults([]);
     }
@@ -179,20 +204,34 @@ export default function LandingPage() {
             </div>
 
             {searchResults.length > 0 && (
-              <div className="absolute top-full mt-2 w-full bg-slate-900 border border-slate-700 rounded-xl shadow-2xl overflow-hidden z-20">
+              <div className="absolute top-full mt-2 w-full bg-slate-900 border border-slate-700 rounded-xl shadow-2xl overflow-hidden z-20 max-h-80 overflow-y-auto">
+                <div className="p-2 text-xs text-slate-400 border-b border-slate-700">
+                  {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} found
+                </div>
                 {searchResults.map((company) => (
                   <button
                     key={company.id}
                     onClick={() => navigate(`/company/${company.id}`)}
-                    className="w-full px-4 py-3 text-left hover:bg-slate-800 transition-colors flex items-center justify-between border-b border-slate-800 last:border-b-0"
+                    className="w-full px-4 py-3 text-left hover:bg-slate-800 transition-colors flex items-center justify-between border-b border-slate-800 last:border-b-0 group"
                   >
-                    <div>
-                      <div className="text-white font-medium text-sm">{company.name}</div>
-                      <div className="text-slate-400 text-xs mt-0.5">{company.symbol} · {company.sector}</div>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="text-white font-medium text-sm group-hover:text-indigo-300 transition-colors">{company.name}</div>
+                        <div className="text-slate-300 text-sm font-medium">{company.symbol}</div>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <div className="text-slate-400 text-xs">{company.scripcode}</div>
+                        <div className="text-slate-500 text-xs">{company.sector}</div>
+                      </div>
                     </div>
-                    <ChevronRight className="size-4 text-slate-600" />
+                    <ChevronRight className="size-4 text-slate-600 group-hover:text-indigo-400 transition-colors ml-3" />
                   </button>
                 ))}
+              </div>
+            )}
+            {searchQuery.length > 1 && searchResults.length === 0 && !isSearching && (
+              <div className="absolute top-full mt-2 w-full bg-slate-900 border border-slate-700 rounded-xl shadow-2xl px-4 py-6 z-20 text-center">
+                <p className="text-slate-400 text-sm">No companies found for "<span className="text-white font-medium">{searchQuery}</span>"</p>
               </div>
             )}
           </div>
@@ -348,10 +387,16 @@ export default function LandingPage() {
 
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {companies.map((company) => {
-            const latest = company.financials[0];
-            const prev = company.financials[1];
-            const salesGrowth = (((latest.sales - prev.sales) / prev.sales) * 100).toFixed(1);
-            const isUp = latest.sales > prev.sales;
+            // Safety check for financials data
+            const hasFinancials = company.financials && company.financials.length >= 2;
+            const latest = hasFinancials ? company.financials[0] : null;
+            const prev = hasFinancials ? company.financials[1] : null;
+            
+            // Calculate growth if we have data, otherwise use defaults
+            const salesGrowth = hasFinancials && prev.sales > 0 
+              ? (((latest.sales - prev.sales) / prev.sales) * 100).toFixed(1) 
+              : "0.0";
+            const isUp = hasFinancials ? latest.sales > prev.sales : true;
 
             return (
               <button
@@ -366,23 +411,31 @@ export default function LandingPage() {
                     </div>
                     <div className="text-sm text-gray-400 mt-0.5">{company.symbol} · {company.sector}</div>
                   </div>
-                  <div className={`text-xs px-2.5 py-1 rounded-full font-medium ${isUp ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600"}`}>
-                    {isUp ? "+" : ""}{salesGrowth}% YoY
-                  </div>
+                  {hasFinancials && (
+                    <div className={`text-xs px-2.5 py-1 rounded-full font-medium ${isUp ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600"}`}>
+                      {isUp ? "+" : ""}{salesGrowth}% YoY
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-3 gap-3">
                   <div>
                     <div className="text-xs text-gray-400 mb-0.5">Sales</div>
-                    <div className="text-sm font-semibold text-gray-900">₹{(latest.sales / 1000).toFixed(0)}B</div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      {hasFinancials ? `₹${(latest.sales / 1000).toFixed(0)}B` : "N/A"}
+                    </div>
                   </div>
                   <div>
                     <div className="text-xs text-gray-400 mb-0.5">OPM</div>
-                    <div className="text-sm font-semibold text-gray-900">{latest.opm}%</div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      {hasFinancials ? `${latest.opm}%` : "N/A"}
+                    </div>
                   </div>
                   <div>
                     <div className="text-xs text-gray-400 mb-0.5">ROCE</div>
-                    <div className="text-sm font-semibold text-gray-900">{latest.roce}%</div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      {hasFinancials ? `${latest.roce}%` : "N/A"}
+                    </div>
                   </div>
                 </div>
 

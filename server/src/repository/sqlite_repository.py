@@ -165,6 +165,19 @@ class SqliteRepository:
             );
             """
         )
+        
+        # Create chat history table
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_history (
+                chat_id TEXT PRIMARY KEY,
+                user_query TEXT NOT NULL,
+                response TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
+        
         self._conn.commit()
 
         # If annual_table existed from earlier version, ensure new columns exist
@@ -677,6 +690,45 @@ class SqliteRepository:
         )
         self._conn.commit()
         return cur.lastrowid
+
+    def save_chat(self, chat_id: str, user_query: str, response: str) -> None:
+        """Save a chat message to history."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO chat_history (chat_id, user_query, response)
+            VALUES (?, ?, ?)
+            """,
+            (chat_id, user_query, response)
+        )
+        self._conn.commit()
+
+    def get_chat_history(self) -> list:
+        """Get all chat history sorted by most recent first."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT chat_id, user_query, response, created_at
+            FROM chat_history
+            ORDER BY created_at DESC
+            """
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_chat_by_id(self, chat_id: str) -> Optional[dict]:
+        """Get a specific chat by ID."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT chat_id, user_query, response, created_at
+            FROM chat_history
+            WHERE chat_id = ?
+            """,
+            (chat_id,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
 
     def close(self) -> None:
         try:

@@ -1,6 +1,7 @@
 // Mock chatbot responses and AI report generation
 import type { CompanyData } from "./companies";
 import { companies } from "./companies";
+import { sendLLMQuery } from "../services/api";
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -144,7 +145,25 @@ export function generateAIReport(companyIds: string[], companies: CompanyData[])
   }
 }
 
-export function processChatQuery(query: string, companies: CompanyData[]): ChatMessage {
+export async function processChatQuery(query: string, companiesList: CompanyData[]): Promise<ChatMessage> {
+  try {
+    // Send query to backend LLM endpoint
+    const response = await sendLLMQuery(query);
+    
+    return {
+      id: response.chat_id,
+      role: "assistant",
+      content: response.answer,
+      timestamp: new Date(),
+    };
+  } catch (error) {
+    // Fallback to local processing if backend fails
+    console.warn("Backend API error, falling back to local processing:", error);
+    return processChatQueryLocal(query, companiesList);
+  }
+}
+
+export function processChatQueryLocal(query: string, companies: CompanyData[]): ChatMessage {
   const messageId = `msg-${Date.now()}`;
   const q = query.toLowerCase();
   

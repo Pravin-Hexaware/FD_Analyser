@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List
+from datetime import datetime
+import uuid
 
 from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data
 from repository.sqlite_repository import SqliteRepository
@@ -10,6 +12,14 @@ router = APIRouter()
 
 class LLMQueryRequest(BaseModel):
     query: str
+
+
+class ChatHistoryResponse(BaseModel):
+    chat_id: str
+    user_query: str
+    response: str
+    created_at: str
+    title: str  # First 50 chars of query for display
 
 
 def _determine_frequency(statement_frequency: str, statement_type: str, period: str) -> str:
@@ -157,15 +167,70 @@ async def llm_target_companies(request: LLMQueryRequest):
                         all_data[peer.get("company", p_key)] = p_data
                         print(f"Fetched from {frequency}_table for scrip_code {p_scrip}: {p_data}")
 
-        repo.close()
-        print("All fetched data:", all_data)
-
         # Generate answer using LLM
         print("Step 3: Generating answer with 2nd LLM")
         answer = generate_answer_from_data(request.query, all_data, statement_type, frequency)
         print("2nd LLM answer:", answer)
-        return {"answer": answer}
+        
+        # Save chat to database
+        chat_id = str(uuid.uuid4())
+        repo.save_chat(chat_id, request.query, answer)
+        repo.close()
+        
+        return {
+            "chat_id": chat_id,
+            "answer": answer
+        }
 
+    except Exception as e:
+        print("Error:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/llm/chat-history", response_model=List[ChatHistoryResponse])
+async def get_chat_history():
+    """Get all chat history."""
+    try:
+        repo = SqliteRepository()
+        chats = repo.get_chat_history()
+        repo.close()
+        
+        # Format response with titles (first 50 chars of query)
+        return [
+            ChatHistoryResponse(
+                chat_id=chat["chat_id"],
+                user_query=chat["user_query"],
+                response=chat["response"],
+                created_at=chat["created_at"],
+                title=chat["user_query"][:50] + ("..." if len(chat["user_query"]) > 50 else "")
+            )
+            for chat in chats
+        ]
+    except Exception as e:
+        print("Error:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/llm/chat-history/{chat_id}", response_model=ChatHistoryResponse)
+async def get_chat(chat_id: str):
+    """Get a specific chat by ID."""
+    try:
+        repo = SqliteRepository()
+        chat = repo.get_chat_by_id(chat_id)
+        repo.close()
+        
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        
+        return ChatHistoryResponse(
+            chat_id=chat["chat_id"],
+            user_query=chat["user_query"],
+            response=chat["response"],
+            created_at=chat["created_at"],
+            title=chat["user_query"][:50] + ("..." if len(chat["user_query"]) > 50 else "")
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         print("Error:", str(e))
         raise HTTPException(status_code=500, detail=str(e))

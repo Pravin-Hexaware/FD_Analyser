@@ -2,13 +2,14 @@ import { useState, useRef, useEffect, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Send, BarChart3, Plus, MessageSquare,
-  Settings, Home, Search, Sparkles, Bot, User,
-  TrendingUp, Building2, FileText, X
+  Settings, Home, Search, Sparkles, Bot,
+  TrendingUp, Building2, FileText
 } from "lucide-react";
-import { Button } from "../components/ui/button";
 import { ChatMessage } from "../components/ChatMessage";
-import type{ ChatMessage as ChatMessageType, processChatQuery } from "../data/chatbot";
+import type { ChatMessage as ChatMessageType } from "../data/chatbot";
+import { processChatQuery } from "../data/chatbot";
 import { companies } from "../data/companies";
+import { fetchChatHistory, type ChatHistoryItem } from "../services/api";
 
 const navItems = [
   { path: "/", icon: Home, label: "Home" },
@@ -22,13 +23,6 @@ const suggestions = [
   { icon: Building2, text: "Show HDFC Bank key metrics", color: "orange" },
   { icon: TrendingUp, text: "What is WIPRO's 5Y PAT CAGR?", color: "blue" },
   { icon: FileText, text: "Compare HDFC and Reliance", color: "rose" },
-];
-
-const chatHistoryItems = [
-  { id: 1, title: "Reliance Q3 Analysis", time: "2 hours ago", active: true },
-  { id: 2, title: "HDFC Bank Credit Quality", time: "2 days ago" },
-  { id: 3, title: "Asian Paints Margins", time: "3 days ago" },
-  { id: 4, title: "Tech Sector Overview", time: "1 week ago" },
 ];
 
 function TypingIndicator() {
@@ -58,10 +52,53 @@ export default function ChatbotPage() {
   ]);
   const [inputValue, setInputValue] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [currentChatId, setCurrentChatId] = useState(1);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const [location] = useState(window.location.pathname);
+
+  // Load chat history on component mount
+  useEffect(() => {
+    loadChatHistory();
+  }, []);
+
+  const loadChatHistory = async () => {
+    try {
+      const history = await fetchChatHistory();
+      setChatHistory(history);
+    } catch (error) {
+      console.warn("Failed to load chat history:", error);
+    }
+  };
+
+  const loadChatById = async (chatId: string) => {
+    try {
+      setCurrentChatId(chatId);
+      const chat = await fetchChatHistory();
+      const selectedChat = chat.find(c => c.chat_id === chatId);
+      
+      if (selectedChat) {
+        // Load the selected chat into the message area
+        const userMessage: ChatMessageType = {
+          id: `msg-${selectedChat.chat_id}-user`,
+          role: "user",
+          content: selectedChat.user_query,
+          timestamp: new Date(selectedChat.created_at),
+        };
+        
+        const assistantMessage: ChatMessageType = {
+          id: selectedChat.chat_id,
+          role: "assistant",
+          content: selectedChat.response,
+          timestamp: new Date(selectedChat.created_at),
+        };
+        
+        setMessages([userMessage, assistantMessage]);
+      }
+    } catch (error) {
+      console.warn("Failed to load chat:", error);
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -81,11 +118,22 @@ export default function ChatbotPage() {
     setInputValue("");
     setIsTyping(true);
 
-    setTimeout(() => {
-      setIsTyping(false);
-      const aiResponse = processChatQuery(text, companies);
-      setMessages(prev => [...prev, aiResponse]);
-    }, 800 + Math.random() * 600);
+    // Call the async function to process the query
+    processChatQuery(text, companies)
+      .then(aiResponse => {
+        setIsTyping(false);
+        setMessages(prev => [...prev, aiResponse]);
+      })
+      .catch(error => {
+        console.error("Error processing chat query:", error);
+        setIsTyping(false);
+        setMessages(prev => [...prev, {
+          id: `msg-${Date.now()}-error`,
+          role: "assistant",
+          content: "Sorry, there was an error processing your request. Please try again.",
+          timestamp: new Date(),
+        }]);
+      });
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -163,20 +211,24 @@ export default function ChatbotPage() {
             Recent Chats
           </div>
           <div className="space-y-0.5 overflow-y-auto" style={{ maxHeight: "calc(100% - 24px)" }}>
-            {chatHistoryItems.map((chat) => (
-              <button
-                key={chat.id}
-                onClick={() => setCurrentChatId(chat.id)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${
-                  currentChatId === chat.id
-                    ? "bg-slate-700 text-white"
-                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800"
-                }`}
-              >
-                <div className="text-sm truncate font-medium">{chat.title}</div>
-                <div className="text-xs text-slate-600 mt-0.5">{chat.time}</div>
-              </button>
-            ))}
+            {chatHistory.length === 0 ? (
+              <div className="text-xs text-slate-500 px-3 py-2">No chats yet</div>
+            ) : (
+              chatHistory.map((chat) => (
+                <button
+                  key={chat.chat_id}
+                  onClick={() => loadChatById(chat.chat_id)}
+                  className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${
+                    currentChatId === chat.chat_id
+                      ? "bg-slate-700 text-white"
+                      : "text-slate-400 hover:text-slate-100 hover:bg-slate-800"
+                  }`}
+                >
+                  <div className="text-sm truncate font-medium">{chat.title}</div>
+                  <div className="text-xs text-slate-600 mt-0.5">{chat.created_at}</div>
+                </button>
+              ))
+            )}
           </div>
         </div>
 

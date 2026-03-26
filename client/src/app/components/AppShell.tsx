@@ -1,10 +1,11 @@
-import { ReactNode } from "react";
+import type { ReactNode } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   BarChart3, MessageSquare, Settings, Home,
   ChevronRight, HelpCircle, Bell, BarChart2
 } from "lucide-react";
-import { companies } from "../data/companies";
+import { fetchCompanies, type CompanyInfo } from "../services/api";
 
 interface AppShellProps {
   children: ReactNode;
@@ -32,6 +33,21 @@ const sectorColors: Record<string, string> = {
 export function AppShell({ children, title, subtitle, breadcrumb, actions, noPadding }: AppShellProps) {
   const navigate = useNavigate();
   const location = useLocation();
+  const [companiesList, setCompaniesList] = useState<CompanyInfo[]>([]);
+
+  useEffect(() => {
+    const loadCompanies = async () => {
+      try {
+        const data = await fetchCompanies();
+        setCompaniesList(data);
+      } catch (error) {
+        console.error("Failed to load companies:", error);
+        setCompaniesList([]);
+      }
+    };
+
+    loadCompanies();
+  }, []);
 
   return (
     <div className="h-screen flex bg-slate-50 overflow-hidden">
@@ -90,12 +106,12 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
             Companies
           </div>
           <div className="space-y-0.5 overflow-y-auto" style={{ maxHeight: "calc(100% - 28px)" }}>
-            {companies.map((company) => {
-              const isActive = location.pathname === `/company/${company.id}`;
+            {companiesList.map((company) => {
+              const isActive = location.pathname === `/company/${company.scrip_code}`;
               return (
                 <button
-                  key={company.id}
-                  onClick={() => navigate(`/company/${company.id}`)}
+                  key={company.scrip_code}
+                  onClick={() => navigate(`/company/${company.scrip_code}`)}
                   className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all text-sm ${
                     isActive
                       ? "bg-slate-700 text-white"
@@ -104,12 +120,12 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
                 >
                   <div
                     className={`size-2 rounded-full flex-shrink-0 ${
-                      sectorColors[company.sector] || "bg-slate-500"
+                      sectorColors[company.sector || ""] || "bg-slate-500"
                     }`}
                   />
                   <span className="font-medium">{company.symbol}</span>
                   <span className="text-xs text-slate-600 ml-auto truncate max-w-16">
-                    {company.sector.split(" ")[0]}
+                    {company.sector ? company.sector.split(" ")[0] : "N/A"}
                   </span>
                 </button>
               );

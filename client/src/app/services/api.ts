@@ -122,8 +122,9 @@ export async function fetchChat(chatId: string): Promise<ChatHistoryItem> {
  */
 export async function fetchCompanies(): Promise<CompanyInfo[]> {
   try {
-    const response = await apiClient.get<CompanyInfo[]>('/companies');
-    return response.data;
+    const response = await apiClient.get<{ success: boolean; count: number; companies: CompanyInfo[] }>('/companies');
+    // Backend returns wrapped response, extract the companies array
+    return Array.isArray(response.data?.companies) ? response.data.companies : [];
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const message = error.response?.data?.detail || error.message;

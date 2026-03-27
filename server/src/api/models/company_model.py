@@ -34,9 +34,9 @@ class Company:
     def to_dict(self):
         return {
             "id": self.id,
-            "name": self.name,
+            "company_name": self.name if self.name and self.name.strip() else self.symbol,
             "symbol": self.symbol,
-            "bseCode": self.bse_code,
+            "scrip_code": self.bse_code,
             "sector": self.sector,
             "industry": self.industry,
             "xbrlLink": self.xbrl_link,

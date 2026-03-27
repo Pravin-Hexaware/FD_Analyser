@@ -94,10 +94,11 @@ export default function ComparisonPage() {
     }
     
     // Apply search filter
+    if (!company) return false;
     return (
-      company.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      company.company_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      company.sector?.toLowerCase().includes(searchQuery.toLowerCase())
+      (company.symbol || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (company.company_name || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (company.sector || "").toLowerCase().includes(searchQuery.toLowerCase())
     );
   });
 
@@ -209,13 +210,13 @@ export default function ComparisonPage() {
                             className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
                             style={{ backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] }}
                           >
-                            {company.symbol.charAt(0)}
+                            {(company.symbol || "?").charAt(0)}
                           </div>
 
                           {/* Company Info */}
                           <div className="flex-1 min-w-0">
-                            <div className="font-semibold text-gray-900 text-sm">{company.symbol}</div>
-                            <div className="text-xs text-gray-600">{company.company_name.substring(0, 40)}</div>
+                            <div className="font-semibold text-gray-900 text-sm">{company.symbol || "N/A"}</div>
+                            <div className="text-xs text-gray-600">{(company.company_name || company.symbol || "Unknown").substring(0, 40)}</div>
                           </div>
                         </div>
                       );
@@ -225,9 +226,10 @@ export default function ComparisonPage() {
                     {available.filter(c => 
                       filteredCompanies.find(fc => fc.scrip_code === c.scrip_code)
                     ).map((company, idx) => {
+                      if (!company) return null;
                       return (
                         <div
-                          key={company.scrip_code}
+                          key={`available-${company.scrip_code || idx}`}
                           className="flex items-center gap-3 px-4 py-3.5 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 cursor-pointer transition-all"
                           onClick={() => {
                             if (selectedCompanies.length < 5) {
@@ -246,13 +248,13 @@ export default function ComparisonPage() {
                             className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
                             style={{ backgroundColor: COMPANY_COLORS[idx % COMPANY_COLORS.length] }}
                           >
-                            {company.symbol.charAt(0)}
+                            {(company.symbol || "?").charAt(0)}
                           </div>
 
                           {/* Company Info */}
                           <div className="flex-1 min-w-0">
-                            <div className="font-semibold text-gray-900 text-sm">{company.symbol}</div>
-                            <div className="text-xs text-gray-600">{company.company_name.substring(0, 40)}</div>
+                            <div className="font-semibold text-gray-900 text-sm">{company.symbol || "N/A"}</div>
+                            <div className="text-xs text-gray-600">{(company.company_name || company.symbol || "Unknown").substring(0, 40)}</div>
                           </div>
                         </div>
                       );

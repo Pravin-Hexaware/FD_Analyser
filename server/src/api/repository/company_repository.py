@@ -38,11 +38,11 @@ class CompanyRepository:
         for row in rows:
             company = Company(
                 id=str(row[0]) if row[0] else "",
-                name=row[1] or "",
+                name=row[1] if row[1] and row[1].strip() else row[2],  # Use symbol as fallback if name is empty
                 symbol=row[2] or "",
                 bse_code=row[3] or "",
-                sector=row[4] or "",
-                industry=row[5] or "",
+                sector=row[4] or "Unknown Sector",
+                industry=row[5] or "Unknown Industry",
                 xbrl_link="",
                 financials=[]
             )
@@ -67,11 +67,11 @@ class CompanyRepository:
         for row in rows:
             company = Company(
                 id=str(row[0]) if row[0] else "",
-                name=row[1] or "",
+                name=row[1] if row[1] and row[1].strip() else row[2],  # Use symbol as fallback if name is empty
                 symbol=row[2] or "",
                 bse_code=row[3] or "",
-                sector=row[4] or "",
-                industry=row[5] or "",
+                sector=row[4] or "Unknown Sector",
+                industry=row[5] or "Unknown Industry",
                 xbrl_link="",
                 financials=[]
             )
@@ -98,11 +98,11 @@ class CompanyRepository:
         
         company = Company(
             id=str(row[0]) if row[0] else "",
-            name=row[1] or "",
+            name=row[1] if row[1] and row[1].strip() else row[2],  # Use symbol as fallback if name is empty
             symbol=row[2] or "",
             bse_code=row[3] or "",
-            sector=row[4] or "",
-            industry=row[5] or "",
+            sector=row[4] or "Unknown Sector",
+            industry=row[5] or "Unknown Industry",
             xbrl_link="",
             financials=[]
         )

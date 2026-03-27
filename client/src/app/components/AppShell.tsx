@@ -106,11 +106,11 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
             Companies
           </div>
           <div className="space-y-0.5 overflow-y-auto" style={{ maxHeight: "calc(100% - 28px)" }}>
-            {companiesList.map((company) => {
+            {companiesList.map((company, idx) => {
               const isActive = location.pathname === `/company/${company.scrip_code}`;
               return (
                 <button
-                  key={company.scrip_code}
+                  key={`${company.scrip_code}-${idx}`}
                   onClick={() => navigate(`/company/${company.scrip_code}`)}
                   className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all text-sm ${
                     isActive

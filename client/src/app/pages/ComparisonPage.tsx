@@ -4,6 +4,15 @@ import { Plus, X, Search, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { AppShell } from "../components/AppShell";
 import { fetchCompanies, fetchCompanyFinancials, type CompanyInfo } from "../services/api";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
 
 const COMPANY_COLORS = ["#4f46e5", "#0d9488", "#7c3aed", "#dc2626", "#ea580c"];
 
@@ -20,6 +29,8 @@ export default function ComparisonPage() {
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
+  const [selectedMetrics, setSelectedMetrics] = useState<string[]>(["sales", "net_profit", "total_assets"]);
+  const [viewMode, setViewMode] = useState<"visualizations" | "table">("table");
 
   // Load companies from backend on mount
   useEffect(() => {
@@ -143,6 +154,56 @@ export default function ComparisonPage() {
               )}
             </div>
           </div>
+
+          {/* Selected Companies Tiles */}
+          {selectedCompanies.length > 0 && (
+            <div className="mb-6 pb-4 border-b border-gray-200">
+              <p className="text-xs font-semibold text-gray-600 mb-3">Selected Companies</p>
+              <div className="flex flex-wrap gap-3">
+                {selectedData.map((company) => (
+                  <div
+                    key={company.scrip_code}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 transition-all"
+                    style={{ borderColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "40", backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "10" }}
+                  >
+                    {/* Company Avatar */}
+                    <div
+                      className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
+                      style={{ backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] }}
+                    >
+                      {company.symbol.charAt(0)}
+                    </div>
+
+                    {/* Company Name and Symbol */}
+                    <div className="flex flex-col">
+                      <span className="font-semibold text-sm text-gray-900">{company.symbol}</span>
+                      <span className="text-xs text-gray-600">{company.company_name.substring(0, 25)}</span>
+                    </div>
+
+                    {/* Close Button */}
+                    <button
+                      onClick={() => handleRemoveCompany(company.scrip_code)}
+                      className="flex-shrink-0 ml-2 p-1 hover:bg-red-100 hover:text-red-600 text-gray-400 rounded-full transition-colors"
+                      title="Remove company"
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                ))}
+
+                {/* Add More Button - Show if less than 5 selected */}
+                {selectedCompanies.length < 5 && (
+                  <button
+                    onClick={() => setShowDropdown(true)}
+                    className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full border-2 border-dashed border-indigo-300 hover:border-indigo-500 hover:bg-indigo-50 transition-all"
+                  >
+                    <Plus className="size-4 text-indigo-600" />
+                    <span className="font-semibold text-sm text-indigo-600">Add</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Search Bar */}
           <div className="mb-4 relative">
@@ -291,6 +352,15 @@ export default function ComparisonPage() {
                   : "All companies selected"}
               </div>
             )}
+
+            {/* Max selection message */}
+            {selectedCompanies.length === 5 && (
+              <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                <p className="text-xs text-amber-700">
+                  <span className="font-semibold">Maximum 5 companies selected.</span> Remove a company to add another.
+                </p>
+              </div>
+            )}
           </div>
         </div>
         {selectedCompanies.length >= 2 && (
@@ -322,11 +392,102 @@ export default function ComparisonPage() {
               </div>
             </div>
 
+            {/* View Mode Toggle */}
+            <div className="flex items-center gap-2 p-4 border-b border-gray-100">
+              <span className="text-sm font-semibold text-gray-900">View Mode:</span>
+              <div className="flex gap-2 ml-auto">
+                <button
+                  onClick={() => setViewMode("visualizations")}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                    viewMode === "visualizations"
+                      ? "bg-indigo-600 text-white"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  📊 Visualizations
+                </button>
+                <button
+                  onClick={() => setViewMode("table")}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                    viewMode === "table"
+                      ? "bg-indigo-600 text-white"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  📋 Table
+                </button>
+              </div>
+            </div>
+
+            {/* Metrics Visualization Section */}
+            {selectedCompanies.length >= 2 && viewMode === "visualizations" && (
+              <div className="p-4 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-gray-900">Financial Metrics Visualization</h3>
+                  <div className="flex gap-2 flex-wrap">
+                    {["sales", "net_profit", "operating_profit", "total_assets", "total_equity", "borrowings"].map((metric) => (
+                      <button
+                        key={metric}
+                        onClick={() => {
+                          setSelectedMetrics((prev) =>
+                            prev.includes(metric)
+                              ? prev.filter((m) => m !== metric)
+                              : [...prev, metric]
+                          );
+                        }}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                          selectedMetrics.includes(metric)
+                            ? "bg-indigo-600 text-white"
+                            : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                        }`}
+                      >
+                        {metric.replace(/_/g, " ").toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Charts */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {selectedMetrics.map((metric) => {
+                    const chartData = selectedCompanies.map((code) => {
+                      const company = backendCompanies.find((c) => c.scrip_code === code);
+                      const data = comparisonData[code]?.financials?.[0];
+                      const value = data?.[metric as keyof typeof data];
+                      return {
+                        name: company?.symbol || code,
+                        [metric]: typeof value === "number" ? value : 0,
+                      };
+                    });
+
+                    return (
+                      <div key={metric} className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                        <h4 className="text-sm font-semibold text-gray-900 mb-4">
+                          {metric.replace(/_/g, " ").toUpperCase()}
+                        </h4>
+                        <ResponsiveContainer width="100%" height={300}>
+                          <BarChart data={chartData}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="name" />
+                            <YAxis />
+                            <Tooltip />
+                            <Bar dataKey={metric} fill="#4f46e5" />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Comparison Table Data */}
-            {loading ? (
-              <div className="p-8 text-center text-gray-400">Loading financial data...</div>
-            ) : selectedCompanies.length >= 2 ? (
-              <div className="overflow-x-auto">
+            {viewMode === "table" && (
+              <>
+                {loading ? (
+                  <div className="p-8 text-center text-gray-400">Loading financial data...</div>
+                ) : selectedCompanies.length >= 2 ? (
+                  <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
@@ -384,7 +545,7 @@ export default function ComparisonPage() {
                       const displayMetrics = metricsToDisplay.filter(key => allKeys.includes(key));
                       
                       // Helper function to format values
-                      const formatValue = (value: any, key: string) => {
+                      const formatValue = (value: any, key: string, _currency: string = "INR", levelOfRounding: string = "") => {
                         if (value === undefined || value === null || value === 0) return "-";
                         
                         if (typeof value === 'number') {
@@ -398,7 +559,7 @@ export default function ComparisonPage() {
                             return `₹${value.toFixed(2)}`;
                           }
                           
-                          // Currency columns in Crores
+                          // Currency columns - format based on level_of_rounding from DB
                           // P&L columns
                           if (key.includes('sales') || key.includes('operating_profit') || key.includes('other_income') || 
                               key.includes('cost_of_materials') || key.includes('employee_benefit') || key.includes('other_expenses') || 
@@ -411,12 +572,13 @@ export default function ComparisonPage() {
                               key.includes('investment') || key.includes('total_assets') ||
                               // Cash flow columns
                               key.includes('cash_from')) {
-                            return `₹${(value / 10).toLocaleString(undefined, { maximumFractionDigits: 0 })} Cr`;
+                            // Use level_of_rounding from DB as-is (values already in that unit)
+                            return `₹${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${levelOfRounding}`;
                           }
                           
                           // Expenses and similar columns
                           if (key.includes('expense') || key.includes('tax')) {
-                            return `₹${(value / 10).toLocaleString(undefined, { maximumFractionDigits: 0 })} Cr`;
+                            return `₹${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${levelOfRounding}`;
                           }
                           
                           // Default: return number with 2 decimal places
@@ -425,28 +587,70 @@ export default function ComparisonPage() {
                         
                         return String(value);
                       };
+
+                      // Helper to find best value (highest for most metrics, lowest for debt ratios)
+                      const getBestValue = (key: string, values: any[]): { value: any; index: number } | null => {
+                        const numValues = values
+                          .map((v, idx) => ({ value: typeof v === 'number' ? v : null, index: idx }))
+                          .filter(v => v.value !== null && v.value !== 0);
+                        
+                        if (numValues.length === 0) return null;
+                        
+                        // For debt/liability metrics, lower is better
+                        if (key.includes('borrowing') || key.includes('debt') || key.includes('liabilities')) {
+                          return numValues.reduce((min, curr) => ((curr.value ?? 0) < (min.value ?? 0) ? curr : min));
+                        }
+                        
+                        // For all other metrics, higher is better
+                        return numValues.reduce((max, curr) => ((curr.value ?? 0) > (max.value ?? 0) ? curr : max));
+                      };
+                      
                       
                       // Helper to convert column name to readable label
                       const getLabel = (key: string) => {
                         return key.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
                       };
                       
-                      return displayMetrics.map((key) => (
-                        <tr key={key} className="border-b border-gray-100 hover:bg-gray-50">
-                          <td className="px-4 py-3 font-medium text-gray-900 text-left">{getLabel(key)}</td>
-                          {selectedCompanies.map((code) => {
-                            const responseData = comparisonData[code];
-                            const financialsList = responseData?.financials;
-                            const data = Array.isArray(financialsList) ? financialsList[0] : financialsList;
-                            const value = data?.[key];
-                            return (
-                              <td key={code} className="text-right px-4 py-3 text-gray-700 font-medium">
-                                {formatValue(value, key)}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ));
+                      return displayMetrics.map((key) => {
+                        // Get values for this metric from all selected companies for highlighting
+                        const metricValues = selectedCompanies.map((code) => {
+                          const responseData = comparisonData[code];
+                          const financialsList = responseData?.financials;
+                          const data = Array.isArray(financialsList) ? financialsList[0] : financialsList;
+                          return data?.[key];
+                        });
+                        
+                        // Find best value for highlighting
+                        const best = getBestValue(key, metricValues);
+                        
+                        return (
+                          <tr key={key} className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="px-4 py-3 font-medium text-gray-900 text-left">{getLabel(key)}</td>
+                            {selectedCompanies.map((code, idx) => {
+                              const responseData = comparisonData[code];
+                              const financialsList = responseData?.financials;
+                              const data = Array.isArray(financialsList) ? financialsList[0] : financialsList;
+                              const value = data?.[key];
+                              // Get each company's own level_of_rounding
+                              const companyLevelOfRounding = data?.level_of_rounding || '';
+                              const isBestValue = best && idx === best.index && value !== 0 && value !== null && value !== undefined;
+                              
+                              return (
+                                <td 
+                                  key={code} 
+                                  className={`text-right px-4 py-3 font-medium ${
+                                    isBestValue 
+                                      ? 'bg-green-100 text-green-900 font-bold' 
+                                      : 'text-gray-700'
+                                  }`}
+                                >
+                                  {formatValue(value, key, 'INR', companyLevelOfRounding)}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      });
                     })()}
                   </tbody>
                 </table>
@@ -454,26 +658,48 @@ export default function ComparisonPage() {
             ) : (
               <div className="p-8 text-center text-gray-400">Select at least 2 companies to compare</div>
             )}
+              </>
+            )}
           </div>
         )}
 
         {selectedCompanies.length === 0 && (
           <div className="text-center py-16">
-            <div className="mb-4">
+            <div className="mb-6">
               <Search className="size-12 text-gray-300 mx-auto" />
             </div>
-            <p className="text-gray-500 text-lg font-medium">No companies selected</p>
-            <p className="text-gray-400 text-sm mt-2">Use the search bar above to find and add 2-5 companies for comparison</p>
+            <p className="text-gray-500 text-lg font-medium mb-6">No companies selected</p>
+            
+            {/* Add Tile Button */}
+            <button
+              onClick={() => setShowDropdown(true)}
+              className="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full border-2 border-dashed border-indigo-300 hover:border-indigo-500 hover:bg-indigo-50 transition-all mb-4"
+            >
+              <Plus className="size-5 text-indigo-600" />
+              <span className="font-semibold text-indigo-600">Add Companies</span>
+            </button>
+            
+            <p className="text-gray-400 text-sm mt-4">Or use the search bar above to find and add 2-5 companies for comparison</p>
           </div>
         )}
 
         {selectedCompanies.length === 1 && (
           <div className="text-center py-16">
-            <div className="mb-4">
+            <div className="mb-6">
               <Plus className="size-12 text-gray-300 mx-auto" />
             </div>
-            <p className="text-gray-500 text-lg font-medium">Select more companies</p>
-            <p className="text-gray-400 text-sm mt-2">You need at least 2 companies to start comparing</p>
+            <p className="text-gray-500 text-lg font-medium mb-6">Select more companies</p>
+            
+            {/* Add More Tile Button */}
+            <button
+              onClick={() => setShowDropdown(true)}
+              className="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full border-2 border-dashed border-indigo-300 hover:border-indigo-500 hover:bg-indigo-50 transition-all mb-4"
+            >
+              <Plus className="size-5 text-indigo-600" />
+              <span className="font-semibold text-indigo-600">Add More Companies</span>
+            </button>
+            
+            <p className="text-gray-400 text-sm mt-4">You need at least 2 companies to start comparing</p>
           </div>
         )}
       </div>

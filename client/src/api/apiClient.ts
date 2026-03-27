@@ -32,7 +32,11 @@ export interface YearlyFinancials {
 }
 
 class ApiClient {
-  constructor(private baseUrl: string = API_BASE_URL) {}
+  baseUrl: string;
+
+  constructor(baseUrl: string = API_BASE_URL) {
+    this.baseUrl = baseUrl;
+  }
 
   private async handleResponse(response: Response) {
     if (!response.ok) {
@@ -45,7 +49,8 @@ class ApiClient {
   async getAllCompanies(): Promise<CompanyData[]> {
     const response = await fetch(`${this.baseUrl}/companies`);
     const data = await this.handleResponse(response);
-    return data.companies;
+    // Backend returns array directly, not wrapped in object
+    return Array.isArray(data) ? data : [];
   }
 
   async searchCompanies(query: string): Promise<CompanySuggestion[]> {

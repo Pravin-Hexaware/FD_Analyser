@@ -178,6 +178,21 @@ class SqliteRepository:
             """
         )
         
+        # Detailed LLM logging table - stores complete input/output data
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_detailed_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                step_name TEXT,
+                input_data TEXT,
+                output_data TEXT,
+                timestamp TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (chat_id) REFERENCES chat_history(chat_id)
+            );
+            """
+        )
+        
         self._conn.commit()
 
         # If annual_table existed from earlier version, ensure new columns exist
@@ -702,6 +717,43 @@ class SqliteRepository:
             (chat_id, user_query, response)
         )
         self._conn.commit()
+
+    def save_detailed_log(self, chat_id: str, step_name: str, input_data: str, output_data: str) -> None:
+        """Save detailed LLM processing log with input and output data."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO llm_detailed_log (chat_id, step_name, input_data, output_data)
+            VALUES (?, ?, ?, ?)
+            """,
+            (chat_id, step_name, input_data, output_data)
+        )
+        self._conn.commit()
+
+    def get_detailed_logs(self, chat_id: str) -> list:
+        """Get all detailed logs for a specific chat."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT id, chat_id, step_name, input_data, output_data, timestamp
+            FROM llm_detailed_log
+            WHERE chat_id = ?
+            ORDER BY timestamp ASC
+            """,
+            (chat_id,)
+        )
+        rows = cur.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                'id': row[0],
+                'chat_id': row[1],
+                'step_name': row[2],
+                'input_data': row[3],
+                'output_data': row[4],
+                'timestamp': row[5]
+            })
+        return result
 
     def get_chat_history(self) -> list:
         """Get all chat history sorted by most recent first."""

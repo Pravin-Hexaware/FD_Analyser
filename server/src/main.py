@@ -45,7 +45,7 @@ app.include_router(xbrl_ws_hist_router, prefix="/api", tags=["xbrl_ws_hist"])
 app.include_router(xbrl_annual_router, prefix="/api", tags=["xbrl_annual"])
 app.include_router(llm_router, prefix="/api", tags=["llm"])
 app.include_router(companies_router, prefix="/api", tags=["companies"])
-app.include_router(company_router, prefix="/api", tags=["company"])
+app.include_router(company_router, prefix="/api/companies", tags=["company_financials"])
 
 if __name__ == "__main__":
     import uvicorn

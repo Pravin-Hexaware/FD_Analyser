@@ -180,7 +180,7 @@ export default function CompanyPage() {
           <div className="flex items-start justify-between">
             <div className="flex items-start gap-4">
               <div className="size-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-indigo-700 flex items-center justify-center shadow-md shadow-indigo-200 flex-shrink-0">
-                <span className="text-white font-bold text-lg">{company.symbol.charAt(0)}</span>
+                <span className="text-white font-bold text-lg">{company?.symbol?.charAt(0) || "?"}</span>
               </div>
               <div>
                 <h1 className="text-xl font-semibold text-gray-900 mb-1">{company.symbol}</h1>

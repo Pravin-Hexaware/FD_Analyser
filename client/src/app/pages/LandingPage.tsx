@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Search, TrendingUp, BarChart3, MessageSquare, Sparkles,
-  ArrowRight, Building2, FileText, Users, ChevronRight,
+  ArrowRight, Building2, ChevronRight,
   Database, Shield, Zap, TrendingDown
 } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -210,8 +210,8 @@ export default function LandingPage() {
                 </div>
                 {searchResults.map((company) => (
                   <button
-                    key={company.id}
-                    onClick={() => navigate(`/company/${company.id}`)}
+                    key={company.scripcode}
+                    onClick={() => navigate(`/company/${company.scripcode}`)}
                     className="w-full px-4 py-3 text-left hover:bg-slate-800 transition-colors flex items-center justify-between border-b border-slate-800 last:border-b-0 group"
                   >
                     <div className="flex-1">
@@ -386,66 +386,42 @@ export default function LandingPage() {
         </div>
 
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {companies.map((company) => {
-            // Safety check for financials data
-            const hasFinancials = company.financials && company.financials.length >= 2;
-            const latest = hasFinancials ? company.financials[0] : null;
-            const prev = hasFinancials ? company.financials[1] : null;
-            
-            // Calculate growth if we have data, otherwise use defaults
-            const salesGrowth = hasFinancials && prev.sales > 0 
-              ? (((latest.sales - prev.sales) / prev.sales) * 100).toFixed(1) 
-              : "0.0";
-            const isUp = hasFinancials ? latest.sales > prev.sales : true;
-
-            return (
-              <button
-                key={company.id}
-                onClick={() => navigate(`/company/${company.id}`)}
-                className="group bg-white rounded-2xl p-5 border border-gray-100 hover:border-indigo-200 hover:shadow-lg transition-all text-left"
-              >
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <div className="font-semibold text-gray-900 group-hover:text-indigo-600 transition-colors">
-                      {company.name}
-                    </div>
-                    <div className="text-sm text-gray-400 mt-0.5">{company.symbol} · {company.sector}</div>
+          {companies.map((company) => (
+            <button
+              key={company.scrip_code}
+              onClick={() => navigate(`/company/${company.scrip_code}`)}
+              className="group bg-white rounded-2xl p-5 border border-gray-100 hover:border-indigo-200 hover:shadow-lg transition-all text-left"
+            >
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <div className="font-semibold text-gray-900 group-hover:text-indigo-600 transition-colors">
+                    {company.company_name}
                   </div>
-                  {hasFinancials && (
-                    <div className={`text-xs px-2.5 py-1 rounded-full font-medium ${isUp ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600"}`}>
-                      {isUp ? "+" : ""}{salesGrowth}% YoY
-                    </div>
-                  )}
+                  <div className="text-sm text-gray-400 mt-0.5">{company.symbol} · {company.sector}</div>
                 </div>
+              </div>
 
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <div className="text-xs text-gray-400 mb-0.5">Sales</div>
-                    <div className="text-sm font-semibold text-gray-900">
-                      {hasFinancials ? `₹${(latest.sales / 1000).toFixed(0)}B` : "N/A"}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-gray-400 mb-0.5">OPM</div>
-                    <div className="text-sm font-semibold text-gray-900">
-                      {hasFinancials ? `${latest.opm}%` : "N/A"}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-gray-400 mb-0.5">ROCE</div>
-                    <div className="text-sm font-semibold text-gray-900">
-                      {hasFinancials ? `${latest.roce}%` : "N/A"}
-                    </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs text-gray-400 mb-0.5">Scrip Code</div>
+                  <div className="text-sm font-semibold text-gray-900">
+                    {company.scrip_code}
                   </div>
                 </div>
-
-                <div className="mt-3 flex items-center gap-1 text-xs text-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <span>View full profile</span>
-                  <ChevronRight className="size-3.5" />
+                <div>
+                  <div className="text-xs text-gray-400 mb-0.5">Industry</div>
+                  <div className="text-sm font-semibold text-gray-900">
+                    {company.industry}
+                  </div>
                 </div>
-              </button>
-            );
-          })}
+              </div>
+
+              <div className="mt-3 flex items-center gap-1 text-xs text-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                <span>View full profile</span>
+                <ChevronRight className="size-3.5" />
+              </div>
+            </button>
+          ))}
         </div>
       </section>
 

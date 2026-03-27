@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getCompanyById } from "../data/companies";
 import { Card } from "./ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -8,8 +9,7 @@ import {
   Legend, ResponsiveContainer, RadarChart, Radar, PolarGrid,
   PolarAngleAxis, PolarRadiusAxis
 } from "recharts";
-import { useNavigate } from "react-router-dom";
-import { Sparkles, Trophy } from "lucide-react";
+import { Sparkles } from "lucide-react";
 
 interface ComparisonTableProps {
   companyIds: string[];
@@ -29,8 +29,8 @@ const metrics = [
 ];
 
 export function ComparisonTable({ companyIds }: ComparisonTableProps) {
-  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("table");
+  const navigate = useNavigate();
   const companies = companyIds.map((id) => getCompanyById(id)).filter(Boolean) as NonNullable<ReturnType<typeof getCompanyById>>[];
 
   if (companies.length === 0) return null;
@@ -127,7 +127,7 @@ export function ComparisonTable({ companyIds }: ComparisonTableProps) {
                               {m.fmt(val)}
                             </span>
                             {isBest && (
-                              <Trophy className="size-3 inline-block ml-1 mb-0.5 text-amber-400" />
+                              <span className="text-xs ml-1 text-amber-400">★</span>
                             )}
                           </td>
                         );

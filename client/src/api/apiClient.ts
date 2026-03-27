@@ -32,7 +32,11 @@ export interface YearlyFinancials {
 }
 
 class ApiClient {
-  constructor(private baseUrl: string = API_BASE_URL) {}
+  baseUrl: string;
+
+  constructor(baseUrl: string = API_BASE_URL) {
+    this.baseUrl = baseUrl;
+  }
 
   private async handleResponse(response: Response) {
     if (!response.ok) {
@@ -45,7 +49,7 @@ class ApiClient {
   async getAllCompanies(): Promise<CompanyData[]> {
     const response = await fetch(`${this.baseUrl}/companies`);
     const data = await this.handleResponse(response);
-    return data.companies;
+    return data.companies || [];
   }
 
   async searchCompanies(query: string): Promise<CompanySuggestion[]> {
@@ -64,20 +68,44 @@ class ApiClient {
     }
   }
 
-  async getCompanyDetails(companyId: string): Promise<CompanyData> {
-    const response = await fetch(`${this.baseUrl}/companies/${companyId}`);
-    return this.handleResponse(response);
+  async getCompanyDetails(companyId: string): Promise<{ success: boolean; company?: CompanyData }> {
+    try {
+      const response = await fetch(`${this.baseUrl}/companies/${companyId}`);
+      if (!response.ok) {
+        console.warn(`Company ${companyId} not found (${response.status})`);
+        return { success: false, company: undefined };
+      }
+      const data = await response.json();
+      return { success: true, company: data.company };
+    } catch (error) {
+      console.error("Error fetching company details:", error);
+      return { success: false, company: undefined };
+    }
+  }
+
+  async resolveCompany(query: string): Promise<CompanyData[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/companies/resolve?query=${encodeURIComponent(query)}`);
+      if (!response.ok) {
+        console.warn(`Failed to resolve company: ${query}`);
+        return [];
+      }
+      const data = await response.json();
+      return Array.isArray(data.companies) ? data.companies : [];
+    } catch (error) {
+      console.error("Error resolving company:", error);
+      return [];
+    }
   }
 
   async getCompanyFinancials(
     companyId: string,
     years: number = 5
-  ): Promise<YearlyFinancials[]> {
+  ): Promise<{ success: boolean; financials: YearlyFinancials[] }> {
     const response = await fetch(
       `${this.baseUrl}/companies/${companyId}/financials?years=${years}`
     );
-    const data = await this.handleResponse(response);
-    return data.financials || [];
+    return this.handleResponse(response);
   }
 
   async getTrendingCompanies(): Promise<any[]> {

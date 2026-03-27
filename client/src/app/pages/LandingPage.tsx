@@ -2,11 +2,12 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Search, TrendingUp, BarChart3, MessageSquare, Sparkles,
-  ArrowRight, Building2, FileText, Users, ChevronRight,
+  ArrowRight, Building2, ChevronRight,
   Database, Shield, Zap, TrendingDown
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { apiClient, type CompanySuggestion } from "../../api/apiClient";
+import { companies as localCompanies } from "../data/companies";
 
 const tickerItems = [
   { symbol: "RELIANCE", price: "₹2,945", change: "+2.5%", up: true },
@@ -76,18 +77,9 @@ export default function LandingPage() {
   const [isSearching, setIsSearching] = useState(false);
   const tickerRef = useRef<number | null>(null);
 
-  // Fetch all companies on component mount
+  // Use local companies data instead of API call
   useEffect(() => {
-    const fetchCompanies = async () => {
-      try {
-        const data = await apiClient.getAllCompanies();
-        setCompanies(data);
-      } catch (error) {
-        console.error("Failed to fetch companies:", error);
-      }
-    };
-
-    fetchCompanies();
+    setCompanies(localCompanies);
   }, []);
 
   useEffect(() => {
@@ -140,14 +132,14 @@ export default function LandingPage() {
             <button onClick={() => navigate("/chat")} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">Chat</button>
             <button onClick={() => navigate("/compare")} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">Compare</button>
             <button onClick={() => navigate("/admin")} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">Admin</button>
-            <Button
+            {/* <Button
               size="sm"
               onClick={() => navigate("/chat")}
               className="ml-2 bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm shadow-indigo-200"
             >
               <Sparkles className="size-3.5 mr-1.5" />
               Launch App
-            </Button>
+            </Button> */}
           </nav>
         </div>
       </header>
@@ -210,8 +202,8 @@ export default function LandingPage() {
                 </div>
                 {searchResults.map((company) => (
                   <button
-                    key={company.id}
-                    onClick={() => navigate(`/company/${company.id}`)}
+                    key={company.symbol}
+                    onClick={() => navigate(`/company/${company.symbol}`)}
                     className="w-full px-4 py-3 text-left hover:bg-slate-800 transition-colors flex items-center justify-between border-b border-slate-800 last:border-b-0 group"
                   >
                     <div className="flex-1">

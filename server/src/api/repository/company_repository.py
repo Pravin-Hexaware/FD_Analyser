@@ -51,7 +51,7 @@ class CompanyRepository:
         return companies
     
     def get_all_companies(self) -> List[Company]:
-        """Get all companies from database with financials"""
+        """Get all companies from database (without financials for faster loading)"""
         conn = self.db._conn
         cursor = conn.cursor()
         
@@ -75,8 +75,7 @@ class CompanyRepository:
                 xbrl_link="",
                 financials=[]
             )
-            # Load financials for each company
-            company.financials = self.get_company_financials(company.symbol)
+            # Don't load financials here - they're loaded separately when needed
             companies.append(company)
         
         return companies

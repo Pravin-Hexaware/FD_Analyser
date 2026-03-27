@@ -50,6 +50,8 @@ class ApiClient {
     const response = await fetch(`${this.baseUrl}/companies`);
     const data = await this.handleResponse(response);
     return data.companies || [];
+    // Backend returns array directly, not wrapped in object
+    return Array.isArray(data) ? data : [];
   }
 
   async searchCompanies(query: string): Promise<CompanySuggestion[]> {

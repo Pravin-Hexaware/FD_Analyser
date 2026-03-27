@@ -918,7 +918,7 @@ export default function CompanyPage() {
                     })()}
                     <tr className="bg-whitw-50 border-b border-gray-200">
                       <td colSpan={6} className="py-2 px-3 font-bold text-sm">
-                
+
                       </td>
                     </tr>
 
@@ -946,7 +946,7 @@ export default function CompanyPage() {
                     })()}
                     <tr className="bg-whitw-50 border-b border-gray-200">
                       <td colSpan={6} className="py-2 px-3 font-bold text-sm">
-                
+
                       </td>
                     </tr>
 
@@ -1363,7 +1363,6 @@ export default function CompanyPage() {
           <div className="font-semibold text-red-600">{Number(priceChange) < -1 ? "High" : "Low"}</div>
         </div>
       </div>
-
     </AppShell>
   );
 }

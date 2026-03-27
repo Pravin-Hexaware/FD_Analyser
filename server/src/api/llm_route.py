@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 from datetime import datetime
 import uuid
+import json
 
 from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data
 from repository.sqlite_repository import SqliteRepository
@@ -130,9 +131,22 @@ def _fetch_company_data(repo: SqliteRepository, scrip_code: str, frequency: str,
 async def llm_target_companies(request: LLMQueryRequest):
     """Parse user query, fetch data, and generate answer with Azure LLM."""
     try:
+        chat_id = str(uuid.uuid4())
+        repo = SqliteRepository()
+        
+        # Step 1: Parse user query
         print("Step 1: Parsing user query with LLM")
         parsed = parse_query_and_get_companies(request.query)
         print("1st LLM returned:", parsed)
+        
+        # Log Step 1 - Query parsing
+        repo.save_detailed_log(
+            chat_id=chat_id,
+            step_name="Query Parsing",
+            input_data=json.dumps({"user_query": request.query}),
+            output_data=json.dumps(parsed)
+        )
+        
         if parsed.get("error"):
             raise HTTPException(status_code=500, detail=parsed.get("error"))
 
@@ -144,18 +158,31 @@ async def llm_target_companies(request: LLMQueryRequest):
         frequency = _determine_frequency(statement_frequency, statement_type, period)
         print(f"Determined frequency: {frequency}, statement_frequency: {statement_frequency}, statement_type: {statement_type}, period: {period}")
 
-        # Fetch data for target companies and peers
-        repo = SqliteRepository()
+        # Step 2: Fetch data for target companies and peers
+        print("Step 2: Fetching data for target companies")
         all_data = {}
-
         target_companies = parsed.get("target_companies", {})
         include_peers = _should_include_peers(request.query)
         print("Step 2: Fetching data for target companies" + (" + peers" if include_peers else ""))
+        
+        db_fetch_log = {
+            "frequency": frequency,
+            "statement_type": statement_type,
+            "companies_requested": list(target_companies.keys()),
+            "include_peers": include_peers,
+            "fetched_data": {}
+        }
+        
         for key, company in target_companies.items():
             scrip_code = company.get("scrip_code")
             if scrip_code:
                 data = _fetch_company_data(repo, scrip_code, frequency, statement_type)
                 all_data[company.get("company", key)] = data
+                db_fetch_log["fetched_data"][company.get("company", key)] = {
+                    "scrip_code": scrip_code,
+                    "frequency": frequency,
+                    "data": data
+                }
                 print(f"Fetched from {frequency}_table for scrip_code {scrip_code}: {data}")
 
             if include_peers:
@@ -165,15 +192,62 @@ async def llm_target_companies(request: LLMQueryRequest):
                     if p_scrip:
                         p_data = _fetch_company_data(repo, p_scrip, frequency, statement_type)
                         all_data[peer.get("company", p_key)] = p_data
+                        db_fetch_log["fetched_data"][peer.get("company", p_key)] = {
+                            "scrip_code": p_scrip,
+                            "frequency": frequency,
+                            "is_peer": True,
+                            "data": p_data
+                        }
                         print(f"Fetched from {frequency}_table for scrip_code {p_scrip}: {p_data}")
 
-        # Generate answer using LLM
+        # Log Step 2 - Database fetching
+        repo.save_detailed_log(
+            chat_id=chat_id,
+            step_name="Database Fetch",
+            input_data=json.dumps({
+                "parsed_query": parsed,
+                "frequency": frequency,
+                "statement_type": statement_type,
+                "target_companies": list(target_companies.keys())
+            }),
+            output_data=json.dumps(db_fetch_log)
+        )
+
+        # Step 3: Generate answer using LLM
         print("Step 3: Generating answer with 2nd LLM")
+        
+        # Prepare the EXACT data being sent to LLM
+        system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided financial data.
+The data is for {frequency} financial statements, including {statement_type.replace('_', ' ')} metrics where available.
+
+Provide a clear, concise answer to the query. If data is missing for some companies, note that."""
+        
+        user_prompt = f"Query: {request.query}\n\nData: {json.dumps(all_data, indent=2)}"
+        
+        llm_input = {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "query": request.query,
+            "data_sent": all_data,
+            "statement_type": statement_type,
+            "frequency": frequency
+        }
+        
         answer = generate_answer_from_data(request.query, all_data, statement_type, frequency)
         print("2nd LLM answer:", answer)
         
-        # Save chat to database
-        chat_id = str(uuid.uuid4())
+        # Log Step 3 - EXACT LLM input and output
+        repo.save_detailed_log(
+            chat_id=chat_id,
+            step_name="Answer Generation (LLM)",
+            input_data=json.dumps(llm_input, default=str),
+            output_data=json.dumps({
+                "llm_response": answer,
+                "timestamp": datetime.now().isoformat()
+            })
+        )
+        
+        # Save main chat to database
         repo.save_chat(chat_id, request.query, answer)
         repo.close()
         
@@ -229,6 +303,29 @@ async def get_chat(chat_id: str):
             created_at=chat["created_at"],
             title=chat["user_query"][:50] + ("..." if len(chat["user_query"]) > 50 else "")
         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("Error:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/llm/detailed-logs/{chat_id}")
+async def get_detailed_logs(chat_id: str):
+    """Get detailed input/output logs for a specific chat."""
+    try:
+        repo = SqliteRepository()
+        logs = repo.get_detailed_logs(chat_id)
+        repo.close()
+        
+        if not logs:
+            raise HTTPException(status_code=404, detail="No detailed logs found for this chat")
+        
+        return {
+            "chat_id": chat_id,
+            "logs": logs,
+            "total_steps": len(logs)
+        }
     except HTTPException:
         raise
     except Exception as e:

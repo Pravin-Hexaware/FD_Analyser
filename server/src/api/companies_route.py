@@ -152,52 +152,58 @@ async def get_company(company_id: str):
 
 
 @router.get("/companies/{company_id}/financials")
-async def get_company_financials(company_id: str, years: Optional[int] = 5):
-    """Get financial data for a company"""
-@router.get("/companies/{scrip_code}")
-async def get_company_by_scrip_code(scrip_code: str):
-    """Get a single company by scrip code"""
+async def get_company_financials(
+    company_id: str,
+    frequency: str = "annual",
+    years: Optional[int] = 5
+):
+    """Get financial data for a company."""
     try:
         company = company_service.get_company_details(company_id)
 
         if not company:
-            # allow symbol fallback
             candidates = company_service.search_companies(company_id)
             company = candidates[0] if candidates else None
 
-        company = company_service.get_company_details(scrip_code)
         if not company:
             raise HTTPException(status_code=404, detail=f"Company {company_id} not found")
 
-        financials = company_service.get_company_financials(company_id, years)
+        symbol_or_scrip = company.bse_code or company.symbol or company_id
 
-            raise HTTPException(status_code=404, detail=f"Company with scrip code '{scrip_code}' not found")
+        financials_data = None
+        if frequency.lower() == "annual":
+            annual = company_service.get_latest_annual_data(symbol_or_scrip)
+            if annual:
+                financials_data = [annual]
+        elif frequency.lower() == "quarterly":
+            quarterly = company_service.get_latest_quarterly_data(symbol_or_scrip)
+            if quarterly:
+                financials_data = [quarterly]
+        else:
+            financials_data = company_service.get_company_financials(symbol_or_scrip, years)
+
+        # Fallback if not found initially
+        if not financials_data:
+            financials_data = company_service.get_company_financials(symbol_or_scrip, years)
+
+        if not financials_data:
+            raise HTTPException(status_code=404, detail=f"Financials for company {company_id} not found")
+
+        # If raw list of YearlyFinancials or dict record
+        if isinstance(financials_data, dict):
+            financials_data = [financials_data]
 
         return {
             "success": True,
-            "company_id": company_id,
+            "company_id": company.id,
             "company_symbol": company.symbol,
-            "years_requested": years,
-            "financials": [
-                {
-                    "year": f.year,
-                    "sales": f.sales,
-                    "ebitda": f.ebitda,
-                    "opm": f.opm,
-                    "pat": f.pat,
-                    "eps": f.eps,
-                    "roce": f.roce,
-                    "de": f.de,
-                    "cfo": f.cfo,
-                }
-                for f in financials
-            ]
-            "id": company.id,
             "scrip_code": company.bse_code,
             "company_name": company.name,
-            "symbol": company.symbol,
             "sector": company.sector,
-            "industry": company.industry
+            "industry": company.industry,
+            "frequency": frequency,
+            "years_requested": years,
+            "financials": financials_data,
         }
     except HTTPException:
         raise
@@ -215,7 +221,7 @@ async def get_company_quarterly(company_id: str):
         if not quarterly:
             raise HTTPException(status_code=404, detail=f"No quarterly data for {company_id}")
 
-        return {"success": True, "quarterly": quarterly}
+        return {"success": True, "financials": [quarterly], "frequency": "quarterly"}
     except HTTPException:
         raise
     except Exception as e:
@@ -232,7 +238,7 @@ async def get_company_annual(company_id: str):
         if not annual:
             raise HTTPException(status_code=404, detail=f"No annual data for {company_id}")
 
-        return {"success": True, "annual": annual}
+        return {"success": True, "financials": [annual], "frequency": "annual"}
     except HTTPException:
         raise
     except Exception as e:

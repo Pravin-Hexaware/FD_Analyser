@@ -18,6 +18,7 @@ from api.xbrl_ws_hist import router as xbrl_ws_hist_router
 from api.Xbrl_annual_extractor import router as xbrl_annual_router
 from api.llm_route import router as llm_router
 from api.companies_route import router as companies_router
+from api.company_route import router as company_router
 
 
 load_dotenv()

@@ -165,7 +165,44 @@ class SqliteRepository:
             );
             """
         )
-        
+
+        # Conversation tables for chat history
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                role TEXT PRIMARY KEY
+            );
+            """
+        )
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO roles (role) VALUES ('user'), ('llm');
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+                FOREIGN KEY (role) REFERENCES roles(role),
+                UNIQUE(conversation_id, sequence_number)
+            );
+            """
+        )
+
         # Create chat history table
         cur.execute(
             """
@@ -205,6 +242,90 @@ class SqliteRepository:
         
         # Ensure period column in quarterly_table
         self._ensure_column("quarterly_table", "period", "TEXT")
+
+    def create_conversation(self) -> int:
+        cur = self._conn.cursor()
+        cur.execute("INSERT INTO conversations DEFAULT VALUES")
+        self._conn.commit()
+        return cur.lastrowid
+
+    def conversation_exists(self, conversation_id: int) -> bool:
+        cur = self._conn.cursor()
+        cur.execute("SELECT 1 FROM conversations WHERE id = ? LIMIT 1", (conversation_id,))
+        return cur.fetchone() is not None
+
+    def get_conversation(self, conversation_id: int) -> Optional[dict]:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT id AS chat_id, created_at FROM conversations WHERE id = ? LIMIT 1",
+            (conversation_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_next_sequence_number(self, conversation_id: int) -> int:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM messages WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 1
+
+    def save_message(self, conversation_id: int, role: str, content: str) -> int:
+        if role not in ("user", "llm"):
+            raise ValueError("Invalid role. Must be 'user' or 'llm'.")
+
+        if not self.conversation_exists(conversation_id):
+            raise ValueError(f"Conversation {conversation_id} does not exist")
+
+        sequence_number = self.get_next_sequence_number(conversation_id)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages (conversation_id, sequence_number, role, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            (conversation_id, sequence_number, role, content),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_conversation_messages(self, conversation_id: int) -> list[dict]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT id, conversation_id, sequence_number, role, content, created_at
+            FROM messages
+            WHERE conversation_id = ?
+            ORDER BY sequence_number ASC
+            """,
+            (conversation_id,),
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_conversation_list(self) -> list[dict]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT c.id AS chat_id,
+                   c.created_at,
+                   m.content AS last_message,
+                   m.role AS last_role,
+                   m.sequence_number AS last_sequence
+            FROM conversations c
+            LEFT JOIN messages m ON m.conversation_id = c.id
+            WHERE m.sequence_number = (
+                SELECT MAX(sequence_number)
+                FROM messages
+                WHERE conversation_id = c.id
+            )
+            ORDER BY c.created_at DESC
+            """
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
 
     def upsert_company(
         self,

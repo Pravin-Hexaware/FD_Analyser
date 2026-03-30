@@ -145,21 +145,31 @@ export function generateAIReport(companyIds: string[], companies: CompanyData[])
   }
 }
 
-export async function processChatQuery(query: string, companiesList: CompanyData[]): Promise<ChatMessage> {
+export interface ChatResponse {
+  message: ChatMessage;
+  conversationId?: number;
+}
+
+export async function processChatQuery(query: string, companiesList: CompanyData[], conversationId?: number): Promise<ChatResponse> {
   try {
     // Send query to backend LLM endpoint
-    const response = await sendLLMQuery(query);
+    const response = await sendLLMQuery(query, conversationId);
     
     return {
-      id: response.chat_id,
-      role: "assistant",
-      content: response.answer,
-      timestamp: new Date(),
+      message: {
+        id: `msg-${Date.now()}-assistant`,
+        role: "assistant",
+        content: response.answer,
+        timestamp: new Date(),
+      },
+      conversationId: Number(response.chat_id),
     };
   } catch (error) {
     // Fallback to local processing if backend fails
     console.warn("Backend API error, falling back to local processing:", error);
-    return processChatQueryLocal(query, companiesList);
+    return {
+      message: processChatQueryLocal(query, companiesList),
+    };
   }
 }
 

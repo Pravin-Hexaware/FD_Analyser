@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 import uuid
 import json
@@ -120,14 +120,29 @@ Provide a clear, concise answer to the query. If data is missing for some compan
 
 class LLMQueryRequest(BaseModel):
     query: str
+    conversation_id: Optional[int] = None
 
 
 class ChatHistoryResponse(BaseModel):
     chat_id: str
-    user_query: str
-    response: str
+    title: str  # Display title for chat history
     created_at: str
-    title: str  # First 50 chars of query for display
+    last_message: Optional[str] = None
+
+
+class ChatMessageResponse(BaseModel):
+    id: int
+    sequence_number: int
+    role: str
+    content: str
+    created_at: str
+
+
+class ConversationResponse(BaseModel):
+    chat_id: str
+    title: str
+    created_at: str
+    messages: List[ChatMessageResponse]
 
 
 def _determine_frequency(statement_frequency: str, statement_type: str, period: str) -> str:
@@ -282,9 +297,22 @@ def _fetch_company_data(repo: SqliteRepository, scrip_code: str, frequency: str,
 async def llm_target_companies(request: LLMQueryRequest):
     """Parse user query, fetch data, and generate answer with Azure LLM."""
     try:
-        chat_id = str(uuid.uuid4())
         repo = SqliteRepository()
-        
+
+        # Create or validate conversation
+        if request.conversation_id is None:
+            conversation_id = repo.create_conversation()
+        else:
+            conversation_id = request.conversation_id
+            if not repo.conversation_exists(conversation_id):
+                repo.close()
+                raise HTTPException(status_code=404, detail="Conversation not found")
+
+        chat_id = str(conversation_id)
+
+        # Save the incoming user message inside the conversation
+        repo.save_message(conversation_id, "user", request.query)
+
         # Initialize log variables
         user_query = request.query
         initial_llm_prompt = get_actual_initial_prompt()
@@ -293,16 +321,15 @@ async def llm_target_companies(request: LLMQueryRequest):
         data_passed_to_llm = {}
         final_llm_prompt = ""
         peer_extraction_log = ""
-        peer_extraction_log = ""
-        
+
         # Step 1: Parse user query
         print("Step 1: Parsing user query with LLM")
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(request.query)
         print("1st LLM returned:", parsed)
-        
+
         # Store initial LLM interaction for logging
         initial_llm_response = json.dumps(parsed)
-        
+
         # Log Step 1 - Query parsing
         repo.save_detailed_log(
             chat_id=chat_id,
@@ -310,7 +337,7 @@ async def llm_target_companies(request: LLMQueryRequest):
             input_data=json.dumps({"user_query": request.query}),
             output_data=json.dumps(parsed)
         )
-        
+
         if parsed.get("error"):
             raise HTTPException(status_code=500, detail=parsed.get("error"))
 
@@ -327,7 +354,7 @@ async def llm_target_companies(request: LLMQueryRequest):
         print("Step 2: Fetching data for target companies" + (" + peers" if get_peer else ""))
         all_data = {}
         target_companies = parsed.get("target_companies", {})
-        
+
         db_fetch_log = {
             "frequency": frequency,
             "statement_type": statement_type,
@@ -335,7 +362,7 @@ async def llm_target_companies(request: LLMQueryRequest):
             "get_peer": get_peer,
             "fetched_data": {}
         }
-        
+
         for key, company in target_companies.items():
             scrip_code = company.get("scrip_code")
             if scrip_code:
@@ -365,7 +392,7 @@ async def llm_target_companies(request: LLMQueryRequest):
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log
-        
+
         # Log Step 2 - Database fetching
         repo.save_detailed_log(
             chat_id=chat_id,
@@ -381,26 +408,29 @@ async def llm_target_companies(request: LLMQueryRequest):
 
         # Step 3: Generate answer using LLM
         print("Step 3: Generating answer with 2nd LLM")
-        
+
         # Prepare the EXACT data being sent to LLM
         system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided financial data.
 The data is for {frequency} financial statements, including {statement_type.replace('_', ' ')} metrics where available.
 
 Provide a clear, concise answer to the query. If data is missing for some companies, note that."""
-        
+
         user_prompt = f"Query: {request.query}\n\nData: {json.dumps(all_data, indent=2)}"
-        
+
         final_llm_prompt = get_actual_final_prompt(request.query, all_data, statement_type, frequency)
-        
+
         # Store data passed to LLM for logging
         data_passed_to_llm = all_data
-        
+
         answer = generate_answer_from_data(request.query, all_data, statement_type, frequency)
         print("2nd LLM answer:", answer)
-        
+
         # Store final LLM response for logging
         final_llm_response = answer
-        
+
+        # Save assistant message inside the same conversation
+        repo.save_message(conversation_id, "llm", answer)
+
         # Log Step 3 - EXACT LLM input and output
         repo.save_detailed_log(
             chat_id=chat_id,
@@ -418,11 +448,9 @@ Provide a clear, concise answer to the query. If data is missing for some compan
                 "timestamp": datetime.now().isoformat()
             })
         )
-        
-        # Save main chat to database
-        repo.save_chat(chat_id, request.query, answer)
+
         repo.close()
-        
+
         # Write comprehensive log to file
         write_llm_log(
             user_query=user_query,
@@ -434,7 +462,7 @@ Provide a clear, concise answer to the query. If data is missing for some compan
             final_response=final_llm_response,
             peer_extraction_log=peer_extraction_log if 'peer_extraction_log' in locals() else ""
         )
-        
+
         return {
             "chat_id": chat_id,
             "answer": answer
@@ -447,20 +475,18 @@ Provide a clear, concise answer to the query. If data is missing for some compan
 
 @router.get("/llm/chat-history", response_model=List[ChatHistoryResponse])
 async def get_chat_history():
-    """Get all chat history."""
+    """Get all chat conversations."""
     try:
         repo = SqliteRepository()
-        chats = repo.get_chat_history()
+        chats = repo.get_conversation_list()
         repo.close()
-        
-        # Format response with titles (first 50 chars of query)
+
         return [
             ChatHistoryResponse(
-                chat_id=chat["chat_id"],
-                user_query=chat["user_query"],
-                response=chat["response"],
+                chat_id=str(chat["chat_id"]),
                 created_at=chat["created_at"],
-                title=chat["user_query"][:50] + ("..." if len(chat["user_query"]) > 50 else "")
+                title=(chat["last_message"] or "New conversation")[:50] + ("..." if chat["last_message"] and len(chat["last_message"]) > 50 else ""),
+                last_message=chat["last_message"],
             )
             for chat in chats
         ]
@@ -469,24 +495,41 @@ async def get_chat_history():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/llm/chat-history/{chat_id}", response_model=ChatHistoryResponse)
+@router.get("/llm/chat-history/{chat_id}", response_model=ConversationResponse)
 async def get_chat(chat_id: str):
-    """Get a specific chat by ID."""
+    """Get a specific conversation by ID."""
     try:
+        conversation_id = int(chat_id)
         repo = SqliteRepository()
-        chat = repo.get_chat_by_id(chat_id)
-        repo.close()
-        
-        if not chat:
+        if not repo.conversation_exists(conversation_id):
+            repo.close()
             raise HTTPException(status_code=404, detail="Chat not found")
-        
-        return ChatHistoryResponse(
-            chat_id=chat["chat_id"],
-            user_query=chat["user_query"],
-            response=chat["response"],
-            created_at=chat["created_at"],
-            title=chat["user_query"][:50] + ("..." if len(chat["user_query"]) > 50 else "")
+
+        conversation = repo.get_conversation(conversation_id)
+        messages = repo.get_conversation_messages(conversation_id)
+        repo.close()
+
+        title = "Chat"
+        if messages:
+            title = messages[0]["content"][:50] + ("..." if len(messages[0]["content"]) > 50 else "")
+
+        return ConversationResponse(
+            chat_id=chat_id,
+            created_at=conversation["created_at"],
+            title=title,
+            messages=[
+                ChatMessageResponse(
+                    id=msg["id"],
+                    sequence_number=msg["sequence_number"],
+                    role=msg["role"],
+                    content=msg["content"],
+                    created_at=msg["created_at"],
+                )
+                for msg in messages
+            ],
         )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid chat id")
     except HTTPException:
         raise
     except Exception as e:

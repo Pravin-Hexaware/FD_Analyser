@@ -1,4 +1,6 @@
 import * as React from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type{ ChatMessage as ChatMessageType } from "../data/chatbot";
 import { CompanyInfoCard } from "./CompanyInfoCard";
 import { FinancialTable } from "./FinancialTable";
@@ -7,40 +9,6 @@ import { User, Bot } from "lucide-react";
 
 interface ChatMessageProps {
   message: ChatMessageType;
-}
-
-function renderContent(text: string) {
-  // Simple markdown-ish formatting
-  const lines = text.split("\n");
-  return lines.map((line, i) => {
-    // Bold **text**
-    let rendered: React.ReactNode = line
-      .split(/(\*\*[^*]+\*\*)/g)
-      .map((part, j) => {
-        if (part.startsWith("**") && part.endsWith("**")) {
-          return <strong key={j} className="font-semibold">{part.slice(2, -2)}</strong>;
-        }
-        // Italic *text*
-        return part.split(/(\*[^*]+\*)/g).map((p, k) => {
-          if (p.startsWith("*") && p.endsWith("*") && p.length > 2) {
-            return <em key={k} className="italic text-indigo-600">{p.slice(1, -1)}</em>;
-          }
-          return p;
-        });
-      });
-
-    if (line.startsWith("• ")) {
-      return (
-        <div key={i} className="flex items-start gap-2 my-0.5">
-          <span className="text-indigo-400 mt-0.5">•</span>
-          <span>{rendered}</span>
-        </div>
-      );
-    }
-
-    if (line === "") return <div key={i} className="h-2" />;
-    return <div key={i}>{rendered}</div>;
-  });
 }
 
 export function ChatMessage({ message }: ChatMessageProps) {
@@ -73,7 +41,11 @@ export function ChatMessage({ message }: ChatMessageProps) {
           {isUser ? (
             <span>{message.content}</span>
           ) : (
-            <div className="space-y-0.5">{renderContent(message.content)}</div>
+            <div className="prose prose-sm max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {message.content}
+              </ReactMarkdown>
+            </div>
           )}
         </div>
 

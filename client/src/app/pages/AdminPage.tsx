@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Database, CheckCircle, RefreshCw, FileText, Plus,
-  Pencil, Trash2, Download, Activity, XCircle,
+  Download, Play, Activity, XCircle,
   Clock, Zap, Server, Cpu, HardDrive,
   Check, X, Upload, BarChart3
 } from "lucide-react";
@@ -9,9 +9,18 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import type { CompanyData } from "../data/companies";
 import { AppShell } from "../components/AppShell";
-import { toast } from "sonner";
+import { toast } from "react-hot-toast";
 import { apiClient } from "../../api/apiClient";
 import { useExtraction } from "../../context/ExtractionContext";
+
+// interface IngestionLog {
+//   id: string;
+//   company: string;
+//   status: "success" | "error" | "processing" | "pending";
+//   timestamp: Date;
+//   recordsProcessed: number;
+//   message?: string;
+// }
 
 const STATUS_CONFIG = {
   success: { icon: CheckCircle, color: "text-emerald-600", bg: "bg-emerald-50 border-emerald-200", badge: "bg-emerald-100 text-emerald-700" },
@@ -21,7 +30,7 @@ const STATUS_CONFIG = {
 };
 
 export default function AdminPage() {
-  const { isCollecting, isExtractingData, liveLog, logs, startXbrlExtraction, startDataExtraction, stopExtraction, clearLiveLog, clearLogs } = useExtraction();
+  const { isCollecting, isExtractingData, liveLog, logs, startXbrlExtraction, startDataExtraction, stopExtraction, clearLiveLog, clearLogs, setOnCompanyExtracted } = useExtraction();
   const [showAddForm, setShowAddForm] = useState(false);
   const [companies, setCompanies] = useState<CompanyData[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
@@ -43,6 +52,32 @@ export default function AdminPage() {
 
     loadCompanies();
   }, []);
+
+  // Set up callback to add extracted companies to the list
+  useEffect(() => {
+    if (setOnCompanyExtracted) {
+      setOnCompanyExtracted((company: any) => {
+        // Add newly extracted company to the companies list
+        setCompanies((prev) => {
+          // Check if company already exists
+          const exists = prev.some((c) => c.bseCode === company.bseCode || c.id === company.id);
+          if (exists) return prev;
+          
+          // Add new company
+          return [...prev, {
+            id: company.id || company.bseCode,
+            name: company.name || company.company_name,
+            symbol: company.symbol,
+            bseCode: company.bseCode || company.scrip_code,
+            sector: company.sector || "Unknown",
+            industry: company.industry || "",
+            xbrlLink: "",
+            financials: [],
+          }];
+        });
+      });
+    }
+  }, [setOnCompanyExtracted]);
 
   const systemServices = [
     { name: "Database Connection", desc: "PostgreSQL / Supabase", status: "operational", icon: HardDrive, latency: "12ms" },
@@ -70,11 +105,6 @@ export default function AdminPage() {
     setNewCompany({ name: "", symbol: "", bseCode: "", sector: "" });
     setShowAddForm(false);
     toast.success(`${company.name} added to master list.`);
-  };
-
-  const handleDelete = (id: string) => {
-    setCompanies((prev) => prev.filter((c) => c.id !== id));
-    toast.success("Company removed.");
   };
 
   const statsCards = [
@@ -142,29 +172,21 @@ export default function AdminPage() {
             <div className="flex items-center gap-2">
               <Button
                 size="sm"
-                onClick={startXbrlExtraction}
-                disabled={isCollecting || isExtractingData}
-                className={`text-xs ${
-                  isCollecting
-                    ? "bg-indigo-600 hover:bg-indigo-700 text-white"
-                    : "bg-indigo-600 hover:bg-indigo-700 text-white"
-                }`}
+                onClick={startDataExtraction}
+                disabled={isExtractingData || isCollecting}
+                className="bg-teal-600 hover:bg-teal-700 text-white text-xs"
               >
-                <FileText className={`size-3.5 mr-1.5 ${isCollecting ? "animate-spin" : ""}`} />
-                {isCollecting ? "Fetching XBRLs..." : "Extract XBRLs"}
+                <Upload className={`size-3.5 mr-1.5 ${isExtractingData ? "animate-bounce" : ""}`} />
+                {isExtractingData ? "Extracting..." : "Extract Parameters"}
               </Button>
               <Button
                 size="sm"
-                onClick={startDataExtraction}
-                disabled={isCollecting || isExtractingData}
-                className={`text-xs ${
-                  isExtractingData
-                    ? "bg-teal-600 hover:bg-teal-700 text-white"
-                    : "bg-teal-600 hover:bg-teal-700 text-white"
-                }`}
+                onClick={startXbrlExtraction}
+                disabled={isCollecting}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs"
               >
-                <Upload className={`size-3.5 mr-1.5 ${isExtractingData ? "animate-spin" : ""}`} />
-                {isExtractingData ? "Extracting Data..." : "Extract Data"}
+                <Play className={`size-3.5 mr-1.5 ${isCollecting ? "animate-pulse" : ""}`} />
+                {isCollecting ? "Collecting..." : "Run XBRL Collection"}
               </Button>
               {(isCollecting || isExtractingData) && (
                 <Button
@@ -288,7 +310,7 @@ export default function AdminPage() {
                 {[
                   { key: "name", placeholder: "Company Name *" },
                   { key: "symbol", placeholder: "Symbol (BSE) *" },
-                  { key: "bseCode", placeholder: "BSE Stripcode" },
+                  { key: "bseCode", placeholder: "Scrip Code" },
                   { key: "sector", placeholder: "Sector" },
                 ].map((field) => (
                   <Input
@@ -317,59 +339,45 @@ export default function AdminPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50/80 border-b border-gray-100">
-                  {["Company", "Symbol", "BSE Code", "Sector", "XBRL Status", "Actions"].map((h) => (
-                    <th key={h} className={`px-5 py-3.5 text-xs font-semibold text-gray-500 uppercase tracking-wide ${h === "Actions" ? "text-right" : "text-left"}`}>
+                  {["Company", "Symbol", "Scrip Code", "Sector"].map((h) => (
+                    <th key={h} className={`px-4 py-2.5 text-xs font-semibold text-gray-600 uppercase tracking-wide text-left`}>
                       {h}
                     </th>
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-50">
-                {companies.map((company) => (
-                  <tr key={company.id} className="hover:bg-gray-50/50 transition-colors group">
-                    <td className="px-5 py-4">
-                      <div className="flex items-center gap-3">
-                        <div className="size-8 rounded-lg bg-indigo-100 flex items-center justify-center flex-shrink-0">
-                          <span className="text-indigo-600 font-semibold text-xs">{company.symbol.charAt(0)}</span>
-                        </div>
-                        <div>
-                          <div className="font-medium text-gray-900 text-sm">{company.name}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-5 py-4">
-                      <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded-md text-xs font-mono font-medium">
-                        {company.symbol}
-                      </span>
-                    </td>
-                    <td className="px-5 py-4 text-gray-500 text-xs font-mono">{company.bseCode}</td>
-                    <td className="px-5 py-4">
-                      <span className="text-sm text-gray-600">{company.sector}</span>
-                    </td>
-                    <td className="px-5 py-4">
-                      <div className="flex items-center gap-1.5">
-                        <div className="size-1.5 rounded-full bg-emerald-500" />
-                        <span className="text-xs text-emerald-600 font-medium">Active</span>
-                      </div>
-                    </td>
-                    <td className="px-5 py-4">
-                      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={() => toast.info(`Edit ${company.name}`)}
-                          className="size-8 rounded-lg hover:bg-gray-100 flex items-center justify-center transition-colors"
-                        >
-                          <Pencil className="size-3.5 text-gray-500" />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(company.id)}
-                          className="size-8 rounded-lg hover:bg-red-50 flex items-center justify-center transition-colors"
-                        >
-                          <Trash2 className="size-3.5 text-red-400" />
-                        </button>
-                      </div>
+              <tbody className="divide-y divide-gray-100">
+                {companies.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-6 text-center text-gray-400 text-sm">
+                      No companies found. Add one to get started.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  companies.map((company) => (
+                    <tr key={company.id} className="hover:bg-blue-50/40 transition-colors">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <div className="size-6 rounded bg-indigo-100 flex items-center justify-center flex-shrink-0">
+                            <span className="text-indigo-600 font-bold text-xs">{company.symbol.charAt(0)}</span>
+                          </div>
+                          <span className="font-medium text-gray-800 text-xs">{company.name || (company as any).company_name}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs font-mono font-semibold">
+                          {company.symbol}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-xs text-gray-600 font-mono">{company.bseCode || (company as any).scripCode || (company as any).scrip_code}</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-xs text-gray-600">{company.sector}</span>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

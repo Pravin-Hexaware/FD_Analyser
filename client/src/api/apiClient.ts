@@ -11,8 +11,11 @@ export interface CompanySuggestion {
 export interface CompanyData {
   id: string;
   name: string;
+  company_name?: string;
   symbol: string;
   bseCode: string;
+  scripCode?: string;
+  scrip_code?: string;
   sector: string;
   industry: string;
   xbrlLink: string;
@@ -49,7 +52,6 @@ class ApiClient {
   async getAllCompanies(): Promise<CompanyData[]> {
     const response = await fetch(`${this.baseUrl}/companies`);
     const data = await this.handleResponse(response);
-    return data.companies || [];
     // Backend returns array directly, not wrapped in object
     return Array.isArray(data) ? data : [];
   }

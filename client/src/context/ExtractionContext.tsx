@@ -14,6 +14,8 @@ interface ExtractionContextType {
   clearLiveLog: () => void;
   clearLogs: () => void;
   wsRef: React.MutableRefObject<WebSocket | null>;
+  onCompanyExtracted?: (company: any) => void;
+  setOnCompanyExtracted?: (callback: (company: any) => void) => void;
 }
 
 const ExtractionContext = createContext<ExtractionContextType | undefined>(undefined);
@@ -39,6 +41,11 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
   });
 
   const wsRef = useRef<WebSocket | null>(null);
+  const onCompanyExtractedRef = useRef<((company: any) => void) | undefined>(undefined);
+
+  const setOnCompanyExtracted = useCallback((callback: (company: any) => void) => {
+    onCompanyExtractedRef.current = callback;
+  }, []);
 
   // Persist live logs to localStorage
   const persistLiveLog = useCallback((newLog: string[]) => {
@@ -232,6 +239,11 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
             message: `Data extraction completed`,
           };
           addLog(companyLog);
+          
+          // Trigger callback to add company to master list
+          if (onCompanyExtractedRef.current && data.company_data) {
+            onCompanyExtractedRef.current(data.company_data);
+          }
         } else if (data.status === "complete") {
           addLiveLog("✓ Data extraction complete!");
           setIsExtractingData(false);
@@ -294,6 +306,7 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
         clearLiveLog,
         clearLogs,
         wsRef,
+        setOnCompanyExtracted,
       }}
     >
       {children}

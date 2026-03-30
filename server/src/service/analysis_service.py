@@ -216,7 +216,7 @@ def parse_query_and_get_companies(query: str) -> Dict[str, Any]:
             except Exception:
                 parsed = {"error": "Failed to parse JSON"}
 
-    return parsed
+    return parsed,system_prompt
 
 
 def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:

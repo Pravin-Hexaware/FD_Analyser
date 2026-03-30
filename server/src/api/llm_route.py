@@ -4,12 +4,64 @@ from typing import Dict, Any, List
 from datetime import datetime
 import uuid
 import json
+import os
+from pathlib import Path
 
 from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data
 from repository.sqlite_repository import SqliteRepository
 
 router = APIRouter()
 
+
+def write_llm_log(user_query: str, llm_prompt: str, llm_response: str, db_data: Dict[str, Any], data_passed_to_llm: Dict[str, Any], final_prompt: str, final_response: str):
+    """Write detailed LLM interaction logs to timestamped file."""
+    try:
+        # Create logs directory if it doesn't exist
+        logs_dir = Path(__file__).parent.parent / "logs"
+        logs_dir.mkdir(exist_ok=True)
+
+        # Generate timestamp for filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        log_filename = f"Log-{timestamp}.log"
+        log_filepath = logs_dir / log_filename
+
+        # Format the log content
+        log_content = f"""=== LLM TARGET COMPANIES LOG ===
+Timestamp: {datetime.now().isoformat()}
+Log File: {log_filename}
+
+1. USER QUERY:
+{user_query}
+
+2. INITIAL LLM PROMPT (Query Parsing):
+{llm_prompt}
+
+3. INITIAL LLM RESPONSE (Parsed Query):
+{llm_response}
+
+4. DATA FETCHED FROM DATABASE:
+{json.dumps(db_data, indent=2)}
+
+5. DATA PASSED TO LLM:
+{json.dumps(data_passed_to_llm, indent=2)}
+
+6. FINAL PROMPT GIVEN TO LLM:
+{final_prompt}
+
+7. FINAL RESPONSE FROM LLM:
+{final_response}
+
+=== END LOG ===
+"""
+
+        # Write to file
+        with open(log_filepath, 'w', encoding='utf-8') as f:
+            f.write(log_content)
+
+        print(f"LLM log written to: {log_filepath}")
+
+    except Exception as e:
+        print(f"Error writing LLM log: {str(e)}")
 
 class LLMQueryRequest(BaseModel):
     query: str
@@ -134,10 +186,22 @@ async def llm_target_companies(request: LLMQueryRequest):
         chat_id = str(uuid.uuid4())
         repo = SqliteRepository()
         
+        # Initialize log variables
+        user_query = request.query
+        initial_llm_prompt = ""
+        initial_llm_response = ""
+        db_fetched_data = {}
+        data_passed_to_llm = {}
+        final_llm_prompt = ""
+        final_llm_response = ""
+        
         # Step 1: Parse user query
         print("Step 1: Parsing user query with LLM")
-        parsed = parse_query_and_get_companies(request.query)
+        parsed , initial_llm_prompt= parse_query_and_get_companies(request.query)
         print("1st LLM returned:", parsed)
+        
+        # Store initial LLM interaction for logging
+        initial_llm_response = json.dumps(parsed)
         
         # Log Step 1 - Query parsing
         repo.save_detailed_log(
@@ -200,6 +264,9 @@ async def llm_target_companies(request: LLMQueryRequest):
                         }
                         print(f"Fetched from {frequency}_table for scrip_code {p_scrip}: {p_data}")
 
+        # Store DB fetched data for logging
+        db_fetched_data = db_fetch_log
+        
         # Log Step 2 - Database fetching
         repo.save_detailed_log(
             chat_id=chat_id,
@@ -224,23 +291,29 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         
         user_prompt = f"Query: {request.query}\n\nData: {json.dumps(all_data, indent=2)}"
         
-        llm_input = {
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "query": request.query,
-            "data_sent": all_data,
-            "statement_type": statement_type,
-            "frequency": frequency
-        }
+        final_llm_prompt = system_prompt
+        
+        # Store data passed to LLM for logging
+        data_passed_to_llm = all_data
         
         answer = generate_answer_from_data(request.query, all_data, statement_type, frequency)
         print("2nd LLM answer:", answer)
+        
+        # Store final LLM response for logging
+        final_llm_response = answer
         
         # Log Step 3 - EXACT LLM input and output
         repo.save_detailed_log(
             chat_id=chat_id,
             step_name="Answer Generation (LLM)",
-            input_data=json.dumps(llm_input, default=str),
+            input_data=json.dumps({
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "query": request.query,
+                "data_sent": all_data,
+                "statement_type": statement_type,
+                "frequency": frequency
+            }, default=str),
             output_data=json.dumps({
                 "llm_response": answer,
                 "timestamp": datetime.now().isoformat()
@@ -250,6 +323,17 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         # Save main chat to database
         repo.save_chat(chat_id, request.query, answer)
         repo.close()
+        
+        # Write comprehensive log to file
+        write_llm_log(
+            user_query=user_query,
+            llm_prompt=initial_llm_prompt,
+            llm_response=initial_llm_response,
+            db_data=db_fetched_data,
+            data_passed_to_llm=data_passed_to_llm,
+            final_prompt=final_llm_prompt,
+            final_response=final_llm_response
+        )
         
         return {
             "chat_id": chat_id,

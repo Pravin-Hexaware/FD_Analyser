@@ -1,29 +1,17 @@
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   Database, CheckCircle, RefreshCw, FileText, Plus,
-  Pencil, Trash2, Download, Play, Activity, XCircle,
-  Clock, Zap, Server, Cpu, HardDrive, AlertCircle,
-  ChevronDown, ChevronUp, Check, X, Upload, BarChart3
+  Pencil, Trash2, Download, Activity, XCircle,
+  Clock, Zap, Server, Cpu, HardDrive,
+  Check, X, Upload, BarChart3
 } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { Badge } from "../components/ui/badge";
 import { Input } from "../components/ui/input";
-import { companies as initialCompanies } from "../data/companies";
 import type { CompanyData } from "../data/companies";
 import { AppShell } from "../components/AppShell";
 import { toast } from "sonner";
-
-interface IngestionLog {
-  id: string;
-  company: string;
-  status: "success" | "error" | "processing" | "pending";
-  timestamp: Date;
-  recordsProcessed: number;
-  message?: string;
-}
-
-const SECTORS = ["Energy", "Technology", "Consumer Goods", "Financial Services", "Healthcare", "FMCG", "Auto", "Infra"];
+import { apiClient } from "../../api/apiClient";
+import { useExtraction } from "../../context/ExtractionContext";
 
 const STATUS_CONFIG = {
   success: { icon: CheckCircle, color: "text-emerald-600", bg: "bg-emerald-50 border-emerald-200", badge: "bg-emerald-100 text-emerald-700" },
@@ -32,26 +20,29 @@ const STATUS_CONFIG = {
   pending: { icon: Clock, color: "text-gray-500", bg: "bg-gray-50 border-gray-200", badge: "bg-gray-100 text-gray-600" },
 };
 
-const sampleLogs: IngestionLog[] = [
-  { id: "1", company: "Reliance Industries Ltd", status: "success", timestamp: new Date(2026, 2, 25, 10, 30), recordsProcessed: 240, message: "All parameters extracted successfully" },
-  { id: "2", company: "TCS", status: "success", timestamp: new Date(2026, 2, 25, 10, 25), recordsProcessed: 240, message: "XBRL parsing completed" },
-  { id: "3", company: "Infosys Ltd", status: "success", timestamp: new Date(2026, 2, 25, 10, 20), recordsProcessed: 240, message: "5-year historical data loaded" },
-  { id: "4", company: "Asian Paints Ltd", status: "success", timestamp: new Date(2026, 2, 25, 10, 15), recordsProcessed: 240, message: "Balance sheet & P&L parsed" },
-  { id: "5", company: "HDFC Bank Ltd", status: "success", timestamp: new Date(2026, 2, 25, 10, 10), recordsProcessed: 240, message: "Financial ratios computed" },
-];
-
 export default function AdminPage() {
-  const navigate = useNavigate();
-  const [isCollecting, setIsCollecting] = useState(false);
-  const [isExtracting, setIsExtracting] = useState(false);
+  const { isCollecting, isExtractingData, liveLog, logs, startXbrlExtraction, startDataExtraction, stopExtraction, clearLiveLog, clearLogs } = useExtraction();
   const [showAddForm, setShowAddForm] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [companies, setCompanies] = useState<CompanyData[]>([...initialCompanies]);
-  const [logs, setLogs] = useState<IngestionLog[]>(sampleLogs);
-  const [liveLog, setLiveLog] = useState<string[]>([]);
+  const [companies, setCompanies] = useState<CompanyData[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
 
-  const [newCompany, setNewCompany] = useState({ name: "", symbol: "", bseCode: "", sector: "", industry: "" });
+  const [newCompany, setNewCompany] = useState({ name: "", symbol: "", bseCode: "", sector: "" });
+
+  // Fetch companies from database on mount
+  useEffect(() => {
+    const loadCompanies = async () => {
+      try {
+        const dbCompanies = await apiClient.getAllCompanies();
+        if (dbCompanies && dbCompanies.length > 0) {
+          setCompanies(dbCompanies as any);
+        }
+      } catch (error) {
+        console.error("Failed to load companies from database:", error);
+      }
+    };
+
+    loadCompanies();
+  }, []);
 
   const systemServices = [
     { name: "Database Connection", desc: "PostgreSQL / Supabase", status: "operational", icon: HardDrive, latency: "12ms" },
@@ -64,79 +55,19 @@ export default function AdminPage() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [liveLog]);
 
-  const addLiveLine = (text: string) => {
-    setLiveLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${text}`]);
-  };
-
-  const handleStartCollection = () => {
-    setIsCollecting(true);
-    setLiveLog([]);
-
-    const steps = [
-      "Initializing XBRL collection pipeline...",
-      "Connecting to BSE data feed...",
-      "Fetching filings for Reliance Industries...",
-      "  → Parsed 240 parameters (Balance Sheet, P&L, Cash Flow)",
-      "Fetching filings for TCS...",
-      "  → Parsed 240 parameters (5Y historical data)",
-      "Fetching filings for Infosys...",
-      "  → Parsed 240 parameters",
-      "Fetching filings for HDFC Bank...",
-      "  → Parsed 240 parameters (NBFC-adjusted ratios)",
-      "Fetching filings for Asian Paints...",
-      "  → Parsed 240 parameters",
-      "Fetching filings for Wipro...",
-      "  → Parsed 240 parameters",
-      "Running data validation & normalization...",
-      "Computing financial ratios & KPIs...",
-      "Updating vector embeddings for AI search...",
-      "✓ Collection complete. 1,440 records processed across 6 companies.",
-    ];
-
-    let i = 0;
-    const interval = setInterval(() => {
-      if (i < steps.length) {
-        addLiveLine(steps[i]);
-        i++;
-      } else {
-        clearInterval(interval);
-        setIsCollecting(false);
-        const newLog: IngestionLog = {
-          id: String(logs.length + 1),
-          company: "All Companies (Batch)",
-          status: "success",
-          timestamp: new Date(),
-          recordsProcessed: 1440,
-          message: "Full batch collection completed",
-        };
-        setLogs((prev) => [newLog, ...prev]);
-        toast.success("XBRL collection complete!", { description: "1,440 records processed across 6 companies." });
-      }
-    }, 200);
-  };
-
-  const handleExtractParameters = () => {
-    setIsExtracting(true);
-    setTimeout(() => {
-      setIsExtracting(false);
-      toast.success("Parameters extracted!", { description: "240 parameters mapped per company." });
-    }, 2000);
-  };
-
   const handleAddCompany = () => {
     if (!newCompany.name || !newCompany.symbol) return;
-    const company: CompanyData = {
+    const company: any = {
       id: newCompany.symbol.toLowerCase(),
       name: newCompany.name,
       symbol: newCompany.symbol.toUpperCase(),
       bseCode: newCompany.bseCode,
       sector: newCompany.sector,
-      industry: newCompany.industry,
       xbrlLink: "",
       financials: [],
     };
     setCompanies((prev) => [...prev, company]);
-    setNewCompany({ name: "", symbol: "", bseCode: "", sector: "", industry: "" });
+    setNewCompany({ name: "", symbol: "", bseCode: "", sector: "" });
     setShowAddForm(false);
     toast.success(`${company.name} added to master list.`);
   };
@@ -206,44 +137,69 @@ export default function AdminPage() {
           <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between">
             <div>
               <h2 className="font-semibold text-gray-900">XBRL Data Pipeline</h2>
-              <p className="text-xs text-gray-400 mt-0.5">Collect and process financial filings from BSE</p>
+              <p className="text-xs text-gray-400 mt-0.5">Fetch XBRL files and extract financial data</p>
             </div>
             <div className="flex items-center gap-2">
               <Button
-                variant="outline"
                 size="sm"
-                onClick={handleExtractParameters}
-                disabled={isExtracting}
-                className="text-xs"
+                onClick={startXbrlExtraction}
+                disabled={isCollecting || isExtractingData}
+                className={`text-xs ${
+                  isCollecting
+                    ? "bg-indigo-600 hover:bg-indigo-700 text-white"
+                    : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                }`}
               >
-                <Upload className={`size-3.5 mr-1.5 ${isExtracting ? "animate-bounce" : ""}`} />
-                {isExtracting ? "Extracting..." : "Extract Parameters"}
+                <FileText className={`size-3.5 mr-1.5 ${isCollecting ? "animate-spin" : ""}`} />
+                {isCollecting ? "Fetching XBRLs..." : "Extract XBRLs"}
               </Button>
               <Button
                 size="sm"
-                onClick={handleStartCollection}
-                disabled={isCollecting}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs"
+                onClick={startDataExtraction}
+                disabled={isCollecting || isExtractingData}
+                className={`text-xs ${
+                  isExtractingData
+                    ? "bg-teal-600 hover:bg-teal-700 text-white"
+                    : "bg-teal-600 hover:bg-teal-700 text-white"
+                }`}
               >
-                <Play className={`size-3.5 mr-1.5 ${isCollecting ? "animate-pulse" : ""}`} />
-                {isCollecting ? "Collecting..." : "Run XBRL Collection"}
+                <Upload className={`size-3.5 mr-1.5 ${isExtractingData ? "animate-spin" : ""}`} />
+                {isExtractingData ? "Extracting Data..." : "Extract Data"}
               </Button>
+              {(isCollecting || isExtractingData) && (
+                <Button
+                  size="sm"
+                  onClick={stopExtraction}
+                  className="text-xs bg-red-600 hover:bg-red-700 text-white"
+                >
+                  <X className="size-3.5 mr-1.5" />
+                  Stop
+                </Button>
+              )}
             </div>
           </div>
 
           <div className="grid md:grid-cols-2 divide-x divide-gray-50">
             {/* Live Log */}
             <div className="p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <div className={`size-2 rounded-full ${isCollecting ? "bg-blue-500 animate-pulse" : "bg-gray-300"}`} />
-                <span className="text-sm font-medium text-gray-700">Live Output</span>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="flex items-center gap-2">
+                  <div className={`size-2 rounded-full ${isCollecting || isExtractingData ? "bg-blue-500 animate-pulse" : "bg-gray-300"}`} />
+                  <span className="text-sm font-medium text-gray-700">Live Output</span>
+                </div>
+                <button
+                  onClick={clearLiveLog}
+                  className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  Clear
+                </button>
               </div>
               <div
                 ref={logRef}
                 className="h-48 bg-slate-950 rounded-xl p-4 overflow-y-auto font-mono text-xs"
               >
                 {liveLog.length === 0 ? (
-                  <div className="text-slate-600">Ready. Press "Run XBRL Collection" to start...</div>
+                  <div className="text-slate-600">Ready. Click "Extract XBRLs" or "Extract Data" to start...</div>
                 ) : (
                   liveLog.map((line, idx) => (
                     <div
@@ -251,7 +207,10 @@ export default function AdminPage() {
                       className={`mb-0.5 ${
                         line.includes("✓") ? "text-emerald-400" :
                         line.includes("→") ? "text-blue-300" :
-                        line.includes("Error") ? "text-red-400" :
+                        line.includes("✗") ? "text-red-400" :
+                        line.includes("⊘") ? "text-yellow-400" :
+                        line.includes("⟳") ? "text-purple-400" :
+                        line.includes("📊") || line.includes("📄") ? "text-cyan-300" :
                         "text-slate-400"
                       }`}
                     >
@@ -264,27 +223,39 @@ export default function AdminPage() {
 
             {/* Recent Runs */}
             <div className="p-5">
-              <div className="text-sm font-medium text-gray-700 mb-3">Recent Runs</div>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="text-sm font-medium text-gray-700">Recent Runs</div>
+                <button
+                  onClick={clearLogs}
+                  className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
               <div className="space-y-2 h-48 overflow-y-auto pr-1">
-                {logs.slice(0, 6).map((log) => {
-                  const sc = STATUS_CONFIG[log.status];
-                  return (
-                    <div key={log.id} className={`flex items-center justify-between p-3 rounded-xl border ${sc.bg}`}>
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <sc.icon className={`size-4 flex-shrink-0 ${sc.color} ${log.status === "processing" ? "animate-spin" : ""}`} />
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium text-gray-900 truncate">{log.company}</div>
-                          <div className="text-xs text-gray-400">
-                            {log.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {log.recordsProcessed} records
+                {logs.length === 0 ? (
+                  <div className="text-xs text-gray-400 text-center py-8">No runs yet</div>
+                ) : (
+                  logs.slice(0, 6).map((log: any) => {
+                    const sc = STATUS_CONFIG[log.status as keyof typeof STATUS_CONFIG];
+                    return (
+                      <div key={log.id} className={`flex items-center justify-between p-3 rounded-xl border ${sc.bg}`}>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <sc.icon className={`size-4 flex-shrink-0 ${sc.color} ${log.status === "processing" ? "animate-spin" : ""}`} />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-gray-900 truncate">{log.company}</div>
+                            <div className="text-xs text-gray-400">
+                              {new Date(log.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {log.recordsProcessed} records
+                            </div>
                           </div>
                         </div>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ml-2 ${sc.badge}`}>
+                          {log.status}
+                        </span>
                       </div>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ml-2 ${sc.badge}`}>
-                        {log.status}
-                      </span>
-                    </div>
-                  );
-                })}
+                    );
+                  })
+                )}
               </div>
             </div>
           </div>
@@ -313,13 +284,12 @@ export default function AdminPage() {
           {/* Add Form */}
           {showAddForm && (
             <div className="px-6 py-4 bg-indigo-50/50 border-b border-indigo-100">
-              <div className="grid grid-cols-5 gap-3 mb-3">
+              <div className="grid grid-cols-4 gap-3 mb-3">
                 {[
                   { key: "name", placeholder: "Company Name *" },
                   { key: "symbol", placeholder: "Symbol (BSE) *" },
                   { key: "bseCode", placeholder: "BSE Stripcode" },
                   { key: "sector", placeholder: "Sector" },
-                  { key: "industry", placeholder: "Industry" },
                 ].map((field) => (
                   <Input
                     key={field.key}
@@ -347,7 +317,7 @@ export default function AdminPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50/80 border-b border-gray-100">
-                  {["Company", "Symbol", "BSE Code", "Sector", "Industry", "XBRL Status", "Actions"].map((h) => (
+                  {["Company", "Symbol", "BSE Code", "Sector", "XBRL Status", "Actions"].map((h) => (
                     <th key={h} className={`px-5 py-3.5 text-xs font-semibold text-gray-500 uppercase tracking-wide ${h === "Actions" ? "text-right" : "text-left"}`}>
                       {h}
                     </th>
@@ -376,7 +346,6 @@ export default function AdminPage() {
                     <td className="px-5 py-4">
                       <span className="text-sm text-gray-600">{company.sector}</span>
                     </td>
-                    <td className="px-5 py-4 text-gray-500 text-sm">{company.industry}</td>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-1.5">
                         <div className="size-1.5 rounded-full bg-emerald-500" />

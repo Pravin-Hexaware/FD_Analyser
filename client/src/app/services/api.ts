@@ -123,7 +123,17 @@ export async function fetchChat(chatId: string): Promise<ChatHistoryItem> {
 export async function fetchCompanies(): Promise<CompanyInfo[]> {
   try {
     const response = await apiClient.get<CompanyInfo[]>('/companies');
-    return response.data;
+
+    // Backend may return either plain array or an envelope with companies key.
+    if (Array.isArray(response.data)) {
+      return response.data;
+    }
+
+    if (response.data && Array.isArray((response.data as any).companies)) {
+      return (response.data as any).companies;
+    }
+
+    return [];
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const message = error.response?.data?.detail || error.message;
@@ -162,11 +172,46 @@ export async function fetchCompanyFinancials(
   frequency: string = 'annual'
 ): Promise<any> {
   try {
-    const response = await apiClient.get(
-      `/companies/${scripCode}/financials`,
-      { params: { frequency } }
-    );
-    return response.data;
+    let endpoint = `/companies/${scripCode}/financials`;
+
+    // Prefer explicit annual/quarterly routes for determinism and fewer 404s
+    if (frequency === 'annual') {
+      endpoint = `/companies/${scripCode}/annual`;
+    } else if (frequency === 'quarterly') {
+      endpoint = `/companies/${scripCode}/quarterly`;
+    }
+
+    const response = await apiClient.get(endpoint, {
+      params: frequency === 'annual' || frequency === 'quarterly' ? {} : { frequency },
+    });
+
+    const data = response.data;
+
+    // Normalize shape for ComparisonPage (expects .financials array)
+    if (Array.isArray(data.financials)) {
+      return data;
+    }
+
+    if (data.annual) {
+      return {
+        ...data,
+        financials: Array.isArray(data.annual) ? data.annual : [data.annual],
+      };
+    }
+
+    if (data.quarterly) {
+      return {
+        ...data,
+        financials: Array.isArray(data.quarterly) ? data.quarterly : [data.quarterly],
+      };
+    }
+
+    // Fallback to deprecated route format if data already is a list or object
+    if (Array.isArray(data)) {
+      return { financials: data };
+    }
+
+    return data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const message = error.response?.data?.detail || error.message;

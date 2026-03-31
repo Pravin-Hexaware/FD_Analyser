@@ -122,12 +122,7 @@ export default function ChatbotPage() {
       .catch(error => {
         console.error("Error processing chat query:", error);
         setIsTyping(false);
-        setMessages(prev => [...prev, {
-          id: `msg-${Date.now()}-error`,
-          role: "assistant",
-          content: "Sorry, there was an error processing your request. Please try again.",
-          timestamp: new Date(),
-        }]);
+        // Don't show error message, just log the error
       });
   };
 

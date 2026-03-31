@@ -221,6 +221,7 @@ def _fetch_company_data(repo: SqliteRepository, scrip_code: str, frequency: str,
 
     # Define field sets using DB column names
     quarterly_fields = [
+        "period",
         "currency","level_of_rounding",
         "sales", "expenses", "operating_profit", "opm_percentage", "other_income",
         "cost_of_materials_consumed", "employee_benefit_expense", "other_expenses",
@@ -229,20 +230,20 @@ def _fetch_company_data(repo: SqliteRepository, scrip_code: str, frequency: str,
     ]
     
     annual_pl_fields = [
-        "currency","level_of_rounding",
+        "period","currency","level_of_rounding",
         "sales", "expenses", "operating_profit", "opm_percentage", "other_income",
         "interest", "depreciation", "profit_before_tax", "tax_percent", "net_profit", "eps_in_rs"
     ]
     
     annual_bs_fields = [
-        "currency","level_of_rounding",
+        "period","currency","level_of_rounding",
         "equity_capital", "reserves", "trade_payables_current", "borrowings",
         "other_liabilities", "total_liabilities", "total_equity", "fixed_assets",
         "cwip", "investments", "total_assets"
     ]
     
     annual_cf_fields = [
-        "currency","level_of_rounding",
+        "period","currency","level_of_rounding",
         "cash_from_operating_activity", "cash_from_investing_activity", "cash_from_financing_activity"
     ]
     

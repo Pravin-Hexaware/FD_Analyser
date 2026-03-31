@@ -9,13 +9,13 @@ export interface ChatMessage {
   timestamp: Date;
   widget?: ChatWidget;
 }
-
-export type ChatWidget = 
+ 
+export type ChatWidget =
   | { type: "company-card"; companyId: string }
   | { type: "financial-table"; companyId: string; years?: number }
   | { type: "comparison-table"; companyIds: string[] }
   | { type: "chart"; companyIds: string[]; metric: string };
-
+ 
 export interface AIReport {
   id: string;
   title: string;
@@ -25,25 +25,25 @@ export interface AIReport {
   sections: ReportSection[];
   shareLink: string;
 }
-
+ 
 export interface ReportSection {
   title: string;
   content: string;
   metrics?: { label: string; value: string }[];
 }
-
+ 
 export function generateAIReport(companyIds: string[], companies: CompanyData[]): AIReport {
   const selectedCompanies = companies.filter(c => companyIds.includes(c.id));
   const reportId = `report-${Date.now()}`;
-  
+ 
   if (selectedCompanies.length === 1) {
     const company = selectedCompanies[0];
     const latest = company.financials[0];
     const oldest = company.financials[company.financials.length - 1];
-    
+   
     const salesGrowth = (((latest.sales - oldest.sales) / oldest.sales) * 100).toFixed(1);
     const patGrowth = (((latest.pat - oldest.pat) / oldest.pat) * 100).toFixed(1);
-    
+   
     return {
       id: reportId,
       title: `${company.name} - Financial Analysis Report`,
@@ -91,7 +91,7 @@ export function generateAIReport(companyIds: string[], companies: CompanyData[])
   } else {
     // Comparison report
     const title = selectedCompanies.map(c => c.symbol).join(" vs ");
-    
+   
     return {
       id: reportId,
       title: `Comparative Analysis: ${title}`,
@@ -144,103 +144,23 @@ export function generateAIReport(companyIds: string[], companies: CompanyData[])
     };
   }
 }
-
+ 
 export interface ChatResponse {
   message: ChatMessage;
   conversationId?: number;
 }
-
+ 
 export async function processChatQuery(query: string, companiesList: CompanyData[], conversationId?: number): Promise<ChatResponse> {
-  try {
-    // Send query to backend LLM endpoint
-    const response = await sendLLMQuery(query, conversationId);
-    
-    return {
-      message: {
-        id: `msg-${Date.now()}-assistant`,
-        role: "assistant",
-        content: response.answer,
-        timestamp: new Date(),
-      },
-      conversationId: Number(response.chat_id),
-    };
-  } catch (error) {
-    // Fallback to local processing if backend fails
-    console.warn("Backend API error, falling back to local processing:", error);
-    return {
-      message: processChatQueryLocal(query, companiesList),
-    };
-  }
-}
-
-export function processChatQueryLocal(query: string, companies: CompanyData[]): ChatMessage {
-  const messageId = `msg-${Date.now()}`;
-  const q = query.toLowerCase();
-  
-  // Check for comparison queries
-  if (q.includes("compare") || q.includes("vs")) {
-    const matchedCompanies = companies.filter(c => 
-      q.includes(c.name.toLowerCase()) || q.includes(c.symbol.toLowerCase())
-    );
-    
-    if (matchedCompanies.length >= 2) {
-      return {
-        id: messageId,
-        role: "assistant",
-        content: `Here's a comparison of ${matchedCompanies.map(c => c.name).join(" and ")}:`,
-        timestamp: new Date(),
-        widget: {
-          type: "comparison-table",
-          companyIds: matchedCompanies.map(c => c.id)
-        }
-      };
-    }
-  }
-  
-  // Check for financials query
-  if (q.includes("financial") || q.includes("show") || q.includes("data")) {
-    const matchedCompany = companies.find(c => 
-      q.includes(c.name.toLowerCase()) || q.includes(c.symbol.toLowerCase())
-    );
-    
-    if (matchedCompany) {
-      return {
-        id: messageId,
-        role: "assistant",
-        content: `Here are the financial details for ${matchedCompany.name}:`,
-        timestamp: new Date(),
-        widget: {
-          type: "financial-table",
-          companyId: matchedCompany.id,
-          years: 5
-        }
-      };
-    }
-  }
-  
-  // Check for company info query
-  const matchedCompany = companies.find(c => 
-    q.includes(c.name.toLowerCase()) || q.includes(c.symbol.toLowerCase())
-  );
-  
-  if (matchedCompany) {
-    return {
-      id: messageId,
-      role: "assistant",
-      content: `Here's information about ${matchedCompany.name}:`,
-      timestamp: new Date(),
-      widget: {
-        type: "company-card",
-        companyId: matchedCompany.id
-      }
-    };
-  }
-  
-  // Default response
+  // Send query to backend LLM endpoint
+  const response = await sendLLMQuery(query, conversationId);
+ 
   return {
-    id: messageId,
-    role: "assistant",
-    content: "I can help you with financial data, company comparisons, and analysis. Try asking:\n• \"Show financials for Reliance\"\n• \"Compare TCS and Infosys\"\n• \"Generate report for Asian Paints\"",
-    timestamp: new Date()
+    message: {
+      id: `msg-${Date.now()}-assistant`,
+      role: "assistant",
+      content: response.answer,
+      timestamp: new Date(),
+    },
+    conversationId: Number(response.chat_id),
   };
 }

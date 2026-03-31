@@ -21,11 +21,16 @@ async def get_all_companies():
         return [
             {
                 "id": c.id,
-                "scrip_code": c.bse_code,
+                "name": c.name,
                 "company_name": c.name,
                 "symbol": c.symbol,
+                "bseCode": c.bse_code,
+                "scripCode": c.bse_code,
+                "scrip_code": c.bse_code,
                 "sector": c.sector,
-                "industry": c.industry
+                "industry": c.industry,
+                "xbrlLink": "",
+                "financials": []
             }
             for c in companies
         ]

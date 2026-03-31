@@ -13,6 +13,7 @@ const apiClient = axios.create({
 
 export interface LLMQueryRequest {
   query: string;
+  conversation_id?: number;
 }
 
 export interface LLMQueryResponse {
@@ -22,10 +23,24 @@ export interface LLMQueryResponse {
 
 export interface ChatHistoryItem {
   chat_id: string;
-  user_query: string;
-  response: string;
-  created_at: string;
   title: string;
+  created_at: string;
+  last_message?: string;
+}
+
+export interface ConversationMessage {
+  id: number;
+  sequence_number: number;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
+export interface ConversationDetail {
+  chat_id: string;
+  title: string;
+  created_at: string;
+  messages: ConversationMessage[];
 }
 
 export interface CompanyInfo {
@@ -65,11 +80,16 @@ export interface CompanyComparisonData {
  * @param query - The user's query
  * @returns The response with chat_id and answer
  */
-export async function sendLLMQuery(query: string): Promise<LLMQueryResponse> {
+export async function sendLLMQuery(query: string, conversationId?: number): Promise<LLMQueryResponse> {
   try {
+    const payload: LLMQueryRequest = { query };
+    if (conversationId !== undefined) {
+      payload.conversation_id = conversationId;
+    }
+
     const response = await apiClient.post<LLMQueryResponse>(
       '/llm/target_companies',
-      { query } as LLMQueryRequest
+      payload
     );
     return response.data;
   } catch (error) {
@@ -103,9 +123,9 @@ export async function fetchChatHistory(): Promise<ChatHistoryItem[]> {
  * @param chatId - The chat ID to fetch
  * @returns The chat details
  */
-export async function fetchChat(chatId: string): Promise<ChatHistoryItem> {
+export async function fetchChat(chatId: string): Promise<ConversationDetail> {
   try {
-    const response = await apiClient.get<ChatHistoryItem>(`/llm/chat-history/${chatId}`);
+    const response = await apiClient.get<ConversationDetail>(`/llm/chat-history/${chatId}`);
     return response.data;
   } catch (error) {
     if (axios.isAxiosError(error)) {

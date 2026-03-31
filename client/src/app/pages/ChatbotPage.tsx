@@ -9,7 +9,7 @@ import { ChatMessage } from "../components/ChatMessage";
 import type { ChatMessage as ChatMessageType } from "../data/chatbot";
 import { processChatQuery } from "../data/chatbot";
 import { companies } from "../data/companies";
-import { fetchChatHistory, type ChatHistoryItem } from "../services/api";
+import { fetchChatHistory, fetchChat, type ChatHistoryItem } from "../services/api";
 
 const navItems = [
   { path: "/", icon: Home, label: "Home" },
@@ -52,7 +52,7 @@ export default function ChatbotPage() {
   ]);
   const [inputValue, setInputValue] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [currentChatId, setCurrentChatId] = useState<number | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -73,28 +73,17 @@ export default function ChatbotPage() {
 
   const loadChatById = async (chatId: string) => {
     try {
-      setCurrentChatId(chatId);
-      const chat = await fetchChatHistory();
-      const selectedChat = chat.find(c => c.chat_id === chatId);
-      
-      if (selectedChat) {
-        // Load the selected chat into the message area
-        const userMessage: ChatMessageType = {
-          id: `msg-${selectedChat.chat_id}-user`,
-          role: "user",
-          content: selectedChat.user_query,
-          timestamp: new Date(selectedChat.created_at),
-        };
-        
-        const assistantMessage: ChatMessageType = {
-          id: selectedChat.chat_id,
-          role: "assistant",
-          content: selectedChat.response,
-          timestamp: new Date(selectedChat.created_at),
-        };
-        
-        setMessages([userMessage, assistantMessage]);
-      }
+      const conversation = await fetchChat(chatId);
+      setCurrentChatId(Number(conversation.chat_id));
+
+      const loadedMessages: ChatMessageType[] = conversation.messages.map((msg) => ({
+        id: `msg-${conversation.chat_id}-${msg.id}`,
+        role: msg.role as "user" | "assistant",
+        content: msg.content,
+        timestamp: new Date(msg.created_at),
+      }));
+
+      setMessages(loadedMessages);
     } catch (error) {
       console.warn("Failed to load chat:", error);
     }
@@ -119,10 +108,14 @@ export default function ChatbotPage() {
     setIsTyping(true);
 
     // Call the async function to process the query
-    processChatQuery(text, companies)
-      .then(aiResponse => {
+    processChatQuery(text, companies, currentChatId ?? undefined)
+      .then((response) => {
         setIsTyping(false);
-        setMessages(prev => [...prev, aiResponse]);
+        setMessages(prev => [...prev, response.message]);
+        if (response.conversationId) {
+          setCurrentChatId(response.conversationId);
+        }
+        loadChatHistory();
       })
       .catch(error => {
         console.error("Error processing chat query:", error);
@@ -144,6 +137,7 @@ export default function ChatbotPage() {
   };
 
   const handleNewChat = () => {
+    setCurrentChatId(null);
     setMessages([
       {
         id: `welcome-${Date.now()}`,
@@ -206,11 +200,11 @@ export default function ChatbotPage() {
         </div>
 
         {/* Chat History */}
-        <div className="flex-1 overflow-hidden px-3 py-3">
+        <div className="px-3 py-3" style={{ height: '200px' }}>
           <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider px-2 mb-1.5">
             Recent Chats
           </div>
-          <div className="space-y-0.5 overflow-y-auto" style={{ maxHeight: "calc(100% - 24px)" }}>
+          <div className="space-y-0.5 overflow-y-auto" style={{ height: 'calc(100% - 24px)' }}>
             {chatHistory.length === 0 ? (
               <div className="text-xs text-slate-500 px-3 py-2">No chats yet</div>
             ) : (
@@ -219,7 +213,7 @@ export default function ChatbotPage() {
                   key={chat.chat_id}
                   onClick={() => loadChatById(chat.chat_id)}
                   className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${
-                    currentChatId === chat.chat_id
+                    currentChatId === Number(chat.chat_id)
                       ? "bg-slate-700 text-white"
                       : "text-slate-400 hover:text-slate-100 hover:bg-slate-800"
                   }`}

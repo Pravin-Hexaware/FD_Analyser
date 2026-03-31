@@ -311,17 +311,21 @@ class SqliteRepository:
             """
             SELECT c.id AS chat_id,
                    c.created_at,
-                   m.content AS last_message,
-                   m.role AS last_role,
-                   m.sequence_number AS last_sequence
+                   first_m.content AS first_message,
+                   last_m.content AS last_message,
+                   last_m.role AS last_role,
+                   last_m.sequence_number AS last_sequence,
+                   last_m.created_at AS last_updated
             FROM conversations c
-            LEFT JOIN messages m ON m.conversation_id = c.id
-            WHERE m.sequence_number = (
-                SELECT MAX(sequence_number)
-                FROM messages
-                WHERE conversation_id = c.id
-            )
-            ORDER BY c.created_at DESC
+            LEFT JOIN messages first_m ON first_m.conversation_id = c.id
+              AND first_m.sequence_number = (
+                  SELECT MIN(sequence_number) FROM messages WHERE conversation_id = c.id
+              )
+            LEFT JOIN messages last_m ON last_m.conversation_id = c.id
+              AND last_m.sequence_number = (
+                  SELECT MAX(sequence_number) FROM messages WHERE conversation_id = c.id
+              )
+            ORDER BY COALESCE(last_m.created_at, c.created_at) DESC
             """
         )
         rows = cur.fetchall()

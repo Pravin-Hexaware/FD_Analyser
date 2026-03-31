@@ -68,7 +68,12 @@ export function ChatMessage({ message }: ChatMessageProps) {
         )}
 
         <span className="text-xs text-gray-400 px-1">
-          {message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          {new Intl.DateTimeFormat("en-IN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+            timeZone: "Asia/Kolkata",
+          }).format(new Date(message.timestamp))}
         </span>
       </div>
     </div>

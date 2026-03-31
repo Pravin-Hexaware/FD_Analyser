@@ -82,7 +82,7 @@ export default function ChatbotPage() {
         id: `msg-${conversation.chat_id}-${msg.id}`,
         role: msg.role as "user" | "assistant",
         content: msg.content,
-        timestamp: new Date(msg.created_at),
+        timestamp: new Date(msg.created_at.includes("Z") ? msg.created_at : msg.created_at.replace(" ", "T") + "Z"),
       }));
 
       setMessages(loadedMessages);
@@ -147,7 +147,7 @@ export default function ChatbotPage() {
   };
 
   const formatToIST = (value: string) => {
-    const normalized = value.includes(" ") && !value.endsWith("Z") ? value.replace(" ", "T") : value;
+    const normalized = value.includes(" ") && !value.endsWith("Z") ? value.replace(" ", "T") + "Z" : value;
     const date = new Date(normalized);
     if (Number.isNaN(date.getTime())) {
       return value;

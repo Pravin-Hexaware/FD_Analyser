@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Database, CheckCircle, RefreshCw, FileText, Plus,
-  Download, Play, Activity, XCircle,
-  Clock, Zap, Server, Cpu, HardDrive,
-  Check, X, Upload, BarChart3
+  Play, Activity, XCircle,
+  Clock, Check, X, Upload, BarChart3, ChevronDown, Edit2, Trash2
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -33,6 +32,14 @@ export default function AdminPage() {
   const { isCollecting, isExtractingData, liveLog, logs, startXbrlExtraction, startDataExtraction, stopExtraction, clearLiveLog, clearLogs, setOnCompanyExtracted } = useExtraction();
   const [showAddForm, setShowAddForm] = useState(false);
   const [companies, setCompanies] = useState<CompanyData[]>([]);
+  const [expandedSource, setExpandedSource] = useState<string | null>(null);
+  const [showDataSourcesDropdown, setShowDataSourcesDropdown] = useState(true);
+  const [showAddSourceForm, setShowAddSourceForm] = useState(false);
+  const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
+  const [dataSources, setDataSources] = useState([
+    { id: "bse", name: "BSE Filings", status: "Active", standard: "XBRL", formats: "XML, HTML", period: "Quarterly / Annually" }
+  ]);
+  const [newSource, setNewSource] = useState({ name: "", standard: "", formats: "" });
   const logRef = useRef<HTMLDivElement>(null);
 
   const [newCompany, setNewCompany] = useState({ name: "", symbol: "", bseCode: "", sector: "" });
@@ -79,17 +86,6 @@ export default function AdminPage() {
     }
   }, [setOnCompanyExtracted]);
 
-  const systemServices = [
-    { name: "Database Connection", desc: "PostgreSQL / Supabase", status: "operational", icon: HardDrive, latency: "12ms" },
-    { name: "XBRL Processor", desc: "BSE filing parser v2.4", status: "operational", icon: Cpu, latency: "—" },
-    { name: "AI/LLM Gateway", desc: "OpenAI GPT-4 · Gemini fallback", status: "operational", icon: Zap, latency: "340ms" },
-    { name: "Cache Layer", desc: "Redis in-memory store", status: "operational", icon: Server, latency: "2ms" },
-  ];
-
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [liveLog]);
-
   const handleAddCompany = () => {
     if (!newCompany.name || !newCompany.symbol) return;
     const company: any = {
@@ -107,67 +103,210 @@ export default function AdminPage() {
     toast.success(`${company.name} added to master list.`);
   };
 
-  const statsCards = [
-    { label: "Companies Tracked", value: companies.length, icon: Database, color: "indigo", sub: "+1 this month" },
-    { label: "XBRL Files Processed", value: companies.length * 5, icon: FileText, color: "teal", sub: "5Y per company" },
-    { label: "Parameters Extracted", value: companies.length * 40, icon: Activity, color: "purple", sub: "40 KPIs per year" },
-    { label: "Total Records", value: (companies.length * 5 * 40).toLocaleString(), icon: BarChart3, color: "orange", sub: "Ready for AI" },
-  ];
+  const handleAddDataSource = () => {
+    if (!newSource.name) return;
+    const source = {
+      id: newSource.name.toLowerCase().replace(/\s+/g, "-"),
+      name: newSource.name,
+      status: "Active",
+      standard: "XBRL",
+      formats: newSource.formats || "XML",
+      period: "Quarterly / Annually"
+    };
+    setDataSources((prev) => [...prev, source]);
+    setNewSource({ name: "", standard: "", formats: "" });
+    setShowAddSourceForm(false);
+    toast.success(`${source.name} added to data sources.`);
+  };
 
-  const colorMap: Record<string, { bg: string; icon: string; ring: string }> = {
-    indigo: { bg: "bg-indigo-50", icon: "text-indigo-600", ring: "bg-indigo-100" },
-    teal: { bg: "bg-teal-50", icon: "text-teal-600", ring: "bg-teal-100" },
-    purple: { bg: "bg-purple-50", icon: "text-purple-600", ring: "bg-purple-100" },
-    orange: { bg: "bg-orange-50", icon: "text-orange-600", ring: "bg-orange-100" },
+  const handleEditDataSource = (sourceId: string) => {
+    const source = dataSources.find(s => s.id === sourceId);
+    if (source) {
+      setNewSource({ name: source.name, standard: source.standard, formats: source.formats });
+      setEditingSourceId(sourceId);
+      setShowAddSourceForm(true);
+    }
+  };
+
+  const handleSaveEditDataSource = () => {
+    if (!newSource.name || !editingSourceId) return;
+    setDataSources((prev) =>
+      prev.map((s) =>
+        s.id === editingSourceId
+          ? { ...s, name: newSource.name, formats: newSource.formats }
+          : s
+      )
+    );
+    setNewSource({ name: "", standard: "", formats: "" });
+    setEditingSourceId(null);
+    setShowAddSourceForm(false);
+    toast.success("Data source updated successfully.");
+  };
+
+  const handleDeleteDataSource = (sourceId: string) => {
+    if (sourceId === "bse") {
+      toast.error("Cannot delete default BSE Filings source.");
+      return;
+    }
+    setDataSources((prev) => prev.filter((s) => s.id !== sourceId));
+    if (expandedSource === sourceId) setExpandedSource(null);
+    toast.success("Data source deleted successfully.");
   };
 
   return (
     <AppShell
       breadcrumb={[{ label: "Dashboard", href: "/" }, { label: "Admin" }]}
       title="Admin Dashboard"
-      subtitle="Manage companies, XBRL data pipelines, and system monitoring"
+      subtitle="Manage companies, regulatory data sources, and financial pipelines"
       actions={
         <>
-          <Button variant="outline" size="sm" onClick={() => toast.success("Data exported!")} className="text-xs">
-            <Download className="size-3.5 mr-1.5" />
-            Export
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => window.location.reload()} className="text-xs">
-            <RefreshCw className="size-3.5 mr-1.5" />
-            Refresh
-          </Button>
         </>
       }
     >
       <div className="p-6 space-y-6">
 
-        {/* ── Stats Cards ─────────────────────────────────────── */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {statsCards.map((card, idx) => {
-            const c = colorMap[card.color];
-            return (
-              <div key={idx} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-                <div className="flex items-center justify-between mb-3">
-                  <div className={`size-10 rounded-xl ${c.ring} flex items-center justify-center`}>
-                    <card.icon className={`size-5 ${c.icon}`} />
+        {/* ── Data Sources ────────────────────────────────────── */}
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+          <button
+            onClick={() => setShowDataSourcesDropdown(!showDataSourcesDropdown)}
+            className="w-full px-6 py-3 border-b border-gray-50 flex items-center justify-between hover:bg-gray-50 transition-colors"
+          >
+            <h2 className="font-semibold text-gray-900 text-sm">Data Sources</h2>
+            <ChevronDown 
+              className={`size-4 text-gray-400 transition-transform ${showDataSourcesDropdown ? "rotate-180" : ""}`}
+            />
+          </button>
+
+          {showDataSourcesDropdown && (
+            <div className="space-y-1 p-3">
+              {dataSources.map((source) => (
+                <button
+                  key={source.id}
+                  onClick={() => setExpandedSource(expandedSource === source.id ? null : source.id)}
+                  className="w-full text-left p-3 rounded-lg border border-gray-100 hover:border-emerald-300 hover:bg-emerald-50 transition-all cursor-pointer"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <div className="size-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
+                      <h3 className="font-medium text-gray-900 text-xs truncate">{source.name}</h3>
+                      <span className="text-xs px-1.5 py-0.5 bg-emerald-50 text-emerald-700 rounded font-medium flex-shrink-0">{source.status}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                      {source.id !== "bse" && (
+                        <>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEditDataSource(source.id);
+                            }}
+                            className="p-1 rounded hover:bg-blue-100 transition-colors"
+                            title="Edit"
+                          >
+                            <Edit2 className="size-3.5 text-blue-600" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteDataSource(source.id);
+                            }}
+                            className="p-1 rounded hover:bg-red-100 transition-colors"
+                            title="Delete"
+                          >
+                            <Trash2 className="size-3.5 text-red-600" />
+                          </button>
+                        </>
+                      )}
+                      <ChevronDown 
+                        className={`size-3.5 text-gray-400 transition-transform ${expandedSource === source.id ? "rotate-180" : ""}`}
+                      />
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-2xl font-semibold text-gray-900">{card.value}</div>
+                  
+                  {/* Expanded Details */}
+                  {expandedSource === source.id && (
+                    <div className="mt-2 pt-2 border-t border-emerald-200 grid grid-cols-3 gap-2">
+                      <div>
+                        <p className="text-xs font-semibold text-gray-700">Formats</p>
+                        <p className="text-xs text-gray-900 mt-0.5">{source.formats}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold text-gray-700">Companies</p>
+                        <p className="text-xs text-gray-900 mt-0.5">{companies.length}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold text-gray-700">Period</p>
+                        <p className="text-xs text-gray-900 mt-0.5">{source.period}</p>
+                      </div>
+                    </div>
+                  )}
+                </button>
+              ))}
+
+              {/* Add New Data Source */}
+              <div
+                className="w-full text-left p-3 rounded-lg border border-dashed border-gray-300 hover:border-blue-300 hover:bg-blue-50 transition-all"
+              >
+                <button
+                  onClick={() => {
+                    setEditingSourceId(null);
+                    setNewSource({ name: "", standard: "", formats: "" });
+                    setShowAddSourceForm(!showAddSourceForm);
+                  }}
+                  className="w-full flex items-center gap-2"
+                >
+                  <Plus className="size-3.5 text-blue-600" />
+                  <span className="text-xs font-medium text-blue-600">Add Data Source</span>
+                </button>
+
+                {showAddSourceForm && (
+                  <div className="mt-2 pt-2 border-t border-blue-200 space-y-1.5" onClick={(e) => e.stopPropagation()}>
+                    <Input
+                      placeholder="Source name (e.g., NSE)"
+                      value={newSource.name}
+                      onChange={(e) => setNewSource({ ...newSource, name: e.target.value })}
+                      className="text-xs h-8 bg-white border border-gray-300 text-gray-900 placeholder-gray-500"
+                    />
+                    <Input
+                      placeholder="Formats (e.g., XML, HTML)"
+                      value={newSource.formats}
+                      onChange={(e) => setNewSource({ ...newSource, formats: e.target.value })}
+                      className="text-xs h-8 bg-white border border-gray-300 text-gray-900 placeholder-gray-500"
+                    />
+                    <div className="flex gap-1.5 pt-1">
+                      <Button
+                        size="sm"
+                        onClick={editingSourceId ? handleSaveEditDataSource : handleAddDataSource}
+                        className="bg-blue-600 hover:bg-blue-700 text-white text-xs flex-1 h-7"
+                      >
+                        {editingSourceId ? "Update" : "Add"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setShowAddSourceForm(false);
+                          setEditingSourceId(null);
+                          setNewSource({ name: "", standard: "", formats: "" });
+                        }}
+                        className="text-xs flex-1 h-7"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
                   </div>
-                </div>
-                <div className="text-sm font-medium text-gray-700">{card.label}</div>
-                <div className="text-xs text-gray-400 mt-0.5">{card.sub}</div>
+                )}
               </div>
-            );
-          })}
+            </div>
+          )}
         </div>
 
-        {/* ── XBRL Data Pipeline ──────────────────────────────── */}
+        {/* ── Regulatory Data Pipeline (Only visible when BSE is selected) ────────────────────────── */}
+        {expandedSource === "bse" && (
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between">
             <div>
-              <h2 className="font-semibold text-gray-900">XBRL Data Pipeline</h2>
-              <p className="text-xs text-gray-400 mt-0.5">Fetch XBRL files and extract financial data</p>
+              <h2 className="font-semibold text-gray-900">Regulatory & Financial Data</h2>
+              <p className="text-xs text-gray-400 mt-0.5">BSE financial and regulatory filings • Fetch and extract data</p>
             </div>
             <div className="flex items-center gap-2">
               <Button
@@ -177,7 +316,7 @@ export default function AdminPage() {
                 className="bg-teal-600 hover:bg-teal-700 text-white text-xs"
               >
                 <Upload className={`size-3.5 mr-1.5 ${isExtractingData ? "animate-bounce" : ""}`} />
-                {isExtractingData ? "Extracting..." : "Extract Parameters"}
+                {isExtractingData ? "Extracting..." : "Extract Metrics"}
               </Button>
               <Button
                 size="sm"
@@ -186,7 +325,7 @@ export default function AdminPage() {
                 className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs"
               >
                 <Play className={`size-3.5 mr-1.5 ${isCollecting ? "animate-pulse" : ""}`} />
-                {isCollecting ? "Collecting..." : "Run XBRL Collection"}
+                {isCollecting ? "Fetching..." : "Fetch Filings"}
               </Button>
               {(isCollecting || isExtractingData) && (
                 <Button
@@ -282,6 +421,7 @@ export default function AdminPage() {
             </div>
           </div>
         </div>
+        )}
 
         {/* ── Company Master List ──────────────────────────────── */}
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -383,49 +523,6 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {/* ── System Status ────────────────────────────────────── */}
-        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-50">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-semibold text-gray-900">System Status</h2>
-                <p className="text-xs text-gray-400 mt-0.5">All services operational</p>
-              </div>
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-full">
-                <div className="size-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-xs text-emerald-700 font-medium">All Systems Operational</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="divide-y divide-gray-50">
-            {systemServices.map((svc, idx) => (
-              <div key={idx} className="px-6 py-4 flex items-center justify-between hover:bg-gray-50/30 transition-colors">
-                <div className="flex items-center gap-4">
-                  <div className="size-10 rounded-xl bg-emerald-50 flex items-center justify-center">
-                    <svc.icon className="size-5 text-emerald-600" />
-                  </div>
-                  <div>
-                    <div className="font-medium text-gray-900 text-sm">{svc.name}</div>
-                    <div className="text-xs text-gray-400">{svc.desc}</div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  {svc.latency !== "—" && (
-                    <div className="text-right">
-                      <div className="text-xs text-gray-400">Latency</div>
-                      <div className="text-sm font-medium text-gray-700">{svc.latency}</div>
-                    </div>
-                  )}
-                  <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-full">
-                    <CheckCircle className="size-3.5 text-emerald-600" />
-                    <span className="text-xs text-emerald-700 font-medium">Operational</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
 
       </div>
     </AppShell>

@@ -404,6 +404,15 @@ class SqliteRepository:
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
+    def get_xbrl_filings_count(self, scrip_code: str) -> int:
+        """Get count of XBRL filings for a specific company."""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) as count FROM xbrl_filing_table WHERE scrip_code = ?",
+            (scrip_code,),
+        )
+        row = cur.fetchone()
+        return row["count"] if row else 0
     def get_period_by_xbrl_link(self, xbrl_link: str) -> Optional[str]:
         """Retrieve the publication_date (period) from xbrl_filing_table by xbrl_link."""
         cur = self._conn.cursor()

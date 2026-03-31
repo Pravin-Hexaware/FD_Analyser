@@ -25,7 +25,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
     """WebSocket endpoint that reads companies from CSV, fetches XBRL URLs, and stores them in SQLite."""
     await websocket.accept()
 
-    csv_path = Path(__file__).resolve().parents[1] / "Data" / "input_companies.csv"
+    csv_path = Path(__file__).resolve().parents[1] / "Data" / "Company_metadata.csv"
     if not csv_path.exists():
         await websocket.send_json({"error": f"CSV file not found: {csv_path}"})
         await websocket.close()
@@ -92,6 +92,17 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
 
                         if not scrip_code:
                             await websocket.send_json({"idx": idx, "status": "skipped", "reason": "empty scrip_code"})
+                            continue
+
+                        # Check if company already has XBRL filings in database
+                        if repo.get_xbrl_filings_count(scrip_code) > 0:
+                            await websocket.send_json({
+                                "idx": idx,
+                                "scrip_code": scrip_code,
+                                "symbol": symbol,
+                                "status": "already_found_in_db",
+                                "reason": "XBRL filings already exist in database"
+                            })
                             continue
 
                         try:
@@ -221,6 +232,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
             repo.close()
         except Exception:
             pass
+
 
 
 @router.websocket("/ws/xbrl-extract-from-db")

@@ -414,10 +414,10 @@ You are a Senior Financial Analyst creating a comprehensive, detailed research r
 
 Always structure your response as a professional financial report with:
 
-# Report Title
+# Report Title including the period and statement type (e.g., "Q3 2023 Income Statement Analysis")
 
 ## Executive Summary
-Brief overview of the company's financial position
+Brief overview of the company's financial position 
 
 ## Financial Performance Overview
 Present key financial metrics in a well-formatted table

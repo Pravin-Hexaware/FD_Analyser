@@ -485,9 +485,11 @@ async def get_chat_history():
         return [
             ChatHistoryResponse(
                 chat_id=str(chat["chat_id"]),
-                created_at=chat["created_at"],
-                title=(chat["last_message"] or "New conversation")[:50] + ("..." if chat["last_message"] and len(chat["last_message"]) > 50 else ""),
-                last_message=chat["last_message"],
+                created_at=chat.get("last_updated") or chat["created_at"],
+                title=(chat.get("first_message") or "New conversation")[:50] + (
+                    "..." if chat.get("first_message") and len(chat.get("first_message")) > 50 else ""
+                ),
+                last_message=chat.get("last_message"),
             )
             for chat in chats
         ]

@@ -2,10 +2,11 @@ import type { ReactNode } from "react";
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
-  BarChart3, MessageSquare, Settings, Home,
+  MessageSquare, Settings, Home,
   ChevronRight, HelpCircle, Bell, BarChart2
 } from "lucide-react";
 import { fetchCompanies, type CompanyInfo } from "../services/api";
+import { Sidebar } from "../../components/Sidebar";
 
 interface AppShellProps {
   children: ReactNode;
@@ -49,103 +50,56 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
     loadCompanies();
   }, []);
 
+  const sidebarContent = (
+    <div className="space-y-0.5">
+      {companiesList.map((company, idx) => {
+        const isActive = location.pathname === `/company/${company.scrip_code}`;
+        return (
+          <button
+            key={`${company.scrip_code}-${idx}`}
+            onClick={() => navigate(`/company/${company.scrip_code}`)}
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all text-sm ${
+              isActive
+                ? "bg-slate-700 text-white"
+                : "text-slate-400 hover:text-slate-100 hover:bg-slate-800"
+            }`}
+          >
+            <div
+              className={`size-2 rounded-full flex-shrink-0 ${
+                sectorColors[company.sector || ""] || "bg-slate-500"
+              }`}
+            />
+            <span className="font-medium">{company.symbol}</span>
+            <span className="text-xs text-slate-600 ml-auto truncate max-w-16">
+              {company.sector ? company.sector.split(" ")[0] : "N/A"}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  const footer = (
+    <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 cursor-pointer transition-colors">
+      <div className="size-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center flex-shrink-0">
+        <span className="text-white text-xs font-semibold">FA</span>
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-slate-300 text-sm truncate">Finance Analyst</div>
+        <div className="text-xs text-slate-600 truncate">analyst@finbot.app</div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="h-screen flex bg-slate-50 overflow-hidden">
-      {/* Dark Sidebar */}
-      <aside className="w-56 bg-slate-900 flex flex-col flex-shrink-0 shadow-xl">
-        {/* Logo */}
-        <div className="px-4 py-5 border-b border-slate-800">
-          <button
-            onClick={() => navigate("/")}
-            className="flex items-center gap-3 w-full hover:opacity-90 transition-opacity"
-          >
-            <div className="size-9 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-700 flex items-center justify-center shadow-lg shadow-indigo-900/40 flex-shrink-0">
-              <BarChart3 className="size-5 text-white" />
-            </div>
-            <div className="text-left min-w-0">
-              <div className="text-white font-semibold tracking-tight">FinBot</div>
-              <div className="text-slate-500 text-xs truncate">Financial Intelligence</div>
-            </div>
-          </button>
-        </div>
-
-        {/* Navigation */}
-        <nav className="px-3 pt-4 pb-2 border-b border-slate-800">
-          <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider px-2 mb-2">
-            Menu
-          </div>
-          {navItems.map((item) => {
-            const isActive =
-              location.pathname === item.path ||
-              (item.path !== "/" && location.pathname.startsWith(item.path));
-            return (
-              <button
-                key={item.path}
-                onClick={() => navigate(item.path)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg mb-0.5 transition-all text-sm ${
-                  isActive
-                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-900/50"
-                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800"
-                }`}
-              >
-                <item.icon className="size-4 flex-shrink-0" />
-                <span>{item.label}</span>
-                {item.path === "/chat" && (
-                  <span className="ml-auto bg-indigo-500 text-white text-xs px-1.5 py-0.5 rounded-full leading-none">
-                    AI
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Companies */}
-        <div className="flex-1 overflow-hidden px-3 pt-4">
-          <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider px-2 mb-2">
-            Companies
-          </div>
-          <div className="space-y-0.5 overflow-y-auto" style={{ maxHeight: "calc(100% - 28px)" }}>
-            {companiesList.map((company, idx) => {
-              const isActive = location.pathname === `/company/${company.scrip_code}`;
-              return (
-                <button
-                  key={`${company.scrip_code}-${idx}`}
-                  onClick={() => navigate(`/company/${company.scrip_code}`)}
-                  className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all text-sm ${
-                    isActive
-                      ? "bg-slate-700 text-white"
-                      : "text-slate-400 hover:text-slate-100 hover:bg-slate-800"
-                  }`}
-                >
-                  <div
-                    className={`size-2 rounded-full flex-shrink-0 ${
-                      sectorColors[company.sector || ""] || "bg-slate-500"
-                    }`}
-                  />
-                  <span className="font-medium">{company.symbol}</span>
-                  <span className="text-xs text-slate-600 ml-auto truncate max-w-16">
-                    {company.sector ? company.sector.split(" ")[0] : "N/A"}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Bottom User */}
-        <div className="px-3 pb-4 pt-2 border-t border-slate-800">
-          <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 cursor-pointer transition-colors">
-            <div className="size-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center flex-shrink-0">
-              <span className="text-white text-xs font-semibold">FA</span>
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-slate-300 text-sm truncate">Finance Analyst</div>
-              <div className="text-xs text-slate-600 truncate">analyst@finbot.app</div>
-            </div>
-          </div>
-        </div>
-      </aside>
+      <Sidebar
+        navItems={navItems}
+        activePath={location.pathname}
+        sidebarHeading="Companies"
+        sidebarContent={sidebarContent}
+        footer={footer}
+      />
 
       {/* Main Area */}
       <main className="flex-1 flex flex-col overflow-hidden">

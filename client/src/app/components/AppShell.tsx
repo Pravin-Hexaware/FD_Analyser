@@ -82,11 +82,11 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
   const footer = (
     <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 cursor-pointer transition-colors">
       <div className="size-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center flex-shrink-0">
-        <span className="text-white text-xs font-semibold">FA</span>
+        <span className="text-white text-xs font-semibold">PR</span>
       </div>
       <div className="min-w-0 flex-1">
-        <div className="text-slate-300 text-sm truncate">Finance Analyst</div>
-        <div className="text-xs text-slate-600 truncate">analyst@finbot.app</div>
+        <div className="text-slate-300 text-sm truncate">Pravin Raj</div>
+        <div className="text-xs text-slate-600 truncate">Analyst</div>
       </div>
     </div>
   );

@@ -384,7 +384,7 @@ export default function AdminPage() {
         </div>
 
         {/* ── System Status ────────────────────────────────────── */}
-        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        {/* <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-50">
             <div className="flex items-center justify-between">
               <div>
@@ -425,7 +425,7 @@ export default function AdminPage() {
               </div>
             ))}
           </div>
-        </div>
+        </div> */}
 
       </div>
     </AppShell>

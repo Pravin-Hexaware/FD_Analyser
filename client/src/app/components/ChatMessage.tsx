@@ -1,6 +1,7 @@
 import * as React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeSanitize from 'rehype-sanitize';
 import pdfMake from 'pdfmake/build/pdfmake';
 import 'pdfmake/build/vfs_fonts';
 import type{ ChatMessage as ChatMessageType } from "../data/chatbot";
@@ -192,6 +193,14 @@ export function ChatMessage({ message }: ChatMessageType) {
     navigator.clipboard.writeText(message.content);
   };
 
+  const markdownComponents = {
+    table: ({ node, ...props }: any) => (
+      <div className="scrollable-markdown-table overflow-x-auto rounded-lg bg-slate-50/50 p-0.5">
+        <table className="min-w-max" {...props} />
+      </div>
+    ),
+  };
+
   return (
     <div className={`flex gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
       {/* Avatar */}
@@ -208,20 +217,24 @@ export function ChatMessage({ message }: ChatMessageType) {
       </div>
 
       {/* Content */}
-      <div className={`flex flex-col gap-2 max-w-[85%] ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`flex flex-col gap-2 min-w-0 ${isUser ? "max-w-[85%] items-end" : "flex-1 w-full items-start"}`}>
         <div
-          className={`px-4 py-3 text-sm leading-relaxed ${
+          className={`px-4 py-3 text-sm leading-relaxed min-w-0 overflow-hidden ${
             isUser
               ? "bg-indigo-600 text-white rounded-2xl rounded-tr-sm shadow-sm shadow-indigo-200"
-              : "bg-white border border-gray-100 rounded-2xl rounded-tl-sm shadow-sm text-gray-800"
+              : "w-full bg-white border border-gray-100 rounded-2xl rounded-tl-sm shadow-sm text-gray-800"
           }`}
         >
           {isUser ? (
             <span>{message.content}</span>
           ) : (
             <>
-              <div className="prose prose-sm max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <div className="prose prose-sm max-w-full">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeSanitize]}
+                  components={markdownComponents}
+                >
                   {message.content}
                 </ReactMarkdown>
               </div>

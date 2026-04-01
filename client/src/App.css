@@ -105,6 +105,45 @@ body {
   content: ', ';
 }
 
+/* Keep markdown tables contained and allow horizontal scrolling for wide tables */
+.scrollable-markdown-table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+
+.scrollable-markdown-table::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Opera */
+}
+
+.scrollable-markdown-table table {
+  position: relative;
+  width: max-content !important;
+  min-width: max-content !important;
+  table-layout: auto !important;
+  border-collapse: collapse;
+}
+
+.scrollable-markdown-table th,
+.scrollable-markdown-table td {
+  white-space: nowrap;
+}
+
+.scrollable-markdown-table th:first-child,
+.scrollable-markdown-table td:first-child {
+  position: sticky;
+  left: 0;
+  background: #f8fafc;
+  z-index: 2;
+}
+
+.scrollable-markdown-table th:first-child {
+  z-index: 3;
+}
+
 /* Stock Ticker Animation */
 @keyframes scroll {
   0% {

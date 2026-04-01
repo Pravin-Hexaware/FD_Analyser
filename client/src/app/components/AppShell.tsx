@@ -3,8 +3,6 @@ import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   BarChart3, MessageSquare, Settings, Home,
-  ChevronRight, BarChart2
-  MessageSquare, Settings, Home,
   ChevronRight, HelpCircle, Bell, BarChart2
 } from "lucide-react";
 import { fetchCompanies, type CompanyInfo } from "../services/api";

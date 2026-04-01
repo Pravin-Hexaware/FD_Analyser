@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
-  MessageSquare, Settings, Home,
+  BarChart3, MessageSquare, Settings, Home,
   ChevronRight, HelpCircle, Bell, BarChart2
 } from "lucide-react";
 import { fetchCompanies, type CompanyInfo } from "../services/api";
@@ -133,14 +133,8 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
             )}
           </div>
           <div className="flex items-center gap-2">
-            <button className="size-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors">
-              <Bell className="size-4" />
-            </button>
-            <button className="size-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors">
-              <HelpCircle className="size-4" />
-            </button>
             {actions && (
-              <div className="flex items-center gap-2 ml-2 pl-2 border-l border-gray-200">
+              <div className="flex items-center gap-2">
                 {actions}
               </div>
             )}
@@ -148,7 +142,7 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
         </header>
 
         {/* Content */}
-        <div className={`flex-1 overflow-auto ${noPadding ? "" : ""}`}>
+        <div className="flex-1 overflow-auto">
           {children}
         </div>
       </main>

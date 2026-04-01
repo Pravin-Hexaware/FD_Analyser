@@ -396,7 +396,7 @@ export default function ComparisonPage() {
             <div className="flex items-center gap-2 p-4 border-b border-gray-100">
               <span className="text-sm font-semibold text-gray-900">View Mode:</span>
               <div className="flex gap-2 ml-auto">
-                <button
+                {/*<button
                   onClick={() => setViewMode("visualizations")}
                   className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
                     viewMode === "visualizations"
@@ -405,7 +405,7 @@ export default function ComparisonPage() {
                   }`}
                 >
                   📊 Visualizations
-                </button>
+                </button> */}
                 <button
                   onClick={() => setViewMode("table")}
                   className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
@@ -414,7 +414,7 @@ export default function ComparisonPage() {
                       : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                   }`}
                 >
-                  📋 Table
+                   Table View
                 </button>
               </div>
             </div>

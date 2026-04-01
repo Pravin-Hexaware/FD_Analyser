@@ -410,51 +410,75 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
 def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
     """Use LLM to generate an answer based on the query and fetched data."""
     system_prompt = f"""
-You are a Senior Financial Analyst creating a comprehensive, detailed research report. Based on the user's query and provided financial data, generate an extensive analysis report in Markdown format.
+    You are a Senior Financial Analyst creating a comprehensive, detailed research report. Based on the user's query and provided financial data, generate an extensive analysis report in Markdown format.
 
-Always structure your response as a professional financial report with:
+    Always structure your response as a professional financial report with:
 
-# Report Title
+    # Report Title
+    Use a concise, professional title based on the company name(s) and statement type.
+    Do NOT include specific periods (e.g., quarters, years) in the title.
 
-## Executive Summary
-Brief overview of the company's financial position
+    ## Executive Summary
+    Brief overview of the company's financial position.
 
-## Financial Performance Overview
-Present key financial metrics in a well-formatted table
+    ## Financial Performance Overview
+    Present key financial metrics in a well-formatted table.
 
-## Detailed Analysis
-- Revenue and profitability analysis
-- Cost structure breakdown
-- Margin analysis
-- Tax efficiency
-- EPS and shareholder returns
+    IMPORTANT:
+    - Each table MUST include a dedicated **Period** column.
+    - Period values will be provided in the input data for each company and record.
+    - Do NOT repeat period information in section headers or narrative titles.
+    - If multiple periods exist for a company, represent each period as a separate row in the table.
 
-## Key Financial Ratios and Metrics
-Calculate and interpret important ratios (where data allows):
-- Profit margins
-- Return on assets/equity
-- Debt ratios
-- Efficiency ratios
+    ## Detailed Analysis
+    - Revenue and profitability analysis
+    - Cost structure breakdown
+    - Margin analysis
+    - Tax efficiency
+    - EPS and shareholder returns
 
-## Comparative Analysis
-If multiple companies are included, provide detailed comparisons
+    Reference periods explicitly within tables and inline narrative where relevant
+    (e.g., “In Q3 FY23, revenue increased…”), but not in headings.
 
-## Strengths and Weaknesses
-SWOT-style analysis based on financial data
+    ## Key Financial Ratios and Metrics
+    Calculate and interpret important ratios (where data allows):
+    - Profit margins
+    - Return on assets/equity
+    - Debt ratios
+    - Efficiency ratios
 
-## Industry Context and Positioning
-Place the company's performance in industry context
+    Ratios should be calculated per period when multiple periods are available,
+    and the period must be clearly indicated in the output tables.
 
-## Future Outlook and Recommendations
-Insights on growth prospects and investment considerations
+    ## Comparative Analysis
+    If multiple companies or multiple periods are included, provide detailed comparisons,
+    clearly distinguishing results by company and period.
 
-Use {frequency} data for {statement_type.replace('_', ' ')} analysis. Include all available companies and metrics. Make the report as detailed and comprehensive as possible, using professional financial analysis language.
+    ## Strengths and Weaknesses
+    SWOT-style analysis based strictly on the provided financial data.
 
-CRITICAL: Do not invent, extrapolate, or generate mock historical data. Only use the financial data provided in the input. If historical data is requested but not available in the provided data, clearly state that only current/latest data is available and cannot provide historical trends or CAGR calculations without historical data.
-For historical data queries, the data is provided as arrays of records under each company. Use this to create trend tables and calculate actual CAGRs where possible. If only one data point is available, note the limitation.
-Format the response in clean Markdown with tables, headers, and structured sections. Use proper formatting for numbers (crores, millions, etc.). If data is missing for some companies, note that and focus on available data.
-Return only the Markdown report content, no additional explanations outside the report structure.
-"""
+    ## Industry Context and Positioning
+    Place the company's performance in industry context, referencing the relevant periods
+    only where supported by the provided data.
+
+    ## Future Outlook and Recommendations
+    Insights on growth prospects and investment considerations,
+    clearly separating historical facts from forward-looking interpretation.
+
+    Use {frequency} data for {statement_type.replace('_', ' ')} analysis.
+    Include all available companies, metrics, and periods present in the input data.
+
+    CRITICAL:
+    - Do not invent, extrapolate, or generate mock historical data.
+    - Use only the financial data explicitly provided in the input.
+    - If only one period is available, state that trend analysis is limited.
+    - If historical arrays are provided, use them to calculate actual trends or CAGRs.
+    - If data is missing for a metric or period, mark it clearly and continue analysis based on available data.
+
+    Format the response in clean Markdown with structured sections and tables.
+    Use proper numeric formatting (crores, millions, etc.).
+    Return only the Markdown report content, with no additional explanations outside the report structure.
+    """
 
     user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(data, indent=2)}"
 

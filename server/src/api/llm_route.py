@@ -221,6 +221,7 @@ def _fetch_company_data(repo: SqliteRepository, scrip_code: str, frequency: str,
 
     # Define field sets using DB column names
     quarterly_fields = [
+        "period",
         "currency","level_of_rounding",
         "sales", "expenses", "operating_profit", "opm_percentage", "other_income",
         "cost_of_materials_consumed", "employee_benefit_expense", "other_expenses",
@@ -229,20 +230,20 @@ def _fetch_company_data(repo: SqliteRepository, scrip_code: str, frequency: str,
     ]
     
     annual_pl_fields = [
-        "currency","level_of_rounding",
+        "period","currency","level_of_rounding",
         "sales", "expenses", "operating_profit", "opm_percentage", "other_income",
         "interest", "depreciation", "profit_before_tax", "tax_percent", "net_profit", "eps_in_rs"
     ]
     
     annual_bs_fields = [
-        "currency","level_of_rounding",
+        "period","currency","level_of_rounding",
         "equity_capital", "reserves", "trade_payables_current", "borrowings",
         "other_liabilities", "total_liabilities", "total_equity", "fixed_assets",
         "cwip", "investments", "total_assets"
     ]
     
     annual_cf_fields = [
-        "currency","level_of_rounding",
+        "period","currency","level_of_rounding",
         "cash_from_operating_activity", "cash_from_investing_activity", "cash_from_financing_activity"
     ]
     
@@ -484,9 +485,11 @@ async def get_chat_history():
         return [
             ChatHistoryResponse(
                 chat_id=str(chat["chat_id"]),
-                created_at=chat["created_at"],
-                title=(chat["last_message"] or "New conversation")[:50] + ("..." if chat["last_message"] and len(chat["last_message"]) > 50 else ""),
-                last_message=chat["last_message"],
+                created_at=chat.get("last_updated") or chat["created_at"],
+                title=(chat.get("first_message") or "New conversation")[:50] + (
+                    "..." if chat.get("first_message") and len(chat.get("first_message")) > 50 else ""
+                ),
+                last_message=chat.get("last_message"),
             )
             for chat in chats
         ]

@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeSanitize from 'rehype-sanitize';
 import pdfMake from 'pdfmake/build/pdfmake';
 import 'pdfmake/build/vfs_fonts';
-import type{ ChatMessage as ChatMessageType } from "../data/chatbot";
+import type { ChatMessage as ChatMessageType } from "../data/chatbot";
 import { CompanyInfoCard } from "./CompanyInfoCard";
 import { FinancialTable } from "./FinancialTable";
 import { ComparisonTable } from "./ComparisonTable";
@@ -23,11 +23,27 @@ function markdownToPdfmake(markdown: string) {
 
   function endTable() {
   if (tableRows.length > 1) {
+    // Calculate dynamic widths based on content
+    const numCols = tableRows[0].length;
+    const colWidths: number[] = [];
+    for (let i = 0; i < numCols; i++) {
+      let maxLen = 0;
+      for (const row of tableRows) {
+        if (row[i]) {
+          maxLen = Math.max(maxLen, row[i].length);
+        }
+      }
+      colWidths[i] = maxLen * 3; // Approximate width per character
+    }
+    const totalWidth = colWidths.reduce((sum, w) => sum + w, 0);
+    const scale = totalWidth > 550 ? 550 / totalWidth : 1;
+    const finalWidths = colWidths.map(w => w * scale);
+
     const table = {
       style: 'table',
       table: {
         headerRows: 1,
-        widths: tableRows[0].map(() => 'auto'),
+        widths: finalWidths,
         body: tableRows
       },
       layout: {
@@ -35,10 +51,10 @@ function markdownToPdfmake(markdown: string) {
         vLineWidth: () => 0.5,
         hLineColor: () => '#ccc',
         vLineColor: () => '#ccc',
-        paddingLeft: () => 5,
-        paddingRight: () => 5,
-        paddingTop: () => 3,
-        paddingBottom: () => 3
+        paddingLeft: () => 2,
+        paddingRight: () => 2,
+        paddingTop: () => 2,
+        paddingBottom: () => 2
       }
     };
     content.push(table);
@@ -82,24 +98,40 @@ function markdownToPdfmake(markdown: string) {
       if (inTable) {
         // End table
         if (tableRows.length > 1) { // Need at least header + 1 data row
-        const table = {
-          style: 'table',
-          table: {
-            headerRows: 1,
-            widths: tableRows[0].map(() => 'auto'),
-            body: tableRows
-          },
-          layout: {
-            hLineWidth: () => 0.5,
-            vLineWidth: () => 0.5,
-            hLineColor: () => '#ccc',
-            vLineColor: () => '#ccc',
-            paddingLeft: () => 5,
-            paddingRight: () => 5,
-            paddingTop: () => 3,
-            paddingBottom: () => 3
+          // Calculate dynamic widths based on content
+          const numCols = tableRows[0].length;
+          const colWidths: number[] = [];
+          for (let i = 0; i < numCols; i++) {
+            let maxLen = 0;
+            for (const row of tableRows) {
+              if (row[i]) {
+                maxLen = Math.max(maxLen, row[i].length);
+              }
+            }
+            colWidths[i] = maxLen * 2; // Approximate width per character
           }
-        };
+          const totalWidth = colWidths.reduce((sum, w) => sum + w, 0);
+          const scale = totalWidth > 500 ? 500 / totalWidth : 1;
+          const finalWidths = colWidths.map(w => w * scale);
+
+          const table = {
+            style: 'table',
+            table: {
+              headerRows: 1,
+              widths: finalWidths,
+              body: tableRows
+            },
+            layout: {
+              hLineWidth: () => 0.5,
+              vLineWidth: () => 0.5,
+              hLineColor: () => '#ccc',
+              vLineColor: () => '#ccc',
+              paddingLeft: () => 2,
+              paddingRight: () => 2,
+              paddingTop: () => 2,
+              paddingBottom: () => 2
+            }
+          };
           content.push(table);
         }
         inTable = false;
@@ -112,19 +144,18 @@ function markdownToPdfmake(markdown: string) {
     }
   }
 
-
-
   return {
     content,
+    pageMargins: [40, 60, 40, 60],
     defaultStyle: {
-      fontSize: 14,
+      fontSize: 10,
       lineHeight: 1.6
     },
     styles: {
-      header1: { fontSize: 24, bold: true, margin: [0, 10, 0, 8] },
-      header2: { fontSize: 20, bold: true, margin: [0, 8, 0, 6] },
-      header3: { fontSize: 16, bold: true, margin: [0, 6, 0, 4] },
-      table: { margin: [0, 5, 0, 10] }
+      header1: { fontSize: 18, bold: true, margin: [0, 10, 0, 8] },
+      header2: { fontSize: 16, bold: true, margin: [0, 8, 0, 6] },
+      header3: { fontSize: 14, bold: true, margin: [0, 6, 0, 4] },
+      table: { margin: [0, 5, 0, 10], fontSize: 6 }
     }
   };
 }
@@ -181,7 +212,7 @@ function parseTextWithFormatting(text: string): any[] {
   return parts;
 }
 
-export function ChatMessage({ message }: ChatMessageType) {
+export function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
 
   const handleDownload = () => {

@@ -172,7 +172,7 @@ export default function LandingPage() {
           </h1>
 
           <p className="text-slate-400 mb-10 max-w-xl leading-relaxed">
-            Chat naturally with financial data from Screener.in-grade XBRL filings.
+            Chat naturally with financial data from graded XBRL filings.
             Compare companies, generate investment reports, and uncover insights — in seconds.
           </p>
 
@@ -252,12 +252,12 @@ export default function LandingPage() {
           <div className="flex items-center gap-8 mt-12 text-sm text-slate-500">
             <div className="flex items-center gap-2">
               <Building2 className="size-4 text-indigo-400" />
-              <span><span className="text-white font-medium">6</span> Companies Tracked</span>
+              <span><span className="text-white font-medium">30</span> Companies Tracked</span>
             </div>
-            <div className="flex items-center gap-2">
+            {/*<div className="flex items-center gap-2">
               <Database className="size-4 text-teal-400" />
               <span><span className="text-white font-medium">5 Years</span> Historical Data</span>
-            </div>
+            </div>*/}
             <div className="flex items-center gap-2">
               <Zap className="size-4 text-yellow-400" />
               <span><span className="text-white font-medium">40+</span> Financial Parameters</span>

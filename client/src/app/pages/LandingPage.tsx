@@ -172,7 +172,7 @@ export default function LandingPage() {
           </h1>
 
           <p className="text-slate-400 mb-10 max-w-xl leading-relaxed">
-            Chat naturally with financial data from Screener.in-grade XBRL filings.
+            Chat naturally with financial data from XBRL filings.
             Compare companies, generate investment reports, and uncover insights — in seconds.
           </p>
 

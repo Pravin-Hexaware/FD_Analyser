@@ -47,6 +47,7 @@ class SqliteRepository:
                 xbrl_link TEXT,
                 publication_date TEXT,
                 report_type TEXT,
+                raw_content TEXT,
                 created_at TEXT DEFAULT (datetime('now'))
             );
             """
@@ -242,6 +243,9 @@ class SqliteRepository:
         
         # Ensure period column in quarterly_table
         self._ensure_column("quarterly_table", "period", "TEXT")
+        
+        # Ensure raw_content column in xbrl_filing_table
+        self._ensure_column("xbrl_filing_table", "raw_content", "TEXT")
 
     def create_conversation(self) -> int:
         cur = self._conn.cursor()
@@ -848,14 +852,15 @@ class SqliteRepository:
         xbrl_link: str,
         publication_date: Optional[str] = None,
         report_type: Optional[str] = None,
+        raw_content: Optional[str] = None,
     ) -> int:
         cur = self._conn.cursor()
         cur.execute(
             """
-            INSERT INTO xbrl_filing_table (scrip_code, symbol, xbrl_link, publication_date, report_type)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO xbrl_filing_table (scrip_code, symbol, xbrl_link, publication_date, report_type, raw_content)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (scrip_code, symbol, xbrl_link, publication_date, report_type),
+            (scrip_code, symbol, xbrl_link, publication_date, report_type, raw_content),
         )
         self._conn.commit()
         return cur.lastrowid

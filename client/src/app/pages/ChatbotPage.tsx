@@ -229,7 +229,7 @@ export default function ChatbotPage() {
               <div className="font-semibold text-gray-900 text-sm">FinBot Assistant</div>
               <div className="flex items-center gap-1.5 text-xs text-emerald-500">
                 <div className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Online · XBRL data active
+                Online · Ready to analyze financials!
               </div>
             </div>
           </div>

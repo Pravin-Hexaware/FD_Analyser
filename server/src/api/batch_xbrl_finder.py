@@ -18,11 +18,16 @@ import asyncio
 import json
 import re
 import time
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
+import requests
+import urllib3
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, validator
 from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError, APIResponse
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 router = APIRouter()
 
@@ -84,7 +89,7 @@ XHR_TIMEOUT  = 12_000               # smart search fetch
 CLICK_NAV_TIMEOUT = 8_000           # navigation after click
 POPUP_TIMEOUT = 4_000               # popup wait
 POST_CLICK_SETTLE_MS = 600          # small delay after click to let window.open fire
-MAX_ATTEMPTS_PER_COMPANY = 6        # full cycles
+MAX_ATTEMPTS_PER_COMPANY = 10        # full cycles
 COOLDOWN_BETWEEN_ATTEMPTS_MS = 1500 # small pause to placate WAF
 BROADCAST_PERIODS = ["7", "6", "5", "4", "3"]  # 7: Beyond 1 year, 6: 1y, 5: 6m, 4: 3m, 3: 1m
 
@@ -95,6 +100,87 @@ def looks_like_scrip(text: str) -> bool:
 
 def strip_lower(s: str) -> str:
     return (s or "").strip().lower()
+
+def save_raw_content(scrip_code: str, xbrl_type: str, period: str, raw_content: str, url: str) -> Optional[str]:
+    """
+    Save raw_content to file in /raw_content folder.
+    Filename: {scripcode}-{std/con}-{period}.{html/xml}
+    Returns the file path if successful, None otherwise.
+    """
+    try:
+        # Create raw_content directory
+        raw_content_dir = Path(__file__).resolve().parent.parent / "raw_content"
+        raw_content_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Determine file extension from URL
+        if url.lower().endswith('.xml'):
+            ext = 'xml'
+        else:
+            ext = 'html'
+        
+        # Sanitize period for filename (replace special chars)
+        safe_period = re.sub(r"[/\\:*?\"<>|]", "_", period)
+        
+        # Construct filename: {scripcode}-{std/con}-{period}.{ext}
+        filename = f"{scrip_code}-{xbrl_type}-{safe_period}.{ext}"
+        file_path = raw_content_dir / filename
+        
+        # Write content to file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(raw_content)
+        
+        return str(file_path)
+    except Exception as e:
+        print(f"Error saving raw content for {scrip_code}: {e}")
+        return None
+
+async def fetch_xbrl_content(ctx, url: str) -> Optional[str]:
+    """
+    Fetch the content of an XBRL URL (HTML or XML) using requests with cookies from browser session.
+    Returns the page source content or None if failed.
+    """
+    page = None
+    try:
+        page = await ctx.new_page()
+
+        # Add anti-detection script
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        """)
+
+        # First visit BSE corporate results page to establish session
+        await page.goto(BSE_URL, timeout=10000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(1000)  # Let session establish
+
+        # Get cookies from the browser context
+        cookies = await ctx.cookies()
+        cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
+
+        # Use requests to fetch the XBRL URL with cookies and referer
+        headers = {
+            'User-Agent': USER_AGENT,
+            'Referer': BSE_URL,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+
+        response = requests.get(url, cookies=cookie_dict, headers=headers, timeout=30, verify=False)
+        if response.status_code == 200:
+            return response.text
+        else:
+            print(f"Failed to load XBRL URL {url}: status {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error fetching XBRL content from {url}: {e}")
+        return None
+    finally:
+        if page:
+            try:
+                await page.close()
+            except:
+                pass
 
 # -------------------- Browser/context helpers --------------------
 async def create_browser_and_context(p):
@@ -981,6 +1067,261 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
 
     # All attempts exhausted
     return None, None, attempts, None, None
+
+
+async def get_all_std_xbrl_urls(ctx, company: str):
+    """
+    Async generator that yields (url, period, xbrl_type) for each Std and Con XBRL link found for the company.
+    Yields as soon as each URL is resolved.
+    """
+    from typing import AsyncGenerator
+    async def _resolve(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        low = strip_lower(url)
+        if low.endswith("comp_resultsnew.aspx"):
+            return None
+        if url.startswith("http"):
+            return url
+        return await resolve_absolute_url(page, url)
+
+    async def _resolve_from_anchor(a_locator) -> Optional[str]:
+        """
+        Try to resolve URL from an <a> element using:
+          - direct href
+          - popup
+          - same-tab
+          - window.__openedWindows__
+          - network sniffer
+        Mirrors your original fallbacks.
+        """
+        if a_locator is None or not await a_locator.count():
+            return None
+        href = (await a_locator.first.get_attribute("href")) or ""
+        if href and not href.lower().startswith("javascript:"):
+            url = await _resolve(href)
+            if url:
+                return url
+
+        # Clear previous window.open captures
+        try:
+            await page.evaluate("() => { try { window.__openedWindows__ = []; } catch(e){} }")
+        except Exception:
+            pass
+
+        popup_url = None
+        try:
+            async with page.expect_popup() as pop_info:
+                await a_locator.first.click()
+            pop = await pop_info.value
+            try:
+                await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
+            except Exception:
+                pass
+            popup_url = pop.url
+            try:
+                await pop.close()
+            except Exception:
+                pass
+        except Exception:
+            # no popup -> click same tab
+            try:
+                await a_locator.first.click()
+            except Exception:
+                pass
+
+        # settle
+        await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
+
+        if popup_url:
+            url = await _resolve(popup_url)
+            if url:
+                return url
+
+        # window.open captured?
+        try:
+            opened = await page.evaluate("() => (window.__openedWindows__ || []).slice(-1)[0] || ''")
+            url = await _resolve(opened)
+            if url:
+                return url
+        except Exception:
+            pass
+
+        # same-tab navigation recognition
+        try:
+            await page.wait_for_url(re.compile(r".*XBRLFILES.*", re.I), timeout=1500)
+            url = await _resolve(page.url)
+            if url:
+                return url
+        except Exception:
+            pass
+
+        # network sniffer fallback
+        try:
+            candidates = [u for u in getattr(page, "__xbrl_requests__", []) if "XBRLFILES" in u.upper()]
+            if candidates:
+                url = await _resolve(candidates[-1])
+                if url:
+                    return url
+        except Exception:
+            pass
+
+        return None
+
+    attempts = 0
+    start_t = time.perf_counter()
+
+    yielded = set()  # to deduplicate by (period, report_type)
+
+    # Outer attempt loop
+    while attempts < MAX_ATTEMPTS_PER_COMPANY:
+        attempts += 1
+        page = await prepare_page(ctx)
+        try:
+            await navigate_and_prepare(page)
+
+            # if numeric -> inject; else resolve scrip via API, else UI smart search
+            if looks_like_scrip(company):
+                await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
+                await inject_scrip_code(page, company)
+            else:
+                # try server-side API for deterministic scrip
+                scrip = await resolve_scrip_via_api(ctx, company)
+                if scrip:
+                    await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
+                    await inject_scrip_code(page, scrip, display_name=company)
+                else:
+                    # UI SmartSearch
+                    await smartsearch_fill(page, company)
+
+            # Set result period
+            await set_result_period(page)
+
+            # try multiple broadcast periods (beyond 1y -> 1y -> 6m -> 3m -> 1m)
+            yielded_any = False
+
+            for bp in BROADCAST_PERIODS:
+                await set_broadcast_period(page, bp)
+                await submit_form(page)
+                await wait_grid_ready(page)
+
+                # Parse grid for all std and con links
+                grid = None
+                for sel in [
+                    '#ContentPlaceHolder1_gvData',
+                    'table:has(th:has-text("XBRL"))',
+                    'table:has-text("Std XBRL"), table:has-text("Con XBRL")',
+                ]:
+                    try:
+                        await page.wait_for_selector(sel, timeout=1500)
+                        grid = page.locator(sel).first
+                        break
+                    except PWTimeoutError:
+                        continue
+                if grid is None:
+                    continue
+
+                # detect header indices
+                idx_period = 3; idx_std = 5; idx_con = 6
+                try:
+                    header = grid.locator("thead tr").first
+                    ths = header.locator("th")
+                    hmap = {}
+                    for i in range(await ths.count()):
+                        txt = (await ths.nth(i).inner_text()).strip().lower()
+                        hmap[txt] = i
+
+                    def _idx(needle: str, default: int) -> int:
+                        for k, v in hmap.items():
+                            if needle in k:
+                                return v
+                        return default
+
+                    idx_period = _idx("period", idx_period)
+                    idx_std = _idx("std xbrl", idx_std)
+                    idx_con = _idx("con xbrl", idx_con)
+                except Exception:
+                    pass
+
+                # collect all rows
+                body_rows = grid.locator("tbody tr")
+                for r in range(await body_rows.count()):
+                    tr = body_rows.nth(r)
+                    tds = tr.locator("td")
+                    try:
+                        per = (await tds.nth(idx_period).inner_text()).strip()
+                        std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
+                        con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
+
+                        # Capture page source once per row to store with filing
+                        try:
+                            raw_content = await page.content()
+                        except Exception:
+                            raw_content = None
+
+                        # Yield Std XBRL
+                        if std_a and await std_a.count():
+                            href = (await std_a.first.get_attribute("href")) or ""
+                            if href and not href.lower().startswith("javascript:"):
+                                url = await _resolve(href)
+                            else:
+                                url = await _resolve_from_anchor(std_a)
+
+                            if url and (per, "std") not in yielded:
+                                yielded.add((per, "std"))
+                                yielded_any = True
+                                # Fetch XBRL content and save to file
+                                xbrl_content = await fetch_xbrl_content(ctx, url)
+                                #if xbrl_content:
+                                    #save_raw_content(company, "std", per, xbrl_content, url)
+                                yield url, per, "std", xbrl_content
+                                await asyncio.sleep(2)  # Delay to avoid rate limiting
+
+                        # Yield Con XBRL
+                        if con_a and await con_a.count():
+                            href = (await con_a.first.get_attribute("href")) or ""
+                            if href and not href.lower().startswith("javascript:"):
+                                url = await _resolve(href)
+                            else:
+                                url = await _resolve_from_anchor(con_a)
+
+                            if url and (per, "con") not in yielded:
+                                yielded.add((per, "con"))
+                                yielded_any = True
+                                # Fetch XBRL content and save to file
+                                xbrl_content = await fetch_xbrl_content(ctx, url)
+                                #if xbrl_content:
+                                    #save_raw_content(company, "con", per, xbrl_content, url)
+                                yield url, per, "con", xbrl_content
+                                await asyncio.sleep(2)  # Delay to avoid rate limiting
+
+                    except Exception:
+                        continue
+
+            # If we yielded any, success
+            if yielded_any:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                return
+
+            # no links; next attempt after cooldown
+            await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
+
+        except Exception:
+            try:
+                await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
+            except Exception:
+                pass
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    # All attempts exhausted, yield nothing
+
 
 # -------------------- Public single-company runner --------------------
 async def run_single(company: str, prefer: str = "any") -> GetXBRLResponse:

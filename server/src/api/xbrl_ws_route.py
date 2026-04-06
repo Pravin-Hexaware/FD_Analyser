@@ -11,6 +11,7 @@ from repository.sqlite_repository import SqliteRepository
 from api.batch_xbrl_finder import (
     create_browser_and_context,
     fetch_xbrl_for_company,
+    get_all_std_xbrl_urls,
 )
 from api.xbrl_route import calculate_metrics, extract_annual
 from api.Xbrl_annual_extractor import calculate_metrics_fourd
@@ -464,6 +465,193 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
         pass
     except Exception as e:
         await websocket.send_json({"error": str(e)})
+        await websocket.close()
+    finally:
+        try:
+            repo.close()
+        except Exception:
+            pass
+
+
+
+@router.websocket("/ws/xbrl-fetch-all-std")
+async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
+    """WebSocket endpoint that reads companies from CSV, fetches XBRL URLs, and stores them in SQLite."""
+    await websocket.accept()
+
+    csv_path = Path(__file__).resolve().parents[1] / "Data" / "Company_metadata.csv"
+    if not csv_path.exists():
+        await websocket.send_json({"error": f"CSV file not found: {csv_path}"})
+        await websocket.close()
+        return
+
+    repo = SqliteRepository()
+
+    try:
+        await websocket.send_json({"status": "starting", "csv_path": str(csv_path)})
+
+        # Read CSV once
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            records = [r for r in reader if r.get("Scrip-code")]
+
+        await websocket.send_json(
+            {"status": "read_csv", "records": len(records)}
+        )
+
+        # Determine restart/resume point based on recent (<=10 days) xbrl filing entries.
+        start_idx = 1
+        now = datetime.utcnow()
+        for idx, row in enumerate(records, start=1):
+            scrip_code = (row.get("Scrip-code") or "").strip()
+            if not scrip_code:
+                continue
+            try:
+                if repo.xbrl_filing_recent(scrip_code, days=10):
+                    continue
+                start_idx = idx
+                break
+            except Exception as e:
+                await websocket.send_json({
+                    "status": "resume_check_failed",
+                    "idx": idx,
+                    "scrip_code": scrip_code,
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                })
+                start_idx = idx
+                break
+
+        if start_idx > len(records):
+            await websocket.send_json({"status": "already_up_to_date", "start_idx": start_idx})
+            await websocket.send_json({"status": "complete"})
+            return
+
+        await websocket.send_json({"status": "resume_from", "start_idx": start_idx})
+
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser, ctx = await create_browser_and_context(p)
+            try:
+                for idx, row in enumerate(records, start=1):
+                        if idx < start_idx:
+                            continue
+
+                        scrip_code = (row.get("Scrip-code") or "").strip()
+                        symbol = (row.get("Symbol") or "").strip()
+                        name = (row.get("Company") or "").strip()
+                        sector = (row.get("Sector ") or "").strip()
+                        industry = (row.get("Industry") or "").strip()
+
+                        if not scrip_code:
+                            await websocket.send_json({"idx": idx, "status": "skipped", "reason": "empty scrip_code"})
+                            continue
+
+                        try:
+                            async with asyncio.timeout(180):
+                                # Ensure company exists; if already present, keep it as-is
+                                if not repo.company_exists(scrip_code):
+                                    repo.upsert_company(
+                                    company_name=name,
+                                    symbol=symbol,
+                                    scrip_code=scrip_code,
+                                    sector=sector,
+                                    industry=industry,
+                                )
+
+                            # Send started message
+                            await websocket.send_json({
+                                "status": "started",
+                                "idx": idx,
+                                "scrip_code": scrip_code,
+                                "symbol": symbol,
+                            })
+
+                            # Prepare existing period/type lookup once to prevent repeated DB scans
+                            existing_filings = repo.get_xbrl_filings(scrip_code)
+                            existing_map = {
+                                (f.get('publication_date'), f.get('report_type')): f.get('id')
+                                for f in existing_filings
+                            }
+
+                            # Fetch all Std XBRL URLs
+                            link_idx = 0
+                            async for url, period, xbrl_type, raw_content in get_all_std_xbrl_urls(ctx, scrip_code):
+                                key = (period, xbrl_type)
+                                existing_id = existing_map.get(key)
+                                if existing_id:
+                                    stored = True
+                                    filing_id = existing_id
+                                else:
+                                    filing_id = repo.insert_xbrl_filing(
+                                        scrip_code=scrip_code,
+                                        symbol=symbol,
+                                        xbrl_link=url,
+                                        publication_date=period,
+                                        report_type=xbrl_type,
+                                        raw_content=raw_content,
+                                    )
+                                    stored = True
+                                    existing_map[key] = filing_id
+
+                                await websocket.send_json({
+                                    "idx": idx,
+                                    "link_idx": link_idx,
+                                    "scrip_code": scrip_code,
+                                    "symbol": symbol,
+                                    "report_type": xbrl_type,
+                                    "period": period,
+                                    "url": url,
+                                    "id": filing_id,
+                                    "stored": stored,
+                                    "attempts": link_idx + 1,
+                                })
+                                link_idx += 1
+
+                            # Send completed message
+                            next_idx = idx + 1 if idx < len(records) else None
+                            await websocket.send_json({
+                                "status": "completed",
+                                "idx": idx,
+                                "scrip_code": scrip_code,
+                                "symbol": symbol,
+                                "next_idx": next_idx,
+                            })
+
+                        except asyncio.TimeoutError as te:
+                            await websocket.send_json({
+                                "idx": idx,
+                                "scrip_code": scrip_code,
+                                "status": "timeout",
+                                "error": "Per-entry timeout exceeded (180s)",
+                                "detail": str(te),
+                                "traceback": traceback.format_exc(),
+                            })
+                            continue
+                        except Exception as row_error:
+                            await websocket.send_json({
+                                "idx": idx,
+                                "scrip_code": scrip_code,
+                                "status": "row_error",
+                                "error": str(row_error),
+                                "traceback": traceback.format_exc(),
+                            })
+                            continue
+
+            finally:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+        await websocket.send_json({"status": "complete"})
+
+    except WebSocketDisconnect:
+        # Client disconnected
+        pass
+    except Exception as e:
+        await websocket.send_json({"error": str(e), "traceback": traceback.format_exc()})
         await websocket.close()
     finally:
         try:

@@ -17,7 +17,10 @@ from api.batch_xbrl_finder import (
 from api.xbrl_route import calculate_metrics, extract_annual
 from api.Xbrl_annual_extractor import calculate_metrics_fourd
 from service.html_extraction_service import extract_html_data
-from service.xml_extraction_service import extract_xbrl_data
+from service.xml_extraction_service import (
+    extract_xbrl_data,
+    extract_xbrl_data_from_bytes,
+)
 
 router = APIRouter()
 
@@ -290,11 +293,11 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                 await asyncio.sleep(0)
                 continue
 
-            if not xbrl_link or not xbrl_link.lower().endswith(".html"):
+            if not xbrl_link or not (xbrl_link.lower().endswith(".html") or xbrl_link.lower().endswith(".xml")):
                 await websocket.send_json({
                     "idx": idx,
                     "status": "skipped",
-                    "reason": f"xbrl_link does not end with '.html': {xbrl_link}",
+                    "reason": f"xbrl_link does not end with '.html' or '.xml': {xbrl_link}",
                 })
                 await asyncio.sleep(0)
                 continue
@@ -357,19 +360,43 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                 continue
 
             try:
-                # Import html_parser_service
-                from service.html_parser_service import html_dom_to_structured_json_from_content
+                raw_text = raw_content if isinstance(raw_content, str) else raw_content.decode('utf-8', errors='replace')
+                raw_preview = raw_text.lstrip()[:1024].lower()
+                raw_bytes = raw_text.encode('utf-8')
 
-                # Parse the HTML content
-                await websocket.send_json({
-                    "idx": idx,
-                    "status": "parsing_html",
-                    "extraction_type": extraction_type,
-                })
-                await asyncio.sleep(0)
+                is_html_content = (
+                    xbrl_link.lower().endswith('.html')
+                    or xbrl_link.lower().endswith('.htm')
+                    or '<html' in raw_preview
+                    or '<!doctype html' in raw_preview
+                    or '<body' in raw_preview
+                    or '<ix:' in raw_preview
+                )
 
-                parsed_json = html_dom_to_structured_json_from_content(raw_content.encode('utf-8'))
-                parsed_json_str = json.dumps(parsed_json, ensure_ascii=False)
+                if is_html_content:
+                    # HTML / iXBRL content stored as raw HTML
+                    from service.html_parser_service import html_dom_to_structured_json_from_content
+
+                    await websocket.send_json({
+                        "idx": idx,
+                        "status": "parsing_html",
+                        "extraction_type": extraction_type,
+                    })
+                    await asyncio.sleep(0)
+
+                    parsed_json = html_dom_to_structured_json_from_content(raw_bytes)
+                else:
+                    # XML content stored in raw_content
+                    await websocket.send_json({
+                        "idx": idx,
+                        "status": "parsing_xml",
+                        "extraction_type": extraction_type,
+                    })
+                    await asyncio.sleep(0)
+
+                    parsed_json = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
+
+                parsed_json_str = json.dumps(parsed_json, ensure_ascii=False, separators=(',', ':'))
 
                 # Store in appropriate table
                 if extraction_type == "quarterly":

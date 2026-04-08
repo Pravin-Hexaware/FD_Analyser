@@ -7,7 +7,12 @@ from typing import Any, Dict, Optional, List
 from lxml import html as LXML_HTML
 from lxml.etree import _Element, _ElementTree
 
+
+def normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
 OUTPUT_DIR = "sample_outputs"
+SKIP_PATTERNS = ["details of impact of audit qualification", "audit qualification", "impact of audit qualification"]
 
 
 def read_file(file_path: str) -> bytes:
@@ -28,19 +33,18 @@ def extract_table(table: _Element) -> Any:
     if tbody is not None:
         for tr in tbody:
             if tr.tag.lower() == 'tr':
-                cells = [''.join(td.itertext()).strip() for td in tr.findall('td')]
+                cells = [normalize_whitespace(''.join(td.itertext())) for td in tr.findall('td')]
                 if cells:
                     rows.append(cells)
 
     if not rows:
         return None
 
-    # 2-column key-value table (unchanged)
-    if len(rows) > 0 and len(rows[0]) == 2:
+    # 2-column key-value table (only if all rows have exactly 2 columns)
+    if len(rows) > 0 and len(rows[0]) == 2 and all(len(row) == 2 for row in rows):
         result = {}
         for row in rows:
-            if len(row) >= 2:
-                result[row[0]] = row[1]
+            result[row[0]] = row[1]
         return result
 
     if len(rows) > 1:
@@ -89,46 +93,54 @@ def build_structure(node: _Element) -> Any:
     if tag in ['html', 'head', 'body', 'div', 'ix:header']:
         result = {}
         last_heading_key = None
+        encountered_skip = False
         i = 0
         while i < len(node):
             child = node[i]
             child_tag = child.tag.lower() if isinstance(child.tag, str) else str(child.tag).lower()
             if child_tag in ['h1', 'h2']:
-                heading_text = ''.join(child.itertext()).strip()
+                heading_text = normalize_whitespace(''.join(child.itertext()))
+                skip_section = any(pattern in heading_text.lower() for pattern in SKIP_PATTERNS)
                 i += 1
                 content = []
-                while i < len(node):
-                    next_child = node[i]
-                    next_tag = next_child.tag.lower() if isinstance(next_child.tag, str) else str(next_child.tag).lower()
-                    if next_tag in ['h1', 'h2']:
-                        break
-                    data = build_structure(next_child)
-                    if data is not None:
-                        content.append(data)
-                    i += 1
-
-                if heading_text.strip().lower() == 'text block' and last_heading_key is not None and content:
-                    previous_value = result[last_heading_key]
-                    if isinstance(previous_value, list):
-                        previous_value.extend(content)
-                    elif isinstance(previous_value, dict) and len(content) == 1 and isinstance(content[0], dict):
-                        previous_value.update(content[0])
-                    else:
-                        result[last_heading_key] = [previous_value, *content] if previous_value is not None else content
-                    continue
-
-                if len(content) == 1:
-                    result[heading_text] = content[0]
-                elif len(content) > 1:
-                    result[heading_text] = content
+                if skip_section:
+                    encountered_skip = True
+                    i = len(node)  # stop processing further children
                 else:
-                    result[heading_text] = {}
-                last_heading_key = heading_text
+                    while i < len(node):
+                        next_child = node[i]
+                        next_tag = next_child.tag.lower() if isinstance(next_child.tag, str) else str(next_child.tag).lower()
+                        if next_tag in ['h1', 'h2']:
+                            break
+                        data = build_structure(next_child)
+                        if data is not None:
+                            content.append(data)
+                        i += 1
+
+                if not skip_section:
+                    if heading_text.strip().lower() == 'text block' and last_heading_key is not None and content:
+                        previous_value = result[last_heading_key]
+                        if isinstance(previous_value, list):
+                            previous_value.extend(content)
+                        elif isinstance(previous_value, dict) and len(content) == 1 and isinstance(content[0], dict):
+                            previous_value.update(content[0])
+                        else:
+                            result[last_heading_key] = [previous_value, *content] if previous_value is not None else content
+                        continue
+
+                    if len(content) == 1:
+                        result[heading_text] = content[0]
+                    elif len(content) > 1:
+                        result[heading_text] = content
+                    else:
+                        result[heading_text] = {}
+                    last_heading_key = heading_text
             else:
-                data = build_structure(child)
-                if data is not None:
-                    if isinstance(data, dict):
-                        result.update(data)
+                if not encountered_skip:
+                    data = build_structure(child)
+                    if data is not None:
+                        if isinstance(data, dict):
+                            result.update(data)
                 i += 1
         return result if result else None
 
@@ -139,7 +151,7 @@ def build_structure(node: _Element) -> Any:
     elif tag in ['br', 'meta', 'title', 'style'] or tag.startswith('ix:') or tag.startswith('xbrli:'):
         return None
     else:
-        text = ''.join(node.itertext()).strip()
+        text = normalize_whitespace(''.join(node.itertext()))
         return text if text else None
 
 
@@ -161,7 +173,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         file_path = sys.argv[1]
     else:
-        file_path = input("Enter path to HTML / iXBRL file: ").strip()
+        print("Enter path to HTML / iXBRL file: ", end="")
+        file_path = input().strip()
 
     if not os.path.isfile(file_path):
         print("Invalid file path.")
@@ -176,6 +189,6 @@ if __name__ == "__main__":
     )
 
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(dom_json, f, indent=2, ensure_ascii=False)
+        json.dump(dom_json, f, ensure_ascii=False, separators=(',', ':'))
 
     print(f"[OK] Structured JSON written to: {out_path}")

@@ -64,6 +64,61 @@ def _normalize_llm_response(resp: Any) -> Dict[str, Any]:
     return result
 
 
+def _extract_token_usage(resp: Any) -> Dict[str, int]:
+    """Extract aggregated token usage from a raw LLM response object."""
+    def _normalize_usage_dict(d: dict[str, Any]) -> Dict[str, int]:
+        return {
+            "input_tokens": int(d.get("input_tokens", d.get("inputTokens", 0) or 0)),
+            "output_tokens": int(d.get("output_tokens", d.get("outputTokens", 0) or 0)),
+            "total_tokens": int(d.get("total_tokens", d.get("totalTokens", d.get("total_tokens", 0)) or 0)),
+        }
+
+    def _find_usage(obj: Any) -> dict[str, int] | None:
+        if isinstance(obj, dict):
+            if any(k in obj for k in ("input_tokens", "inputTokens", "output_tokens", "outputTokens", "total_tokens", "totalTokens")):
+                return _normalize_usage_dict(obj)
+            for value in obj.values():
+                result = _find_usage(value)
+                if result is not None:
+                    return result
+        elif isinstance(obj, list):
+            for item in obj:
+                result = _find_usage(item)
+                if result is not None:
+                    return result
+        return None
+
+    if resp is None:
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    # Start from top-level usage-like fields if present.
+    candidates = []
+    if isinstance(resp, dict):
+        candidates.append(resp)
+    else:
+        for attr in ("usage_metadata", "usage", "metadata", "extra", "additional_kwargs", "llm_output", "generations"):
+            candidate = getattr(resp, attr, None)
+            if candidate is not None:
+                candidates.append(candidate)
+
+        # Also fall back to __dict__ for objects with nested data fields.
+        if hasattr(resp, "__dict__"):
+            candidates.append({k: v for k, v in resp.__dict__.items() if v is not None})
+
+    for candidate in candidates:
+        tokens = _find_usage(candidate)
+        if tokens is not None:
+            return tokens
+
+    # As a last resort try to search the entire response object if it is dict/list-like.
+    if isinstance(resp, (dict, list)):
+        tokens = _find_usage(resp)
+        if tokens is not None:
+            return tokens
+
+    return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
 def test_llm_connection() -> Dict[str, Any]:
     """Test the Azure OpenAI connection with a small prompt."""
     resp = _invoke_llm(
@@ -407,8 +462,11 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
     return parsed, system_prompt, peer_extraction_log if 'peer_extraction_log' in locals() else ""
 
 
-def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
-    """Use LLM to generate an answer based on the query and fetched data."""
+def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> tuple[str, dict[str, int]]:
+    """Use LLM to generate an answer based on the query and fetched data.
+
+    Returns a tuple of (answer_text, token_usage).
+    """
     system_prompt = f"""
     You are a Senior Financial Analyst creating a comprehensive, detailed research report. Based on the user's query and provided financial data, generate an extensive analysis report in Markdown format.
 
@@ -483,5 +541,6 @@ def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: 
     user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(data, indent=2)}"
 
     response = _invoke_llm(system_prompt, user_prompt, max_tokens=2500)
+    token_usage = _extract_token_usage(response)
     normalized = _normalize_llm_response(response)
-    return normalized.get("content", "No answer generated.")
+    return normalized.get("content", "No answer generated."), token_usage

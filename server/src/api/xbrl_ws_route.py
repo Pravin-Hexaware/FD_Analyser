@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import json
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -238,7 +239,17 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
 
 @router.websocket("/ws/xbrl-extract-from-db")
 async def websocket_extract_from_db(websocket: WebSocket) -> None:
-    """WebSocket endpoint: read XBRL URLs from DB, extract metrics, and store them in a second table."""
+    """
+    WebSocket endpoint: read XBRL filings from DB with specific conditions and extract using HTML parser.
+    
+    Conditions:
+    - report_type == "std"
+    - xbrl_link ends with ".html"
+    - publication_date[1] == "C" (cumulative/annual) or "Q" (quarterly)
+    - Skip all other records
+    - Use html_parser_service to parse raw_content
+    - Store parsed JSON in quarterly_extractions or annual_extractions table
+    """
     await websocket.accept()
 
     repo = SqliteRepository()
@@ -246,225 +257,168 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
     try:
         await websocket.send_json({"status": "starting"})
 
-        filings = repo.get_xbrl_filings()
+        # Get filings with company name and raw content
+        filings = repo.get_xbrl_filings_with_company_and_content()
         await websocket.send_json({"status": "found_filings", "count": len(filings)})
 
         for idx, f in enumerate(filings, start=1):
             scrip_code = f.get("scrip_code")
+            company_name = f.get("company_name") or "Unknown Company"
             xbrl_link = f.get("xbrl_link")
-
-            if not scrip_code or not xbrl_link:
-                await websocket.send_json({
-                    "idx": idx,
-                    "status": "invalid_filing",
-                    "reason": "missing scrip_code or xbrl_link",
-                    "filing": f,
-                })
-                continue
-
-            raw_report_type = str(f.get("report_type", "quarterly") or "quarterly").strip().lower()
-            report_type = "annual" if raw_report_type in ("annual", "yearly") else "quarterly"
+            publication_date = str(f.get("publication_date") or "").strip()
+            db_report_type = str(f.get("report_type") or "").strip().lower()
+            raw_content = f.get("raw_content")
 
             await websocket.send_json({
                 "idx": idx,
                 "scrip_code": scrip_code,
+                "company_name": company_name,
                 "xbrl_link": xbrl_link,
-                "status": "processing",
-                "report_type": report_type,
+                "publication_date": publication_date,
+                "report_type": db_report_type,
+                "status": "record_read",
             })
+            await asyncio.sleep(0)
 
-            if repo.xbrl_extraction_exists(scrip_code, xbrl_link, report_type):
+            # Apply filtering conditions
+            if db_report_type != "std":
+                await websocket.send_json({
+                    "idx": idx,
+                    "status": "skipped",
+                    "reason": f"report_type is '{db_report_type}', not 'std'",
+                })
+                await asyncio.sleep(0)
+                continue
+
+            if not xbrl_link or not xbrl_link.lower().endswith(".html"):
+                await websocket.send_json({
+                    "idx": idx,
+                    "status": "skipped",
+                    "reason": f"xbrl_link does not end with '.html': {xbrl_link}",
+                })
+                await asyncio.sleep(0)
+                continue
+
+            if len(publication_date) < 2:
+                await websocket.send_json({
+                    "idx": idx,
+                    "status": "skipped",
+                    "reason": "invalid publication_date format",
+                    "publication_date": publication_date,
+                })
+                await asyncio.sleep(0)
+                continue
+
+            date_char = publication_date[1].upper()
+            if date_char not in ["C", "Q"]:
+                await websocket.send_json({
+                    "idx": idx,
+                    "status": "skipped",
+                    "reason": f"publication_date[1] is '{date_char}', not 'C' or 'Q'",
+                    "publication_date": publication_date,
+                })
+                await asyncio.sleep(0)
+                continue
+
+            # Determine extraction type
+            extraction_type = "annual" if date_char == "C" else "quarterly"
+
+            await websocket.send_json({
+                "idx": idx,
+                "scrip_code": scrip_code,
+                "company_name": company_name,
+                "xbrl_link": xbrl_link,
+                "publication_date": publication_date,
+                "report_type": db_report_type,
+                "extraction_type": extraction_type,
+                "status": "processing",
+            })
+            await asyncio.sleep(0)
+
+            # Check if already extracted
+            if repo.xbrl_extraction_exists(scrip_code, xbrl_link, extraction_type):
                 await websocket.send_json({
                     "idx": idx,
                     "scrip_code": scrip_code,
-                    "xbrl_link": xbrl_link,
                     "status": "skipped_already_extracted",
+                    "extraction_type": extraction_type,
                 })
+                await asyncio.sleep(0)
+                continue
+
+            # Check if raw_content exists
+            if not raw_content:
+                await websocket.send_json({
+                    "idx": idx,
+                    "status": "skipped",
+                    "reason": "no raw_content available",
+                })
+                await asyncio.sleep(0)
                 continue
 
             try:
-                if xbrl_link.lower().endswith(".xml"):
-                    extracted = extract_xbrl_data(xbrl_link, only_prefix=None)
-                    data_type = "xml"
-                else:
-                    extracted = extract_html_data(xbrl_link)
-                    data_type = "html"
+                # Import html_parser_service
+                from service.html_parser_service import html_dom_to_structured_json_from_content
 
-                # report_type already normalized above (annual/yearly -> annual, else quarterly)
-                if report_type == "annual":
-                    # For annual reports, use the dedicated extract_annual function
-                    from api.xbrl_route import ExtractAnnualRequest
-                    annual_request = ExtractAnnualRequest(url=xbrl_link)
-                    response_data = await extract_annual(annual_request)
-                    
-                    # Extract data from response
-                    if response_data.get("error"):
-                        await websocket.send_json({
-                            "idx": idx,
-                            "scrip_code": scrip_code,
-                            "xbrl_link": xbrl_link,
-                            "status": "extraction_error",
-                            "error": response_data.get("error"),
-                        })
-                        continue
+                # Parse the HTML content
+                await websocket.send_json({
+                    "idx": idx,
+                    "status": "parsing_html",
+                    "extraction_type": extraction_type,
+                })
+                await asyncio.sleep(0)
 
-                    # Store annual metrics in database
-                    period = repo.get_period_by_xbrl_link(xbrl_link)
-                    repo.insert_annual_extraction(
-                        scrip_code=scrip_code,
-                        xbrl_link=xbrl_link,
-                        period=period,
-                        company_name=response_data.get("company_name"),
-                        company_symbol=response_data.get("company_symbol"),
-                        currency=response_data.get("currency"),
-                        level_of_rounding=response_data.get("level_of_rounding"),
-                        reporting_type=response_data.get("reporting_type"),
-                        nature_of_report=response_data.get("NatureOfReport"),
+                parsed_json = html_dom_to_structured_json_from_content(raw_content.encode('utf-8'))
+                parsed_json_str = json.dumps(parsed_json, ensure_ascii=False)
 
-                        # Quarterly_Earnings prefixed
-                        # quarterly_sales=response_data["Quarterly_Earnings"].get("Sales"),
-                        # quarterly_expenses=response_data["Quarterly_Earnings"].get("Expenses"),
-                        # quarterly_operating_profit=response_data["Quarterly_Earnings"].get("OperatingProfit"),
-                        # quarterly_opm_percentage=response_data["Quarterly_Earnings"].get("OPM_percentage"),
-                        # quarterly_other_income=response_data["Quarterly_Earnings"].get("OtherIncome"),
-                        # quarterly_cost_of_materials_consumed=response_data["Quarterly_Earnings"].get("CostOfMaterialsConsumed"),
-                        # quarterly_employee_benefit_expense=response_data["Quarterly_Earnings"].get("EmployeeBenefitExpense"),
-                        # quarterly_other_expenses=response_data["Quarterly_Earnings"].get("OtherExpenses"),
-                        # quarterly_interest=response_data["Quarterly_Earnings"].get("Interest"),
-                        # quarterly_depreciation=response_data["Quarterly_Earnings"].get("Depreciation"),
-                        # quarterly_profit_before_tax=response_data["Quarterly_Earnings"].get("ProfitBeforeTax"),
-                        # quarterly_current_tax=response_data["Quarterly_Earnings"].get("CurrentTax"),
-                        # quarterly_deferred_tax=response_data["Quarterly_Earnings"].get("DeferredTax"),
-                        # quarterly_tax=response_data["Quarterly_Earnings"].get("Tax"),
-                        # quarterly_tax_percent=response_data["Quarterly_Earnings"].get("Tax_percent"),
-                        # quarterly_net_profit=response_data["Quarterly_Earnings"].get("NetProfit"),
-                        # quarterly_eps_in_rs=response_data["Quarterly_Earnings"].get("EPS_in_RS"),
-
-                        # Profit and Loss (annual)
-                        sales=response_data["Profit and Loss"].get("Sales"),
-                        expenses=response_data["Profit and Loss"].get("Expenses"),
-                        operating_profit=response_data["Profit and Loss"].get("OperatingProfit"),
-                        opm_percentage=response_data["Profit and Loss"].get("OPM_percentage"),
-                        other_income=response_data["Profit and Loss"].get("OtherIncome"),
-                        interest=response_data["Profit and Loss"].get("Interest"),
-                        depreciation=response_data["Profit and Loss"].get("Depreciation"),
-                        profit_before_tax=response_data["Profit and Loss"].get("ProfitBeforeTax"),
-                        tax_percent=response_data["Profit and Loss"].get("Tax_percent"),
-                        net_profit=response_data["Profit and Loss"].get("NetProfit"),
-                        eps_in_rs=response_data["Profit and Loss"].get("EPS_in_RS"),
-
-                        # Balance sheet
-                        equity_capital=response_data["Balance sheet"].get("EquityCapital"),
-                        reserves=response_data["Balance sheet"].get("Reserves"),
-                        trade_payables_current=response_data["Balance sheet"].get("TradePayablesCurrent"),
-                        borrowings=response_data["Balance sheet"].get("Borrowings"),
-                        other_liabilities=response_data["Balance sheet"].get("OtherLiabilities"),
-                        total_liabilities=response_data["Balance sheet"].get("TotalLiabilities"),
-                        total_equity=response_data["Balance sheet"].get("TotalEquity"),
-                        fixed_assets=response_data["Balance sheet"].get("FixedAssets"),
-                        cwip=response_data["Balance sheet"].get("CWIP"),
-                        investments=response_data["Balance sheet"].get("Investments"),
-                        total_assets=response_data["Balance sheet"].get("TotalAssets"),
-
-                        # Cashflow
-                        cash_from_operating_activity=response_data["Cashflow"].get("CashFromOperatingActivity"),
-                        cash_from_investing_activity=response_data["Cashflow"].get("CashFromInvestingActivity"),
-                        cash_from_financing_activity=response_data["Cashflow"].get("CashFromFinancingActivity"),
-                    )
-                    await asyncio.sleep(0.001)
-                else:  # quarterly
-                    metrics = calculate_metrics(extracted)
-                    response_data = [
-                        {
-                            "url": xbrl_link,
-                            "type": data_type,
-                            "company_name": metrics.get("company_name"),
-                            "company_symbol": metrics.get("company_symbol"),
-                            "currency": metrics.get("currency"),
-                            "level_of_rounding": metrics.get("level_of_rounding"),
-                            "reporting_type": metrics.get("reporting_type"),
-                            "NatureOfReport": metrics.get("NatureOfReport"),
-                            "Sales": metrics.get("Sales"),
-                            "Expenses": metrics.get("Expenses"),
-                            "OperatingProfit": metrics.get("OperatingProfit"),
-                            "OPM_percentage": metrics.get("OPM_percentage"),
-                            "OtherIncome": metrics.get("OtherIncome"),
-                            "CostOfMaterialsConsumed": metrics.get("CostOfMaterialsConsumed"),
-                            "EmployeeBenefitExpense": metrics.get("EmployeeBenefitExpense"),
-                            "OtherExpenses": metrics.get("OtherExpenses"),
-                            "Interest": metrics.get("Interest"),
-                            "Depreciation": metrics.get("Depreciation"),
-                            "ProfitBeforeTax": metrics.get("ProfitBeforeTax"),
-                            "CurrentTax": metrics.get("CurrentTax"),
-                            "DeferredTax": metrics.get("DeferredTax"),
-                            "Tax": metrics.get("Tax"),
-                            "Tax_percent": metrics.get("Tax_percent"),
-                            "NetProfit": metrics.get("NetProfit"),
-                            "EPS_in_RS": metrics.get("EPS_in_RS"),
-                            "error": None
-                        }
-                    ]
-                    # Store quarterly metrics
-                    period = repo.get_period_by_xbrl_link(xbrl_link)
+                # Store in appropriate table
+                if extraction_type == "quarterly":
                     repo.insert_quarterly_extraction(
                         scrip_code=scrip_code,
+                        company_name=company_name,
                         xbrl_link=xbrl_link,
-                        period=period,
-                        company_name=metrics.get("company_name"),
-                        company_symbol=metrics.get("company_symbol"),
-                        currency=metrics.get("currency"),
-                        level_of_rounding=metrics.get("level_of_rounding"),
-                        reporting_type=metrics.get("reporting_type"),
-                        nature_of_report=metrics.get("NatureOfReport"),
-                        sales=metrics.get("Sales"),
-                        expenses=metrics.get("Expenses"),
-                        operating_profit=metrics.get("OperatingProfit"),
-                        opm_percentage=metrics.get("OPM_percentage"),
-                        other_income=metrics.get("OtherIncome"),
-                        cost_of_materials_consumed=metrics.get("CostOfMaterialsConsumed"),
-                        employee_benefit_expense=metrics.get("EmployeeBenefitExpense"),
-                        other_expenses=metrics.get("OtherExpenses"),
-                        interest=metrics.get("Interest"),
-                        depreciation=metrics.get("Depreciation"),
-                        profit_before_tax=metrics.get("ProfitBeforeTax"),
-                        current_tax=metrics.get("CurrentTax"),
-                        deferred_tax=metrics.get("DeferredTax"),
-                        tax=metrics.get("Tax"),
-                        tax_percent=metrics.get("Tax_percent"),
-                        net_profit=metrics.get("NetProfit"),
-                        eps_in_rs=metrics.get("EPS_in_RS"),
+                        publication_date=publication_date,
+                        report_type=db_report_type,
+                        parsed_json=parsed_json_str,
                     )
-                    await websocket.send_json({
-                        "idx": idx,
-                        "scrip_code": scrip_code,
-                        "xbrl_link": xbrl_link,
-                        "status": "stored",
-                        "report_type": report_type,
-                    })
-                    await asyncio.sleep(0.001)
+                else:  # annual
+                    repo.insert_annual_extraction(
+                        scrip_code=scrip_code,
+                        company_name=company_name,
+                        xbrl_link=xbrl_link,
+                        publication_date=publication_date,
+                        report_type=db_report_type,
+                        parsed_json=parsed_json_str,
+                    )
 
                 await websocket.send_json({
                     "idx": idx,
                     "scrip_code": scrip_code,
-                    "xbrl_link": xbrl_link,
-                    "status": "extracted",
-                    "data": response_data,
+                    "company_name": company_name,
+                    "status": "stored",
+                    "extraction_type": extraction_type,
+                    "message": f"Parsed JSON stored in {extraction_type}_extractions table",
                 })
+                await asyncio.sleep(0)
 
             except Exception as e:
                 await websocket.send_json({
                     "idx": idx,
                     "scrip_code": scrip_code,
-                    "xbrl_link": xbrl_link,
+                    "status": "error",
+                    "extraction_type": extraction_type,
                     "error": str(e),
+                    "traceback": traceback.format_exc(),
                 })
+                await asyncio.sleep(0)
+                continue
 
-        await websocket.send_json({"status": "complete"})
+        await websocket.send_json({"status": "complete", "message": "All records processed"})
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        await websocket.send_json({"error": str(e)})
+        await websocket.send_json({"error": str(e), "traceback": traceback.format_exc()})
         await websocket.close()
     finally:
         try:

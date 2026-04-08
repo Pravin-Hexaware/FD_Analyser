@@ -30,7 +30,7 @@ def run(url: str, only_prefix: Optional[str], out_json: str, out_csv: str) -> Tu
 # ----------------------
 def main():
     # Example XML instance from BSE:
-    url = "https://www.bseindia.com/XBRLFILES/FourOneUploadDocument/Main_Ind_As_500470_2712025191552.xml"
+    url = "https://www.bseindia.com/XBRLFILES/FourOneUploadDocument/Main_Ind_As_500875_24102024193010.xml"
     prefix = "in-bse-fin"  # filter to only keep that namespace prefix; set to None for all
     out_json = DEFAULT_JSON
     out_csv = DEFAULT_CSV

@@ -81,37 +81,18 @@ class SqliteRepository:
             """
         )
 
-        # New tables for quarterly and annual extractions
+        # Redesigned tables for quarterly and annual extractions using parsed JSON
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS quarterly_table (
+            CREATE TABLE IF NOT EXISTS quarterly_extractions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scrip_code TEXT,
-                xbrl_link TEXT,
-                period TEXT,
                 company_name TEXT,
-                company_symbol TEXT,
-                currency TEXT,
-                level_of_rounding TEXT,
-                reporting_type TEXT,
-                nature_of_report TEXT,
-                sales REAL,
-                expenses REAL,
-                operating_profit REAL,
-                opm_percentage REAL,
-                other_income REAL,
-                cost_of_materials_consumed REAL,
-                employee_benefit_expense REAL,
-                other_expenses REAL,
-                interest REAL,
-                depreciation REAL,
-                profit_before_tax REAL,
-                current_tax REAL,
-                deferred_tax REAL,
-                tax REAL,
-                tax_percent REAL,
-                net_profit REAL,
-                eps_in_rs REAL,
+                xbrl_link TEXT,
+                publication_date TEXT,
+                report_type TEXT,
+                parsed_json TEXT,  -- Store the complete parsed JSON from html_parser_service
+                extraction_type TEXT,  -- 'quarterly'
                 created_at TEXT DEFAULT (datetime('now'))
             );
             """
@@ -119,49 +100,15 @@ class SqliteRepository:
 
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS annual_table (
+            CREATE TABLE IF NOT EXISTS annual_extractions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scrip_code TEXT,
-                xbrl_link TEXT,
-                period TEXT,
                 company_name TEXT,
-                company_symbol TEXT,
-                currency TEXT,
-                level_of_rounding TEXT,
-                reporting_type TEXT,
-                nature_of_report TEXT,
-
-                -- Profit and Loss / annual P&L section
-                sales REAL,
-                expenses REAL,
-                operating_profit REAL,
-                opm_percentage REAL,
-                other_income REAL,
-                interest REAL,
-                depreciation REAL,
-                profit_before_tax REAL,
-                tax_percent REAL,
-                net_profit REAL,
-                eps_in_rs REAL,
-
-                -- Balance Sheet section
-                equity_capital REAL,
-                reserves REAL,
-                trade_payables_current REAL,
-                borrowings REAL,
-                other_liabilities REAL,
-                total_liabilities REAL,
-                total_equity REAL,
-                fixed_assets REAL,
-                cwip REAL,
-                investments REAL,
-                total_assets REAL,
-
-                -- Cashflow section
-                cash_from_operating_activity REAL,
-                cash_from_investing_activity REAL,
-                cash_from_financing_activity REAL,
-
+                xbrl_link TEXT,
+                publication_date TEXT,
+                report_type TEXT,
+                parsed_json TEXT,  -- Store the complete parsed JSON from html_parser_service
+                extraction_type TEXT,  -- 'annual'
                 created_at TEXT DEFAULT (datetime('now'))
             );
             """
@@ -402,13 +349,33 @@ class SqliteRepository:
         cur = self._conn.cursor()
         if scrip_code:
             cur.execute(
-                "SELECT scrip_code, symbol, xbrl_link, report_type FROM xbrl_filing_table WHERE scrip_code = ?",
+                "SELECT scrip_code, symbol, xbrl_link, publication_date, report_type FROM xbrl_filing_table WHERE scrip_code = ?",
                 (scrip_code,),
             )
         else:
             cur.execute(
-                "SELECT scrip_code, symbol, xbrl_link, report_type FROM xbrl_filing_table"
+                "SELECT scrip_code, symbol, xbrl_link, publication_date, report_type FROM xbrl_filing_table"
             )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_xbrl_filings_with_company_and_content(self) -> list[dict]:
+        """Get XBRL filings with company name from company_table and raw_content."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT 
+                f.scrip_code, 
+                f.symbol, 
+                f.xbrl_link, 
+                f.publication_date, 
+                f.report_type, 
+                f.raw_content,
+                c.company_name
+            FROM xbrl_filing_table f
+            LEFT JOIN company_table c ON f.scrip_code = c.scrip_code
+            """
+        )
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
@@ -546,9 +513,10 @@ class SqliteRepository:
         )
         return cur.fetchone() is not None
 
-    def xbrl_extraction_exists(self, scrip_code: str, xbrl_link: str, report_type: str = "quarterly") -> bool:
+    def xbrl_extraction_exists(self, scrip_code: str, xbrl_link: str, extraction_type: str = "quarterly") -> bool:
+        """Check if extraction already exists in the appropriate table."""
         cur = self._conn.cursor()
-        table = "quarterly_table" if report_type == "quarterly" else "annual_table"
+        table = "quarterly_extractions" if extraction_type == "quarterly" else "annual_extractions"
         cur.execute(
             f"SELECT 1 FROM {table} WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
             (scrip_code, xbrl_link),
@@ -634,93 +602,21 @@ class SqliteRepository:
     def insert_quarterly_extraction(
         self,
         scrip_code: str,
+        company_name: str,
         xbrl_link: str,
-        period: Optional[str] = None,
-        company_name: Optional[str] = None,
-        company_symbol: Optional[str] = None,
-        currency: Optional[str] = None,
-        level_of_rounding: Optional[str] = None,
-        reporting_type: Optional[str] = None,
-        nature_of_report: Optional[str] = None,
-        sales: Optional[float] = None,
-        expenses: Optional[float] = None,
-        operating_profit: Optional[float] = None,
-        opm_percentage: Optional[float] = None,
-        other_income: Optional[float] = None,
-        cost_of_materials_consumed: Optional[float] = None,
-        employee_benefit_expense: Optional[float] = None,
-        other_expenses: Optional[float] = None,
-        interest: Optional[float] = None,
-        depreciation: Optional[float] = None,
-        profit_before_tax: Optional[float] = None,
-        current_tax: Optional[float] = None,
-        deferred_tax: Optional[float] = None,
-        tax: Optional[float] = None,
-        tax_percent: Optional[float] = None,
-        net_profit: Optional[float] = None,
-        eps_in_rs: Optional[float] = None,
+        publication_date: str,
+        report_type: str,
+        parsed_json: str,
     ) -> int:
+        """Insert quarterly extraction with parsed JSON data."""
         cur = self._conn.cursor()
-        columns = [
-            "scrip_code",
-            "xbrl_link",
-            "period",
-            "company_name",
-            "company_symbol",
-            "currency",
-            "level_of_rounding",
-            "reporting_type",
-            "nature_of_report",
-            "sales",
-            "expenses",
-            "operating_profit",
-            "opm_percentage",
-            "other_income",
-            "cost_of_materials_consumed",
-            "employee_benefit_expense",
-            "other_expenses",
-            "interest",
-            "depreciation",
-            "profit_before_tax",
-            "current_tax",
-            "deferred_tax",
-            "tax",
-            "tax_percent",
-            "net_profit",
-            "eps_in_rs",
-        ]
-        values = [
-            scrip_code,
-            xbrl_link,
-            period,
-            company_name,
-            company_symbol,
-            currency,
-            level_of_rounding,
-            reporting_type,
-            nature_of_report,
-            sales,
-            expenses,
-            operating_profit,
-            opm_percentage,
-            other_income,
-            cost_of_materials_consumed,
-            employee_benefit_expense,
-            other_expenses,
-            interest,
-            depreciation,
-            profit_before_tax,
-            current_tax,
-            deferred_tax,
-            tax,
-            tax_percent,
-            net_profit,
-            eps_in_rs,
-        ]
-        placeholder = ", ".join(["?"] * len(columns))
         cur.execute(
-            f"INSERT INTO quarterly_table ({', '.join(columns)}) VALUES ({placeholder})",
-            values,
+            """
+            INSERT INTO quarterly_extractions 
+            (scrip_code, company_name, xbrl_link, publication_date, report_type, parsed_json, extraction_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (scrip_code, company_name, xbrl_link, publication_date, report_type, parsed_json, "quarterly"),
         )
         self._conn.commit()
         return cur.lastrowid
@@ -728,119 +624,21 @@ class SqliteRepository:
     def insert_annual_extraction(
         self,
         scrip_code: str,
+        company_name: str,
         xbrl_link: str,
-        period: Optional[str] = None,
-        company_name: Optional[str] = None,
-        company_symbol: Optional[str] = None,
-        currency: Optional[str] = None,
-        level_of_rounding: Optional[str] = None,
-        reporting_type: Optional[str] = None,
-        nature_of_report: Optional[str] = None,
-        sales: Optional[float] = None,
-        expenses: Optional[float] = None,
-        operating_profit: Optional[float] = None,
-        opm_percentage: Optional[float] = None,
-        other_income: Optional[float] = None,
-        interest: Optional[float] = None,
-        depreciation: Optional[float] = None,
-        profit_before_tax: Optional[float] = None,
-        tax_percent: Optional[float] = None,
-        net_profit: Optional[float] = None,
-        eps_in_rs: Optional[float] = None,
-        equity_capital: Optional[float] = None,
-        reserves: Optional[float] = None,
-        trade_payables_current: Optional[float] = None,
-        borrowings: Optional[float] = None,
-        other_liabilities: Optional[float] = None,
-        total_liabilities: Optional[float] = None,
-        total_equity: Optional[float] = None,
-        fixed_assets: Optional[float] = None,
-        cwip: Optional[float] = None,
-        investments: Optional[float] = None,
-        total_assets: Optional[float] = None,
-        cash_from_operating_activity: Optional[float] = None,
-        cash_from_investing_activity: Optional[float] = None,
-        cash_from_financing_activity: Optional[float] = None,
+        publication_date: str,
+        report_type: str,
+        parsed_json: str,
     ) -> int:
+        """Insert annual extraction with parsed JSON data."""
         cur = self._conn.cursor()
-        columns = [
-            "scrip_code",
-            "xbrl_link",
-            "period",
-            "company_name",
-            "company_symbol",
-            "currency",
-            "level_of_rounding",
-            "reporting_type",
-            "nature_of_report",
-            "sales",
-            "expenses",
-            "operating_profit",
-            "opm_percentage",
-            "other_income",
-            "interest",
-            "depreciation",
-            "profit_before_tax",
-            "tax_percent",
-            "net_profit",
-            "eps_in_rs",
-            "equity_capital",
-            "reserves",
-            "trade_payables_current",
-            "borrowings",
-            "other_liabilities",
-            "total_liabilities",
-            "total_equity",
-            "fixed_assets",
-            "cwip",
-            "investments",
-            "total_assets",
-            "cash_from_operating_activity",
-            "cash_from_investing_activity",
-            "cash_from_financing_activity",
-        ]
-
-        values = [
-            scrip_code,
-            xbrl_link,
-            period,
-            company_name,
-            company_symbol,
-            currency,
-            level_of_rounding,
-            reporting_type,
-            nature_of_report,
-            sales,
-            expenses,
-            operating_profit,
-            opm_percentage,
-            other_income,
-            interest,
-            depreciation,
-            profit_before_tax,
-            tax_percent,
-            net_profit,
-            eps_in_rs,
-            equity_capital,
-            reserves,
-            trade_payables_current,
-            borrowings,
-            other_liabilities,
-            total_liabilities,
-            total_equity,
-            fixed_assets,
-            cwip,
-            investments,
-            total_assets,
-            cash_from_operating_activity,
-            cash_from_investing_activity,
-            cash_from_financing_activity,
-        ]
-
-        placeholders = ", ".join(["?"] * len(columns))
         cur.execute(
-            f"INSERT INTO annual_table ({', '.join(columns)}) VALUES ({placeholders})",
-            values,
+            """
+            INSERT INTO annual_extractions 
+            (scrip_code, company_name, xbrl_link, publication_date, report_type, parsed_json, extraction_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (scrip_code, company_name, xbrl_link, publication_date, report_type, parsed_json, "annual"),
         )
         self._conn.commit()
         return cur.lastrowid

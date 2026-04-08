@@ -975,7 +975,7 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                     await smartsearch_fill(page, company)
 
             # Set result period
-            await set_result_period(page)
+            #await set_result_period(page)
 
             # try multiple broadcast periods (beyond 1y -> 1y -> 6m -> 3m -> 1m)
             annual_url = None
@@ -1195,7 +1195,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                     await smartsearch_fill(page, company)
 
             # Set result period
-            await set_result_period(page)
+            #await set_result_period(page)
 
             # try multiple broadcast periods (beyond 1y -> 1y -> 6m -> 3m -> 1m)
             yielded_any = False

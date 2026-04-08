@@ -97,17 +97,23 @@ def fetch_url_bytes(url: str, timeout: int = 60) -> bytes:
         r = s.get(url, timeout=timeout, verify=verify_opt)
         r.raise_for_status()
         return r.content
-    except requests.exceptions.SSLError as ssl_err:
+    except Exception as e:
         # Final fallback to keep you unblocked; prints a clear warning.
         print(
-            f"WARNING: TLS verify failed ({ssl_err}). Retrying once with verify=False. "
+            f"WARNING: TLS verify failed ({e}). Retrying once with verify=False. "
             "For a secure fix, set ENTERPRISE_CA_BUNDLE to your org's root CA PEM.",
             file=sys.stderr,
         )
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        r = s.get(url, timeout=timeout, verify=False)
-        r.raise_for_status()
-        return r.content
+        # Create a new session without retries for the fallback
+        s_fallback = requests.Session()
+        s_fallback.headers.update(DEFAULT_HEADERS)
+        try:
+            r = s_fallback.get(url, timeout=timeout, verify=False)
+            r.raise_for_status()
+            return r.content
+        finally:
+            s_fallback.close()
 
 def parse_xml_bytes(data: bytes) -> ET._ElementTree:
     """Parse bytes into an XML tree allowing recovery for messy iXBRL."""
@@ -209,7 +215,7 @@ def walk_collect(root: ET._Element, only_prefix: Optional[str]) -> List[Dict[str
         adjusted_value = apply_decimals(raw_value, decimals)
 
         out.append({
-            "qname": qname_for(el),
+            #"qname": qname_for(el),
             "localname": localname(el.tag),
             "contextRef": el.get("contextRef"),
             "unitRef": el.get("unitRef"),

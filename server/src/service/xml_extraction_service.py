@@ -176,7 +176,7 @@ def apply_decimals(value_text: str, decimals_text: Optional[str]) -> Any:
 
     if d < 0:
         # divide by 10^abs(d)
-        adj = num / (10 ** (abs(d)+1))
+        adj = num / (10 ** (abs(d)))
         return adj
     elif d > 0:
         # multiply by 10^d
@@ -219,7 +219,7 @@ def walk_collect(root: ET._Element, only_prefix: Optional[str]) -> List[Dict[str
             "localname": localname(el.tag),
             "contextRef": el.get("contextRef"),
             "unitRef": el.get("unitRef"),
-            "decimals": decimals,
+            #"decimals": decimals,
             "value": adjusted_value,
         })
     return out

@@ -5,6 +5,7 @@ from datetime import datetime
 import uuid
 import json
 import os
+import re
 from pathlib import Path
 
 from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data
@@ -76,9 +77,10 @@ def get_actual_initial_prompt() -> str:
     return """You are a Senior Financial Analyst and Data Extraction Expert. Your task is to analyze a user query for financial data extraction.
 
 First, break down the query into key components:
-- **statement_frequency**: 'quarterly', 'annual', or 'unspecified'.
+- **statement_frequency**: 'quarterly', 'annual', 'both', or 'unspecified'.
 - **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.
-- **period**: Specific period like 'latest quarter', 'Q3 2023', or 'unspecified'.
+- **period**: Specific period like 'latest quarter', 'Q3 2023', 'FY2024', or 'unspecified'.
+- **time_horizon**: Normalized window such as 'latest', '2years', '5years', or 'unspecified'.
 - **target_companies**: List of company names mentioned.
 - **industries**: Any industries mentioned.
 - **other_requirements**: Any other specific requirements or questions.
@@ -96,6 +98,7 @@ JSON Schema:
     "statement_frequency": "string",
     "statement_type": "string",
     "period": "string",
+    "time_horizon": "string",
     "get_peer": boolean
   },
   "target_companies": {
@@ -112,10 +115,10 @@ JSON Schema:
 
 def get_actual_final_prompt(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
     """Get the actual final prompt used for answer generation."""
-    system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided financial data.
+    system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided parsed JSON financial data.
 The data is for {frequency} financial statements, including {statement_type.replace('_', ' ')} metrics where available.
 
-Provide a clear, concise answer to the query. If data is missing for some companies, note that."""
+Provide a clear, concise manager-style analysis report. Use only the data present in the JSON and mention if any requested period or metric is missing."""
     
     user_prompt = f"Query: {query}\n\nData: {json.dumps(data, indent=2)}"
     
@@ -158,19 +161,25 @@ def _determine_frequency(statement_frequency: str, statement_type: str, period: 
         return "annual"
     if sf in ["quarterly", "q", "3months", "3-month", "3 months"]:
         return "quarterly"
+    if sf in ["both", "annual and quarterly", "quarterly and annual"]:
+        return "both"
+
+    quarter_indicators = ["quarter", "quarterly", "q1", "q2", "q3", "q4", "qtr", "quarter results", "quarters"]
+    annual_indicators = ["fy", "fiscal year", "year", "years"]
+
+    if any(keyword in p for keyword in quarter_indicators):
+        return "quarterly"
+    if any(keyword in p for keyword in annual_indicators):
+        return "annual"
 
     annual_types = ["balance_sheet", "cash_flow", "profit_and_loss", "income_statement"]
     if any(t in st for t in annual_types):
         return "annual"
 
-    if p in ["latest quarter", "latest q", "quarterly", "q1", "q2", "q3", "q4", "3months", "3-month", "3 months"]:
-        return "quarterly"
-
-    # Default to annual for strong annual indicator, else quarterly fallback
     if "annual" in st or "year" in st:
         return "annual"
 
-    return "quarterly"  # safe default
+    return "quarterly"
 
 
 
@@ -189,112 +198,118 @@ def _requires_historical_data(query: str) -> bool:
     q = (query or "").strip().lower()
     if not q:
         return False
-    historical_keywords = ["historical", "5y", "5 year", "trend", "cagr", "growth", "over time", "past", "fy", "year"]
+    historical_keywords = [
+        "historical", "5y", "5 year", "trend", "cagr", "growth", "over time",
+        "past", "fy", "year", "last 2 years", "last 3 years", "last 5 years"
+    ]
     return any(keyword in q for keyword in historical_keywords)
 
 
-def _fetch_company_data(repo: SqliteRepository, scrip_code: str, frequency: str, statement_type: str, query: str = "") -> Dict[str, Any]:
-    """Fetch data for a company and filter fields based on frequency and statement_type."""
+def _interpret_time_window(period: str, time_horizon: str) -> tuple[bool, Optional[int], Optional[str], int]:
+    """Parse period and time_horizon and return (latest_only, last_n_years, period_filter, limit_records)."""
+    latest_only = False
+    last_n_years = None
+    period_filter = None
+    limit_records = 5  # default limit
+
+    if time_horizon:
+        boundary = time_horizon.strip().lower()
+        if boundary in ["latest", "most recent", "recent"]:
+            latest_only = True
+        else:
+            years_match = re.search(r"(\d+)\s*years?", boundary)
+            if years_match:
+                last_n_years = int(years_match.group(1))
+
+    if period:
+        normalized_period = period.strip().lower()
+        if normalized_period in ["unspecified", "none", "n/a", "na", ""]:
+            period_filter = None
+        else:
+            # Check for "latest X quarters" or "last X quarters"
+            quarters_match = re.search(r"(?:latest|last)\s+(\d+)\s+quarters?", normalized_period)
+            if quarters_match:
+                limit_records = int(quarters_match.group(1))
+                latest_only = False  # Don't limit to single record
+            elif "latest q" in normalized_period or "most recent" in normalized_period:
+                latest_only = True
+            elif last_n_years is None:
+                years_match = re.search(r"(\d+)\s*years?", normalized_period)
+                if years_match:
+                    last_n_years = int(years_match.group(1))
+                else:
+                    period_filter = period
+
+    return latest_only, last_n_years, period_filter, limit_records
+
+
+def _fetch_company_data(
+    repo: SqliteRepository,
+    scrip_code: str,
+    frequency: str,
+    statement_type: str,
+    period: str,
+    time_horizon: str,
+    query: str = "",
+) -> Dict[str, Any]:
+    """Fetch data for a company and return the best matching extraction records."""
+    latest_only, last_n_years, period_filter, limit_records = _interpret_time_window(period, time_horizon)
     requires_historical = _requires_historical_data(query)
-    
-    if requires_historical:
-        if frequency == "annual":
-            data_list = repo.get_historical_annual_data(scrip_code, limit=5)
-        else:
-            data_list = repo.get_historical_quarterly_data(scrip_code, limit=5)
-        
-        if data_list:
-            # Return as a list under the company key
-            return {scrip_code: data_list}
-        else:
-            # Fallback to latest if no historical
-            if frequency == "annual":
-                data = repo.get_latest_annual_data(scrip_code)
-            else:
-                data = repo.get_latest_quarterly_data(scrip_code)
-            return {scrip_code: [data]} if data else {}
-    else:
-        if frequency == "annual":
-            data = repo.get_latest_annual_data(scrip_code)
-        else:
-            data = repo.get_latest_quarterly_data(scrip_code)
-        
-        if not data:
-            return {}
 
-    # Define field sets using DB column names
-    quarterly_fields = [
-        "period",
-        "currency","level_of_rounding",
-        "sales", "expenses", "operating_profit", "opm_percentage", "other_income",
-        "cost_of_materials_consumed", "employee_benefit_expense", "other_expenses",
-        "interest", "depreciation", "profit_before_tax", "current_tax", "deferred_tax",
-        "tax", "tax_percent", "net_profit", "eps_in_rs"
-    ]
-    
-    annual_pl_fields = [
-        "period","currency","level_of_rounding",
-        "sales", "expenses", "operating_profit", "opm_percentage", "other_income",
-        "interest", "depreciation", "profit_before_tax", "tax_percent", "net_profit", "eps_in_rs"
-    ]
-    
-    annual_bs_fields = [
-        "period","currency","level_of_rounding",
-        "equity_capital", "reserves", "trade_payables_current", "borrowings",
-        "other_liabilities", "total_liabilities", "total_equity", "fixed_assets",
-        "cwip", "investments", "total_assets"
-    ]
-    
-    annual_cf_fields = [
-        "period","currency","level_of_rounding",
-        "cash_from_operating_activity", "cash_from_investing_activity", "cash_from_financing_activity"
-    ]
-    
-    # Filter data
-    if requires_historical:
-        # For historical, return the list as is, but filter fields
-        if isinstance(data, list):
-            filtered_list = []
-            for item in data:
-                filtered = {k: v for k, v in item.items() if k in quarterly_fields}
-                filtered_list.append(filtered)
-            return {scrip_code: filtered_list}
-        else:
-            return {}
-    else:
-        # For single data
-        if frequency == "quarterly":
-            fields = set(quarterly_fields)
-        elif frequency == "yearly" or frequency == "annual" or frequency=="year":
-            fields = set()
-            st = statement_type.lower() if statement_type else ""
-            if "income_statement" in st or "profit" in st or "loss" in st:
-                fields.update(annual_pl_fields)
-            if "balance_sheet" in st:
-                fields.update(annual_bs_fields)
-            if "cash_flow" in st or "cashflow" in st:
-                fields.update(annual_cf_fields)
-            if "unspecified" in st or not st:
-                fields.update(annual_pl_fields)
-                fields.update(annual_bs_fields)
-                fields.update(annual_cf_fields)
-            if not fields:
-                fields.update(annual_pl_fields)  # default to PL fields for annual
-        else:
-            fields = set()
-            st = statement_type.lower() if statement_type else ""
-            if "income_statement" in st or "profit" in st or "loss" in st:
-                fields.update(annual_pl_fields)
-            if "balance_sheet" in st:
-                fields.update(annual_bs_fields)
-            if "cash_flow" in st or "cashflow" in st:
-                fields.update(annual_cf_fields)
-            if not fields:
-                fields.update(annual_pl_fields)
-                
-        filtered = {k: v for k, v in data.items() if k in fields}
+    annual_limit = limit_records
+    quarterly_limit = limit_records
+    if last_n_years is not None:
+        annual_limit = max(limit_records, last_n_years)
+        quarterly_limit = max(limit_records, last_n_years * 4)
 
-        return {scrip_code: filtered}
+    if frequency == "both":
+        annual_results = repo.get_extraction_records(
+            scrip_code,
+            "annual",
+            period=period_filter,
+            last_n_years=last_n_years,
+            latest_only=latest_only,
+            limit=annual_limit,
+        )
+        quarterly_results = repo.get_extraction_records(
+            scrip_code,
+            "quarterly",
+            period=period_filter,
+            last_n_years=last_n_years,
+            latest_only=latest_only,
+            limit=quarterly_limit,
+        )
+        results = {
+            "annual": annual_results,
+            "quarterly": quarterly_results,
+        }
+    else:
+        extraction_type = "annual" if frequency == "annual" else "quarterly"
+        effective_limit = annual_limit if extraction_type == "annual" else quarterly_limit
+
+        if latest_only and not requires_historical and last_n_years is None:
+            latest_record = repo.get_latest_extraction(scrip_code, extraction_type)
+            if latest_record:
+                results = [latest_record]
+        else:
+            results = repo.get_extraction_records(
+                scrip_code,
+                extraction_type,
+                period=period_filter,
+                last_n_years=last_n_years,
+                latest_only=latest_only,
+                limit=effective_limit,
+            )
+
+        if not results and not latest_only:
+            latest_record = repo.get_latest_extraction(scrip_code, extraction_type)
+            if latest_record:
+                results = [latest_record]
+
+    if not results:
+        return {}
+
+    return results if len(results) > 1 else results[0]
 
 
 @router.post("/llm/target_companies", response_model=Dict[str, Any])
@@ -350,9 +365,10 @@ async def llm_target_companies(request: LLMQueryRequest):
         statement_type = intent.get("statement_type", "unspecified")
         statement_frequency = intent.get("statement_frequency", "unspecified")
         period = intent.get("period", "unspecified")
+        time_horizon = intent.get("time_horizon", "unspecified")
         get_peer = intent.get("get_peer", False)
         frequency = _determine_frequency(statement_frequency, statement_type, period)
-        print(f"Determined frequency: {frequency}, statement_frequency: {statement_frequency}, statement_type: {statement_type}, period: {period}, get_peer: {get_peer}")
+        print(f"Determined frequency: {frequency}, statement_frequency: {statement_frequency}, statement_type: {statement_type}, period: {period}, time_horizon: {time_horizon}, get_peer: {get_peer}")
 
         # Step 2: Fetch data for target companies and peers
         print("Step 2: Fetching data for target companies" + (" + peers" if get_peer else ""))
@@ -369,30 +385,36 @@ async def llm_target_companies(request: LLMQueryRequest):
 
         for key, company in target_companies.items():
             scrip_code = company.get("scrip_code")
+            company_name = company.get("company", key)
             if scrip_code:
-                data = _fetch_company_data(repo, scrip_code, frequency, statement_type, request.query)
-                all_data[company.get("company", key)] = data
-                db_fetch_log["fetched_data"][company.get("company", key)] = {
+                data = _fetch_company_data(repo, scrip_code, frequency, statement_type, period, time_horizon, request.query)
+                all_data[company_name] = data
+                db_fetch_log["fetched_data"][company_name] = {
                     "scrip_code": scrip_code,
                     "frequency": frequency,
+                    "period": period,
+                    "time_horizon": time_horizon,
                     "data": data
                 }
-                print(f"Fetched from {frequency}_table for scrip_code {scrip_code}: {data}")
+                print(f"Fetched extraction records for {company_name} ({scrip_code}): {data}")
 
             if get_peer:
                 peers = company.get("peers", {})
                 for p_key, peer in peers.items():
                     p_scrip = peer.get("scrip_code")
+                    peer_name = peer.get("company", p_key)
                     if p_scrip:
-                        p_data = _fetch_company_data(repo, p_scrip, frequency, statement_type, request.query)
-                        all_data[peer.get("company", p_key)] = p_data
-                        db_fetch_log["fetched_data"][peer.get("company", p_key)] = {
+                        p_data = _fetch_company_data(repo, p_scrip, frequency, statement_type, period, time_horizon, request.query)
+                        all_data[peer_name] = p_data
+                        db_fetch_log["fetched_data"][peer_name] = {
                             "scrip_code": p_scrip,
                             "frequency": frequency,
+                            "period": period,
+                            "time_horizon": time_horizon,
                             "is_peer": True,
                             "data": p_data
                         }
-                        print(f"Fetched from {frequency}_table for peer scrip_code {p_scrip}: {p_data}")
+                        print(f"Fetched extraction records for peer {peer_name} ({p_scrip}): {p_data}")
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log

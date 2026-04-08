@@ -1,3 +1,5 @@
+import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -17,12 +19,17 @@ class SqliteRepository:
         p.parent.mkdir(parents=True, exist_ok=True)
 
     def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        """Add a column to a table if it doesn't exist. Safely handles non-existent tables."""
         cur = self._conn.cursor()
-        cur.execute(f"PRAGMA table_info({table})")
-        columns = [row[1] for row in cur.fetchall()]
-        if column not in columns:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-            self._conn.commit()
+        try:
+            cur.execute(f"PRAGMA table_info({table})")
+            columns = [row[1] for row in cur.fetchall()]
+            if column not in columns:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                self._conn.commit()
+        except sqlite3.OperationalError:
+            # Table doesn't exist, skip silently
+            pass
 
     def _init_tables(self) -> None:
         cur = self._conn.cursor()
@@ -180,16 +187,11 @@ class SqliteRepository:
         
         self._conn.commit()
 
-        # If annual_table existed from earlier version, ensure new columns exist
-        for col_name, col_type in [
-            ("period", "TEXT"),
-            ("trade_payables_current", "REAL"),
-            ("total_equity", "REAL"),
-        ]:
-            self._ensure_column("annual_table", col_name, col_type)
+        # Ensure parsed_json column in quarterly_extractions
+        self._ensure_column("quarterly_extractions", "parsed_json", "TEXT")
         
-        # Ensure period column in quarterly_table
-        self._ensure_column("quarterly_table", "period", "TEXT")
+        # Ensure parsed_json column in annual_extractions
+        self._ensure_column("annual_extractions", "parsed_json", "TEXT")
         
         # Ensure raw_content column in xbrl_filing_table
         self._ensure_column("xbrl_filing_table", "raw_content", "TEXT")
@@ -398,45 +400,124 @@ class SqliteRepository:
         row = cur.fetchone()
         return row[0] if row else None
 
-    def get_latest_annual_data(self, scrip_code: str) -> Optional[dict]:
-        """Get the latest annual data for a scrip_code."""
+    def _load_parsed_json_row(self, row: sqlite3.Row) -> dict:
+        if not row:
+            return {}
+        row_dict = dict(row)
+        parsed = row_dict.get("parsed_json")
+        if isinstance(parsed, str):
+            try:
+                row_dict["parsed_json"] = json.loads(parsed)
+            except json.JSONDecodeError:
+                # Keep original string if it is not valid JSON
+                pass
+        return row_dict
+
+    def _extract_years_from_period_label(self, label: Optional[str]) -> list[int]:
+        if not label:
+            return []
+        return [int(year) for year in re.findall(r"\d{4}", str(label))]
+
+    def _matches_time_filter(
+        self,
+        publication_date: Optional[str],
+        period_filter: Optional[str],
+        last_n_years: Optional[int],
+    ) -> bool:
+        if last_n_years is not None:
+            return self._matches_recent_years(publication_date, last_n_years)
+
+        if not period_filter:
+            return True
+
+        period_text = period_filter.strip().lower()
+        if period_text in ["latest", "current", "recent"]:
+            return True
+
+        last_years_match = re.search(r"last\s+(\d+)\s*years?", period_text)
+        if last_years_match:
+            return self._matches_time_filter(publication_date, None, int(last_years_match.group(1)))
+
+        years = self._extract_years_from_period_label(period_text)
+        if years:
+            return any(str(year) in str(publication_date or "") for year in years)
+
+        return period_text in str(publication_date or "").lower()
+
+    def _matches_recent_years(self, publication_date: Optional[str], last_n_years: int) -> bool:
+        years = self._extract_years_from_period_label(publication_date)
+        if not years:
+            return False
+
+        current_year = datetime.utcnow().year
+        start_year = current_year - last_n_years
+        end_year = current_year - 1
+        return any(start_year <= year <= end_year for year in years)
+
+    def get_latest_extraction(self, scrip_code: str, extraction_type: str) -> Optional[dict]:
+        table = "quarterly_extractions" if extraction_type == "quarterly" else "annual_extractions"
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT * FROM annual_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            f"SELECT * FROM {table} WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
             (scrip_code,),
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return self._load_parsed_json_row(row) if row else None
+
+    def get_historical_extractions(
+        self,
+        scrip_code: str,
+        extraction_type: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        table = "quarterly_extractions" if extraction_type == "quarterly" else "annual_extractions"
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT * FROM {table} WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
+            (scrip_code, limit),
+        )
+        rows = cur.fetchall()
+        return [self._load_parsed_json_row(row) for row in rows]
+
+    def get_extraction_records(
+        self,
+        scrip_code: str,
+        extraction_type: str,
+        period: Optional[str] = None,
+        last_n_years: Optional[int] = None,
+        latest_only: bool = False,
+        limit: int = 5,
+    ) -> list[dict]:
+        table = "quarterly_extractions" if extraction_type == "quarterly" else "annual_extractions"
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT * FROM {table} WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC",
+            (scrip_code,),
+        )
+        rows = [self._load_parsed_json_row(row) for row in cur.fetchall()]
+        filtered = [
+            row for row in rows
+            if self._matches_time_filter(row.get("publication_date"), period, last_n_years)
+        ]
+        if latest_only and filtered:
+            return [filtered[0]]
+        return filtered[:limit]
+
+    def get_latest_annual_data(self, scrip_code: str) -> Optional[dict]:
+        """Get the latest annual data for a scrip_code."""
+        return self.get_latest_extraction(scrip_code, "annual")
 
     def get_latest_quarterly_data(self, scrip_code: str) -> Optional[dict]:
         """Get the latest quarterly data for a scrip_code."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM quarterly_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
-            (scrip_code,),
-        )
-        row = cur.fetchone()
-        return dict(row) if row else None
+        return self.get_latest_extraction(scrip_code, "quarterly")
 
     def get_historical_annual_data(self, scrip_code: str, limit: int = 5) -> list[dict]:
         """Get historical annual data for a scrip_code, most recent first."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM annual_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
-            (scrip_code, limit),
-        )
-        rows = cur.fetchall()
-        return [dict(row) for row in rows]
+        return self.get_historical_extractions(scrip_code, "annual", limit)
 
     def get_historical_quarterly_data(self, scrip_code: str, limit: int = 5) -> list[dict]:
         """Get historical quarterly data for a scrip_code, most recent first."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM quarterly_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
-            (scrip_code, limit),
-        )
-        rows = cur.fetchall()
-        return [dict(row) for row in rows]
+        return self.get_historical_extractions(scrip_code, "quarterly", limit)
 
     def find_peers(self, symbol: str) -> dict:
         """Find peers for the given company symbol based on annual sales +/-20% in same sector."""

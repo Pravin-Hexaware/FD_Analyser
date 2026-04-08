@@ -1,11 +1,12 @@
 from __future__ import annotations
 import io
 import json
+import os
+import re
 import sys
 from typing import Any, Dict, List, Optional
 
 import pandas as pd  # type: ignore
-import requests      # type: ignore
 
 # Hard-require lxml (prefix-aware parsing + robust HTML/iXBRL handling)
 try:
@@ -14,56 +15,12 @@ except Exception:
     print("ERROR: This script requires 'lxml'. Install with: pip install lxml", file=sys.stderr)
     sys.exit(1)
 
-# NEW: consistent CA bundle + retries
-try:
-    import certifi  # type: ignore
-    CERTIFI_PATH = certifi.where()
-except Exception:
-    CERTIFI_PATH = None
-
-from requests.adapters import HTTPAdapter  # type: ignore
-from urllib3.util.retry import Retry       # type: ignore
-import urllib3                             # type: ignore
-
 # ----------------------
 # Constants / Config
 # ----------------------
 XBRLI_NS = "http://www.xbrl.org/2003/instance"
 
-DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Connection": "keep-alive",
-}
-
-# OPTIONAL: if your company gives you a PEM for the enterprise root CA,
-# put its full path here to keep verification ON with your corporate proxy.
-ENTERPRISE_CA_BUNDLE: Optional[str] = None  # e.g., r"C:\certs\corp_root_bundle.pem"
-
-# Robust retry policy for flaky edges
-RETRY = Retry(
-    total=5,
-    connect=5,
-    read=5,
-    backoff_factor=0.8,
-    status_forcelist=(429, 500, 502, 503, 504),
-    allowed_methods=frozenset(["GET", "HEAD"]),
-    raise_on_status=False,
-    respect_retry_after_header=True,
-)
-
-def _build_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(DEFAULT_HEADERS)
-    adapter = HTTPAdapter(max_retries=RETRY, pool_connections=10, pool_maxsize=10)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    return s
+OUTPUT_DIR = "sample_outputs"
 
 # ----------------------
 # Helpers
@@ -81,39 +38,6 @@ def localname(tag: str) -> str:
 def is_html_root(root: ET._Element) -> bool:
     """True if the root looks like HTML/XHTML (iXBRL container)."""
     return localname(root.tag).lower() in {"html", "xhtml"}
-
-def fetch_url_bytes(url: str, timeout: int = 60) -> bytes:
-    """Fetch bytes from URL with browser-like headers + retries + robust TLS."""
-    s = _build_session()
-
-    # Preferred verification: enterprise bundle > certifi > system default
-    verify_opt: Optional[str | bool] = True
-    if ENTERPRISE_CA_BUNDLE:
-        verify_opt = ENTERPRISE_CA_BUNDLE
-    elif CERTIFI_PATH:
-        verify_opt = CERTIFI_PATH  # keep behavior consistent across hosts
-
-    try:
-        r = s.get(url, timeout=timeout, verify=verify_opt)
-        r.raise_for_status()
-        return r.content
-    except Exception as e:
-        # Final fallback to keep you unblocked; prints a clear warning.
-        print(
-            f"WARNING: TLS verify failed ({e}). Retrying once with verify=False. "
-            "For a secure fix, set ENTERPRISE_CA_BUNDLE to your org's root CA PEM.",
-            file=sys.stderr,
-        )
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        # Create a new session without retries for the fallback
-        s_fallback = requests.Session()
-        s_fallback.headers.update(DEFAULT_HEADERS)
-        try:
-            r = s_fallback.get(url, timeout=timeout, verify=False)
-            r.raise_for_status()
-            return r.content
-        finally:
-            s_fallback.close()
 
 def parse_xml_bytes(data: bytes) -> ET._ElementTree:
     """Parse bytes into an XML tree allowing recovery for messy iXBRL."""
@@ -136,6 +60,10 @@ def qname_for(el: ET._Element) -> str:
     loc = localname(el.tag)
     return f"{pre}:{loc}" if pre else loc
 
+def normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
 def apply_decimals(value_text: str, decimals_text: Optional[str]) -> Any:
     """
     If 'decimals' is an integer string:
@@ -149,7 +77,7 @@ def apply_decimals(value_text: str, decimals_text: Optional[str]) -> Any:
         return None
 
     # Try parse number
-    txt = value_text.strip()
+    txt = normalize_whitespace(value_text)
     if txt == "":
         return txt
 
@@ -176,7 +104,7 @@ def apply_decimals(value_text: str, decimals_text: Optional[str]) -> Any:
 
     if d < 0:
         # divide by 10^abs(d)
-        adj = num / (10 ** (abs(d)+1))
+        adj = num / (10 ** (abs(d)))
         return adj
     elif d > 0:
         # multiply by 10^d
@@ -196,40 +124,53 @@ def should_keep(el: ET._Element, only_prefix: Optional[str]) -> bool:
         return False
     if only_prefix is not None and getattr(el, "prefix", None) != only_prefix:
         return False
-    txt = (el.text or "").strip()
+    txt = normalize_whitespace(el.text or "")
     return txt != ""
 
-def walk_collect(root: ET._Element, only_prefix: Optional[str]) -> List[Dict[str, Any]]:
+def walk_collect(root: ET._Element, only_prefix: Optional[str]) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Walk the tree in document order and collect elements that pass the filter.
-    Captures qname, localname, contextRef, unitRef, decimals, value.
-    Applies 'decimals' adjustment when present and numeric.
+    Walk the tree in document order and collect elements grouped by localname.
+    For each localname, capture all occurrences with their contextRef, unitRef, decimals, value.
     """
-    out: List[Dict[str, Any]] = []
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    
     for el in root.iter():
         if not should_keep(el, only_prefix):
             continue
 
-        raw_value = (el.text or "").strip()
+        raw_value = normalize_whitespace(el.text or "")
         decimals = el.get("decimals")
         adjusted_value = apply_decimals(raw_value, decimals)
-
-        out.append({
-            #"qname": qname_for(el),
-            "localname": localname(el.tag),
+        local = localname(el.tag)
+        
+        # Build record for this occurrence
+        record = {
             "contextRef": el.get("contextRef"),
             "unitRef": el.get("unitRef"),
-            "decimals": decimals,
+            #"decimals": decimals,
             "value": adjusted_value,
-        })
-    return out
+        }
+        
+        # Group by localname
+        if local not in grouped:
+            grouped[local] = []
+        grouped[local].append(record)
+    
+    return grouped
 
 # ----------------------
 # Main Extractor
 # ----------------------
-def load_tree_from_url(url: str) -> ET._ElementTree:
-    data = fetch_url_bytes(url)
+def load_tree_from_bytes(data: bytes) -> ET._ElementTree:
+    """Parse raw XML bytes into an element tree."""
     return parse_xml_bytes(data)
+
+def extract_xbrl_data_from_bytes(content: bytes, only_prefix: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
+    """Extract XBRL data from raw XML bytes."""
+    tree = load_tree_from_bytes(content)
+    xbrl_root = get_xbrl_root(tree)
+    return walk_collect(xbrl_root, only_prefix)
+
 
 def get_xbrl_root(tree: ET._ElementTree) -> ET._Element:
     """
@@ -239,6 +180,8 @@ def get_xbrl_root(tree: ET._ElementTree) -> ET._Element:
     - Else search for it anywhere inside as a fallback
     """
     root = tree.getroot()
+    if root is None:
+        raise ValueError("Failed to parse XML: no root element found.")
     if is_html_root(root):
         return extract_xbrl_subtree_from_html(root)
 
@@ -254,12 +197,33 @@ def get_xbrl_root(tree: ET._ElementTree) -> ET._Element:
     # Some vendor docs might not use the standard ns (unlikely) — return root as last resort
     return root
 
-def extract_xbrl_data(url: str, only_prefix: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Extract XBRL data from the given URL.
-    Returns a list of dictionaries with the extracted elements.
-    """
-    tree = load_tree_from_url(url)
-    xbrl_root = get_xbrl_root(tree)
-    rows = walk_collect(xbrl_root, only_prefix)
-    return rows
+
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+    else:
+        print("Enter path to XML / XBRL file: ", end="")
+        file_path = input().strip()
+
+    if not os.path.isfile(file_path):
+        print("Invalid file path.")
+        sys.exit(1)
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    with open(file_path, "rb") as f:
+        content = f.read()
+
+    parsed_json = extract_xbrl_data_from_bytes(content, only_prefix="in-bse-fin")
+
+    out_path = os.path.join(
+        OUTPUT_DIR,
+        os.path.basename(file_path) + ".json"
+    )
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(parsed_json, f, ensure_ascii=False, separators=(',', ':'))
+
+    print(f"[OK] Structured JSON written to: {out_path}")

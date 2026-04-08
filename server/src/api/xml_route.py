@@ -11,7 +11,7 @@ class ExtractRequest(BaseModel):
 
 class ExtractResponse(BaseModel):
     count: int
-    data: List[Dict[str, Any]]
+    data: Dict[str, List[Dict[str, Any]]]
     files: Dict[str, str]
 
 @router.post("/extract/xml", response_model=ExtractResponse)

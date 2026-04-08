@@ -13,7 +13,7 @@ from repository.sqlite_repository import SqliteRepository
 router = APIRouter()
 
 
-def write_llm_log(user_query: str, llm_prompt: str, llm_response: str, db_data: Dict[str, Any], data_passed_to_llm: Dict[str, Any], final_prompt: str, final_response: str, peer_extraction_log: str = ""):
+def write_llm_log(user_query: str, llm_prompt: str, llm_response: str, db_data: Dict[str, Any], data_passed_to_llm: Dict[str, Any], final_prompt: str, final_response: str, peer_extraction_log: str = "", token_usage: Optional[Dict[str, int]] = None):
     """Write detailed LLM interaction logs to timestamped file."""
     try:
         # Create logs directory if it doesn't exist
@@ -53,6 +53,9 @@ Log File: {log_filename}
 
 8. FINAL RESPONSE FROM LLM:
 {final_response}
+
+9. TOKEN USAGE:
+{json.dumps(token_usage or {}, indent=2)}
 
 === END LOG ===
 """
@@ -423,8 +426,9 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         # Store data passed to LLM for logging
         data_passed_to_llm = all_data
 
-        answer = generate_answer_from_data(request.query, all_data, statement_type, frequency)
+        answer, tokens_used = generate_answer_from_data(request.query, all_data, statement_type, frequency)
         print("2nd LLM answer:", answer)
+        print("LLM token usage:", tokens_used)
 
         # Store final LLM response for logging
         final_llm_response = answer
@@ -446,6 +450,7 @@ Provide a clear, concise answer to the query. If data is missing for some compan
             }, default=str),
             output_data=json.dumps({
                 "llm_response": answer,
+                "token_usage": tokens_used,
                 "timestamp": datetime.now().isoformat()
             })
         )
@@ -461,12 +466,14 @@ Provide a clear, concise answer to the query. If data is missing for some compan
             data_passed_to_llm=data_passed_to_llm,
             final_prompt=final_llm_prompt,
             final_response=final_llm_response,
-            peer_extraction_log=peer_extraction_log if 'peer_extraction_log' in locals() else ""
+            peer_extraction_log=peer_extraction_log if 'peer_extraction_log' in locals() else "",
+            token_usage=tokens_used
         )
 
         return {
             "chat_id": chat_id,
-            "answer": answer
+            "answer": answer,
+            "tokens_used": tokens_used
         }
 
     except Exception as e:

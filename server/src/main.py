@@ -11,7 +11,8 @@ from api.xbrl_route import router as xbrl_router
 from api.xml_route import router as xml_router
 from api.html_route import router as html_router
 from api.xbrl_finder import router as inter_router
-from api.analysis_route import router as analysis_router
+# Skip analysis_route for now due to LLM import issues
+# from api.analysis_route import router as analysis_router
 from api.batch_xbrl_finder import router as batch_inter_router
 from api.xbrl_ws_route import router as xbrl_ws_router
 from api.xbrl_ws_hist import router as xbrl_ws_hist_router
@@ -38,8 +39,9 @@ app.include_router(xbrl_router, prefix="/api", tags=["xbrl"])
 app.include_router(xml_router, prefix="/api", tags=["xml"])
 app.include_router(html_router, prefix="/api", tags=["html"])
 app.include_router(inter_router, prefix="/api", tags=["inter"])
+# Skip analysis_route
+# app.include_router(analysis_router, prefix="/api", tags=["analysis"])
 app.include_router(batch_inter_router, prefix="/api", tags=["batch_inter"])
-app.include_router(analysis_router, prefix="/api", tags=["analysis"])
 app.include_router(xbrl_ws_router, prefix="/api", tags=["xbrl_ws"])
 app.include_router(xbrl_ws_hist_router, prefix="/api", tags=["xbrl_ws_hist"])
 app.include_router(xbrl_annual_router, prefix="/api", tags=["xbrl_annual"])

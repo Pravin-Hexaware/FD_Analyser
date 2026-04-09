@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -10,6 +10,59 @@ from repository.sqlite_repository import SqliteRepository
 from utils.llm_testing import get_azure_chat_openai
 
 _LLM: Any = None
+
+HARDCODED_PEERS: Dict[str, List[str]] = {
+    "tcs": ["infy", "wipro"],
+    "infy": ["tcs", "wipro"],
+    "wipro": ["infy","hcltech"],
+     "hcltech": ["tcs", "infy"],
+     "ltim": ["wipro","hcltech"],
+     "ofss": ["tcs","hcltech"],
+    "hext":["coforge","ltim"],
+    "coforge":["hext","ltim"],
+    "axisbank": ["hdfcbank", "icicibank"],
+    "hdfcbank": ["axisbank", "sbin"],
+    "icicibank": [ "kotakbank", "sbin"],
+    "kotakbank": [ "hdfcbank", "icicibank"],
+    "sbin": ["axisbank", "hdfcbank"],
+    "reliance": ["adaniports", "indusindbank"],
+    "adaniports": ["reliance", "itc"],
+    "indusindbank": ["lt", "itc"],
+}
+
+
+def _get_hardcoded_peers(symbol: str) -> Optional[List[str]]:
+    normalized = symbol.strip().lower() if symbol else ""
+    return HARDCODED_PEERS.get(normalized)
+
+
+def _get_company_info_by_symbol(repo: SqliteRepository, symbol: str) -> Dict[str, Any]:
+    cur = repo._conn.cursor()
+    cur.execute(
+        "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(symbol) = ? LIMIT 1",
+        (symbol.strip().lower(),),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {"symbol": symbol, "scrip_code": None, "company": symbol, "industry": None}
+    return {
+        "symbol": row[0],
+        "scrip_code": row[1],
+        "company": row[2],
+        "industry": row[3],
+    }
+
+
+def _build_peer_list_from_hardcoded(repo: SqliteRepository, symbol: str) -> List[Dict[str, Any]]:
+    peer_symbols = _get_hardcoded_peers(symbol)
+    if not peer_symbols:
+        return []
+
+    peers = []
+    for peer_symbol in peer_symbols:
+        peer_info = _get_company_info_by_symbol(repo, peer_symbol)
+        peers.append(peer_info)
+    return peers
 
 
 def _get_llm() -> Any:
@@ -20,6 +73,26 @@ def _get_llm() -> Any:
         if _LLM is None:
             raise RuntimeError("Failed to initialize AzureChatOpenAI from utils.llm_testing")
     return _LLM
+
+
+def _try_parse_numeric_value(raw_value: Any) -> Optional[float]:
+    if raw_value is None:
+        return None
+
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+
+    if isinstance(raw_value, str):
+        cleaned = raw_value.replace(",", "").replace("₹", "").replace("INR", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            try:
+                return float(re.sub(r"[^0-9.\-]", "", cleaned))
+            except ValueError:
+                return None
+
+    return None
 
 
 def _invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int = 800) -> Any:
@@ -216,163 +289,190 @@ def generate_analysis_report(records: List[Dict[str, Any]]) -> Tuple[str, Dict[s
     return report, llm_response_dict 
 
 
+def _try_parse_numeric_value(raw_value: Any) -> Optional[float]:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+    if isinstance(raw_value, str):
+        cleaned = raw_value.replace(",", "").replace("₹", "").replace("INR", "").strip()
+        match = re.search(r"[-+]?[0-9]*\.?[0-9]+", cleaned)
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def _find_value_by_keywords(data: Any, keywords: List[str]) -> Optional[float]:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            key_text = str(key).lower()
+            if any(keyword in key_text for keyword in keywords):
+                parsed = _try_parse_numeric_value(value)
+                if parsed is not None:
+                    return parsed
+            nested = _find_value_by_keywords(value, keywords)
+            if nested is not None:
+                return nested
+    elif isinstance(data, list):
+        for item in data:
+            found = _find_value_by_keywords(item, keywords)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_sales_from_json(parsed_json: Any) -> Optional[float]:
+    return _find_value_by_keywords(parsed_json, ["sales", "revenue", "net sales", "total revenue"])
+
+
 def Get_Peers_from_DB(input_symbols: List[str]) -> Tuple[Dict[str, List[Dict[str, Any]]], str]:
     """Get peers for each input symbol based on sales range and sector matching.
-    
+
     For each symbol:
     1. Get scrip_code from company_table using symbol
-    2. Get annual sales from annual_table using scrip_code
-    3. Calculate ±15% sales range
+    2. Get latest annual extraction from annual_extractions using scrip_code
+    3. Calculate ±20% sales range
     4. Get sector from company_table
     5. Find all companies in same sector
     6. Filter companies whose latest sales fall within the range
-    7. Handle different denominations (lakhs, crores, millions)
-    
+
     Returns: ({symbol: [peer_companies]}, log_messages)
     """
-    def normalize_sales_value(sales: float, level_of_rounding: str) -> float:
-        """Normalize sales value to rupees based on denomination."""
-        if not level_of_rounding:
-            return sales  # Assume already in rupees
-        
-        rounding_lower = level_of_rounding.lower().strip()
-        
-        if 'lakh' in rounding_lower or 'lakhs' in rounding_lower:
-            return sales * 100000  # 1 lakh = 100,000 rupees
-        elif 'crore' in rounding_lower or 'crores' in rounding_lower:
-            return sales * 10000000  # 1 crore = 10,000,000 rupees
-        elif 'million' in rounding_lower or 'millions' in rounding_lower:
-            return sales * 1000000  # 1 million = 1,000,000 rupees
-        elif 'thousand' in rounding_lower or 'thousands' in rounding_lower:
-            return sales * 1000  # 1 thousand = 1,000 rupees
-        else:
-            return sales  # Assume already in rupees or unknown denomination
-    
     if not input_symbols:
         return {}, "LOG: No input symbols provided for peer extraction"
-    
+
     repo = SqliteRepository()
     peers_result = {}
     log_messages = []
-    
+
     log_messages.append(f"LOG: Starting peer extraction for symbols: {input_symbols}")
-    
+
     for symbol in input_symbols:
         try:
             log_messages.append(f"LOG: Processing peer extraction for symbol: {symbol}")
             peers_result[symbol] = []
-            
-            # Step 1: Get scrip_code from company_table using symbol
-            log_messages.append(f"LOG: Step 1 - Getting scrip_code for symbol {symbol} from company_table")
+
+            log_messages.append(f"LOG: Step 1 - Getting company details for symbol {symbol}")
             cur = repo._conn.cursor()
             cur.execute(
-                "SELECT scrip_code, sector FROM company_table WHERE symbol = ? LIMIT 1",
+                "SELECT scrip_code, sector, company_name FROM company_table WHERE symbol = ? LIMIT 1",
                 (symbol,)
             )
             company_row = cur.fetchone()
-            
+
             if not company_row:
                 log_messages.append(f"LOG: No company found in company_table for symbol {symbol}")
                 continue
-                
+
             target_scrip_code = company_row[0]
             target_sector = company_row[1]
-            
+            target_company_name = company_row[2]
+
             log_messages.append(f"LOG: Found scrip_code {target_scrip_code} and sector {target_sector} for symbol {symbol}")
-            
-            # Step 2: Get annual sales from annual_table using scrip_code
-            log_messages.append(f"LOG: Step 2 - Getting annual data for scrip_code {target_scrip_code} from annual_table")
-            target_annual = repo.get_latest_annual_data(target_scrip_code)
-            if not target_annual or 'sales' not in target_annual:
-                log_messages.append(f"LOG: No annual data found for scrip_code {target_scrip_code}")
+
+            hardcoded_peers = _build_peer_list_from_hardcoded(repo, symbol)
+            if hardcoded_peers:
+                log_messages.append(f"LOG: Using hardcoded peers for {symbol}: {[p['symbol'] for p in hardcoded_peers]}")
+                peers_result[symbol] = hardcoded_peers
                 continue
-                
-            target_sales_raw = float(target_annual['sales'])
-            target_level = target_annual.get('level_of_rounding', '')
-            target_sales_normalized = normalize_sales_value(target_sales_raw, target_level)
-            
-            log_messages.append(f"LOG: Found sales data - raw: {target_sales_raw}, level: {target_level}, normalized: {target_sales_normalized}")
-            
-            # Step 3: Calculate sales range (±15%) on normalized values
-            min_sales_normalized = target_sales_normalized * 0.00  # -35%
-            max_sales_normalized = target_sales_normalized * 10.00  # +35%
-            
-            log_messages.append(f"LOG: Calculated sales range for {symbol}: {min_sales_normalized} to {max_sales_normalized} rupees")
-            
-            # Step 4: Get all companies in the same sector
-            log_messages.append(f"LOG: Step 4 - Finding all companies in sector {target_sector}")
-            cur = repo._conn.cursor()
+
+            log_messages.append(f"LOG: Step 2 - Getting latest annual extraction for scrip_code {target_scrip_code}")
+            target_annual = repo.get_latest_annual_data(target_scrip_code)
+            if not target_annual:
+                log_messages.append(f"LOG: No annual extraction found for scrip_code {target_scrip_code}")
+                continue
+
+            target_sales_raw = _extract_sales_from_json(target_annual.get("parsed_json"))
+            if target_sales_raw is None:
+                log_messages.append(f"LOG: No sales value found for target company {symbol} in parsed JSON")
+                continue
+
+            target_sales_normalized = float(target_sales_raw)
+            log_messages.append(
+                f"LOG: Found sales data for {symbol} - normalized sales: {target_sales_normalized}"
+            )
+
+            min_sales_normalized = target_sales_normalized * 0.8
+            max_sales_normalized = target_sales_normalized * 1.2
+
+            log_messages.append(
+                f"LOG: Calculated sales range for {symbol}: {min_sales_normalized} to {max_sales_normalized} rupees"
+            )
+
+            log_messages.append(f"LOG: Step 3 - Finding all companies in sector {target_sector}")
             cur.execute(
                 "SELECT symbol, scrip_code, company_name FROM company_table WHERE sector = ?",
-                (target_sector,)
+                (target_sector,),
             )
             sector_companies = cur.fetchall()
-            
             log_messages.append(f"LOG: Found {len(sector_companies)} companies in sector {target_sector}")
-            
-            # Step 5: Filter companies whose latest sales fall within range
-            log_messages.append(f"LOG: Step 5 - Filtering companies by sales range")
+
             peer_candidates = []
-            
             for company_row in sector_companies:
                 company_symbol = company_row[0]
                 company_scrip = company_row[1]
                 company_name = company_row[2]
-                
-                # Skip the target company itself
+
                 if company_symbol == symbol or company_scrip == target_scrip_code:
                     log_messages.append(f"LOG: Skipping target company {company_symbol} ({company_scrip})")
                     continue
-                
-                # Get latest annual data for this company using scrip_code
+
                 company_annual = repo.get_latest_annual_data(company_scrip)
-                if not company_annual or 'sales' not in company_annual:
-                    log_messages.append(f"LOG: No annual data found for peer candidate {company_symbol} ({company_scrip})")
+                if not company_annual:
+                    log_messages.append(
+                        f"LOG: No annual extraction found for peer candidate {company_symbol} ({company_scrip})"
+                    )
                     continue
-                
-                company_sales_raw = float(company_annual['sales'])
-                company_level = company_annual.get('level_of_rounding', '')
-                company_sales_normalized = normalize_sales_value(company_sales_raw, company_level)
-                
-                log_messages.append(f"LOG: Checking peer candidate {company_symbol}: sales={company_sales_raw} {company_level} = {company_sales_normalized} rupees")
-                
-                # Check if normalized sales fall within range
+
+                company_sales_raw = _extract_sales_from_json(company_annual.get("parsed_json"))
+                if company_sales_raw is None:
+                    log_messages.append(
+                        f"LOG: No sales value found for peer candidate {company_symbol} ({company_scrip})"
+                    )
+                    continue
+
+                company_sales_normalized = float(company_sales_raw)
+                log_messages.append(
+                    f"LOG: Checking peer candidate {company_symbol}: normalized sales = {company_sales_normalized}"
+                )
+
                 if min_sales_normalized <= company_sales_normalized <= max_sales_normalized:
                     peer_info = {
                         "company": company_name,
                         "symbol": company_symbol,
                         "scrip_code": company_scrip,
                         "industry": target_sector,
-                        "sales": company_sales_raw,  # Keep original value for display
-                        "level_of_rounding": company_level,  # Keep denomination info
-                        "normalized_sales": company_sales_normalized  # Include normalized value
+                        "sales": company_sales_raw,
+                        "normalized_sales": company_sales_normalized,
                     }
                     peer_candidates.append(peer_info)
-                    log_messages.append(f"LOG: ✓ Added peer: {company_symbol} (sales within range)")
+                    log_messages.append(f"LOG: ✓ Added peer: {company_symbol}")
                 else:
-                    log_messages.append(f"LOG: ✗ Rejected peer: {company_symbol} (sales outside range)")
-            
-            # Step 6: Limit to top 5 peers by sales proximity to target
+                    log_messages.append(f"LOG: ✗ Rejected peer: {company_symbol}")
+
             if len(peer_candidates) > 5:
-                log_messages.append(f"LOG: Step 6 - Limiting to top 5 peers by sales proximity")
-                # Sort by sales proximity to target (normalized)
-                peer_candidates.sort(key=lambda x: abs(x['normalized_sales'] - target_sales_normalized))
+                log_messages.append(f"LOG: Step 4 - Limiting to top 5 peers by sales proximity")
+                peer_candidates.sort(
+                    key=lambda x: abs(x["normalized_sales"] - target_sales_normalized)
+                )
                 peers_result[symbol] = peer_candidates[:5]
-                log_messages.append(f"LOG: Selected top 5 peers for {symbol}")
             else:
                 peers_result[symbol] = peer_candidates
-                log_messages.append(f"LOG: Selected all {len(peer_candidates)} peers for {symbol}")
-            
-            log_messages.append(f"LOG: Completed peer extraction for {symbol}: found {len(peers_result[symbol])} peers")
-            
+
+            log_messages.append(
+                f"LOG: Completed peer extraction for {symbol}: found {len(peers_result[symbol])} peers"
+            )
+
         except Exception as e:
             log_messages.append(f"LOG: Error getting peers for {symbol}: {str(e)}")
             continue
-    
+
     repo.close()
-    log_messages.append(f"LOG: Peer extraction completed for all symbols")
-    
-    # Join all log messages with newlines
+    log_messages.append("LOG: Peer extraction completed for all symbols")
+
     full_log = "\n".join(log_messages)
     return peers_result, full_log
 
@@ -388,15 +488,16 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
     system_prompt = (
         "You are a Senior Financial Analyst and Data Extraction Expert. Your task is to analyze a user query for financial data extraction.\n\n"
         "First, break down the query into key components:\n"
-        "- **statement_frequency**: 'quarterly', 'annual', or 'unspecified'.\n"
+        "- **statement_frequency**: 'quarterly', 'annual', 'both', or 'unspecified'.\n"
         "- **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.\n"
-        "- **period**: Specific period like 'latest quarter', 'Q3 2023', or 'unspecified'.\n"
+        "- **period**: Specific period like 'latest quarter', 'Q3 2023', 'FY2024', or 'unspecified'.\n"
+        "- **time_horizon**: Normalized timeframe such as 'latest', '2years', '5years', or 'unspecified'.\n"
         "- **target_companies**: List of company names mentioned.\n"
         "- **industries**: Any industries mentioned.\n"
         "- **other_requirements**: Any other specific requirements or questions.\n"
-        "- **get_peer**: Set to true if the query requires peer company analysis/comparison, false otherwise.\n\n"
+        "- **get_peer**: Set to true ONLY if the query explicitly asks for peers, competitors, industry comparisons, or benchmark analysis. Set to false if the query mentions specific companies to compare directly.\n\n"
         "Then, based on the breakdown, generate a structured JSON response identifying target companies.\n"
-        "If get_peer is true, the system will automatically fetch appropriate peers from the database.\n"
+        "If get_peer is true, the system will first apply hardcoded peer mappings and then fall back to database peer lookup if needed.\n"
         "Ensure scrip_codes are accurate BSE codes.\n\n"
         "Return strictly valid JSON with no additional text.\n\n"
         "JSON Schema:\n"
@@ -405,6 +506,7 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
         "    \"statement_frequency\": \"string\",\n"
         "    \"statement_type\": \"string\",\n"
         "    \"period\": \"string\",\n"
+        "    \"time_horizon\": \"string\",\n"
         "    \"get_peer\": boolean\n"
         "  },\n"
         "  \"target_companies\": {\n"
@@ -462,85 +564,223 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
     return parsed, system_prompt, peer_extraction_log if 'peer_extraction_log' in locals() else ""
 
 
+def _format_period_from_publication_date(publication_date: Optional[str]) -> str:
+    """Extract and format the period from publication_date field.
+    
+    Handles formats like:
+    - 'Q1 FY19 (Apr-Jun)' -> 'June 2019'
+    - 'Q4 2025-26 (Jan-Mar)' -> 'March 2026'
+    - 'DQ2025-2026' -> '2025-2026'
+    - Direct date strings
+    """
+    if not publication_date:
+        return "Unspecified"
+    
+    pub_str = str(publication_date).strip()
+    
+    # Month mapping
+    months = {
+        'Apr': 'April', 'Jan': 'January', 'Feb': 'February', 'Mar': 'March',
+        'May': 'May', 'Jun': 'June', 'Jul': 'July', 'Aug': 'August',
+        'Sep': 'September', 'Oct': 'October', 'Nov': 'November', 'Dec': 'December'
+    }
+    
+    # Try to extract (Month, Year) from parentheses format with fiscal year range
+    # Example: "Q4 2025-26 (Jan-Mar)" should return "March 2026", "Q3 2025-26 (Oct-Dec)" should return "December 2025"
+    paren_match = re.search(r'\(([A-Z][a-z]{2})-([A-Z][a-z]{2})\)', pub_str)
+    if paren_match:
+        month_str = paren_match.group(2)  # Get end month (e.g., 'Mar')
+        # Try to extract fiscal year range like "2025-26"
+        fy_match = re.search(r'(\d{4})-(\d{2,4})', pub_str)
+        if fy_match:
+            start_year = fy_match.group(1)
+            end_year_part = fy_match.group(2)
+            # Handle both "2025-26" and "2025-2026" formats
+            if len(end_year_part) == 2:
+                end_year = start_year[:2] + end_year_part  # "2025-26" -> "2026"
+            else:
+                end_year = end_year_part
+            
+            # Fiscal year: Apr-Jun(Q1), Jul-Sep(Q2), Oct-Dec(Q3) are in start_year
+            # Jan-Mar(Q4) is in end_year
+            if month_str in ['Jan', 'Feb', 'Mar']:
+                year_to_use = end_year
+            else:
+                year_to_use = start_year
+            
+            month_name = months.get(month_str, month_str)
+            return f"{month_name} {year_to_use}"
+        else:
+            # Fallback: extract first 4-digit year
+            year_match = re.search(r'(\d{4})', pub_str)
+            if year_match:
+                year = year_match.group(1)
+                month_name = months.get(month_str, month_str)
+                return f"{month_name} {year}"
+    
+    # Try format like 'DQ2025-2026' -> extract just the period
+    if 'D' in pub_str and '-' in pub_str:
+        year_match = re.search(r'(\d{4})-(\d{4})', pub_str)
+        if year_match:
+            return f"{year_match.group(1)}-{year_match.group(2)}"
+    
+    # Fallback: try to find any year
+    year_match = re.search(r'(\d{4})', pub_str)
+    if year_match:
+        return pub_str  # Return as-is if it contains a year
+    
+    return pub_str  # Return original if no pattern matched
+
+
 def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> tuple[str, dict[str, int]]:
     """Use LLM to generate an answer based on the query and fetched data.
 
     Returns a tuple of (answer_text, token_usage).
     """
+    # Pre-process data to format periods nicely
+    formatted_data = data
+    if isinstance(data, list):
+        formatted_data = []
+        for record in data:
+            formatted_record = record.copy() if isinstance(record, dict) else record
+            if isinstance(formatted_record, dict) and "publication_date" in formatted_record:
+                formatted_record["Period"] = _format_period_from_publication_date(
+                    formatted_record.get("publication_date")
+                )
+            formatted_data.append(formatted_record)
+    elif isinstance(data, dict):
+        formatted_data = data.copy()
+        # If it has a publication_date, add formatted Period
+        if "publication_date" in formatted_data:
+            formatted_data["Period"] = _format_period_from_publication_date(
+                formatted_data.get("publication_date")
+            )
+    
     system_prompt = f"""
-    You are a Senior Financial Analyst creating a comprehensive, detailed research report. Based on the user's query and provided financial data, generate an extensive analysis report in Markdown format.
+You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
 
-    Always structure your response as a professional financial report with:
+Generate a detailed, professional financial analysis report in Markdown format. The report should comprehensively analyze ALL available financial data, metrics, and parameters provided in the input, not just a subset. Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data.
 
-    # Report Title
-    Use a concise, professional title based on the company name(s) and statement type.
-    Do NOT include specific periods (e.g., quarters, years) in the title.
+The report should be extremely detailed and thorough, suitable for board-level strategic discussions, investment committee reviews, and executive decision-making. Length is not a constraint - provide exhaustive analysis that covers all aspects of the financial performance, risks, opportunities, and implications.
 
-    ## Executive Summary
-    Brief overview of the company's financial position.
+# Comprehensive Financial Analysis Report
 
-    ## Financial Performance Overview
-    Present key financial metrics in a well-formatted table.
+## I. Executive Summary
+Provide a comprehensive executive overview synthesizing key findings across all periods and companies:
+- Strategic financial performance highlights and trajectory
+- Critical profitability, efficiency, and growth metrics
+- Major risk indicators and opportunities
+- Strategic implications for business direction and governance
+- Key recommendations for immediate executive attention
 
-    IMPORTANT:
-    - Each table MUST include a dedicated **Period** column.
-    - Period values will be provided in the input data for each company and record.
-    - Do NOT repeat period information in section headers or narrative titles.
-    - If multiple periods exist for a company, represent each period as a separate row in the table.
+## II. Company Overview and Strategic Context
+For each company analyzed:
+- Business model and industry positioning
+- Strategic objectives and market dynamics
+- Key value drivers and competitive advantages
+- Regulatory and macroeconomic context implications
 
-    ## Detailed Analysis
-    - Revenue and profitability analysis
-    - Cost structure breakdown
-    - Margin analysis
-    - Tax efficiency
-    - EPS and shareholder returns
+## III. Comprehensive Financial Performance Analysis
+Conduct exhaustive period-by-period and cross-company analysis of ALL financial metrics available:
 
-    Reference periods explicitly within tables and inline narrative where relevant
-    (e.g., “In Q3 FY23, revenue increased…”), but not in headings.
+### Revenue Analysis
+- Detailed revenue composition and sources
+- Revenue growth drivers and sustainability
+- Geographic and segment revenue breakdown (if available)
+- Revenue quality indicators and recurring vs. one-time components
 
-    ## Key Financial Ratios and Metrics
-    Calculate and interpret important ratios (where data allows):
-    - Profit margins
-    - Return on assets/equity
-    - Debt ratios
-    - Efficiency ratios
+### Profitability Deep Dive
+- Operating profit margins: Trends, drivers, and sustainability
+- Net profit margins: Components and influencing factors
+- EBITDA margins and operating efficiency metrics
+- Gross margins by business segment or product line
 
-    Ratios should be calculated per period when multiple periods are available,
-    and the period must be clearly indicated in the output tables.
+### Cost Structure Analysis
+- Detailed cost breakdown: Fixed vs. variable costs
+- Major expense categories: Personnel, R&D, marketing, administrative
+- Cost optimization opportunities and efficiency trends
+- Cost-to-revenue ratios and benchmarking
 
-    ## Comparative Analysis
-    If multiple companies or multiple periods are included, provide detailed comparisons,
-    clearly distinguishing results by company and period.
+### Balance Sheet Analysis
+- Asset quality and composition
+- Liability structure and debt management
+- Working capital efficiency and cash conversion cycles
+- Capital structure optimization and financial leverage
 
-    ## Strengths and Weaknesses
-    SWOT-style analysis based strictly on the provided financial data.
+### Cash Flow Analysis
+- Operating cash flow generation and quality
+- Investment and financing cash flows
+- Free cash flow trends and utilization
+- Cash flow forecasting implications
 
-    ## Industry Context and Positioning
-    Place the company's performance in industry context, referencing the relevant periods
-    only where supported by the provided data.
+### Key Financial Ratios and Metrics
+- Liquidity ratios: Current ratio, quick ratio, cash ratios
+- Solvency ratios: Debt-to-equity, debt-to-assets, interest coverage
+- Efficiency ratios: Asset turnover, inventory turnover, receivables days
+- Profitability ratios: ROA, ROE, ROCE, EPS trends
+- Valuation metrics: P/E, P/B, EV/EBITDA (if market data available)
 
-    ## Future Outlook and Recommendations
-    Insights on growth prospects and investment considerations,
-    clearly separating historical facts from forward-looking interpretation.
+## IV. Trend Analysis and Forecasting Insights
+- Multi-period trend analysis with statistical significance
+- Growth acceleration/deceleration patterns
+- Cyclical vs. structural performance changes
+- Forward-looking indicators from historical trends
 
-    Use {frequency} data for {statement_type.replace('_', ' ')} analysis.
-    Include all available companies, metrics, and periods present in the input data.
+## V. Comparative Analysis
+- Peer group comparisons across all metrics
+- Industry benchmarking and positioning
+- Competitive advantages and disadvantages
+- Market share and growth relative to peers
 
-    CRITICAL:
-    - Do not invent, extrapolate, or generate mock historical data.
-    - Use only the financial data explicitly provided in the input.
-    - If only one period is available, state that trend analysis is limited.
-    - If historical arrays are provided, use them to calculate actual trends or CAGRs.
-    - If data is missing for a metric or period, mark it clearly and continue analysis based on available data.
+## VI. Risk Assessment and Mitigation
+- Financial risk factors: Liquidity, solvency, currency, interest rate
+- Operational risks: Cost pressures, margin compression, supply chain
+- Market risks: Competition, demand fluctuations, regulatory changes
+- Strategic risks: Market positioning, technology disruption, M&A implications
+- Quantitative risk metrics and stress testing insights
 
-    Format the response in clean Markdown with structured sections and tables.
-    Use proper numeric formatting (crores, millions, etc.).
-    Return only the Markdown report content, with no additional explanations outside the report structure.
+## VII. Strategic Implications and Recommendations
+- Strategic opportunities identified from financial trends
+- Areas requiring management intervention
+- Capital allocation recommendations
+- Risk mitigation strategies
+- Governance and compliance considerations
+- Long-term value creation strategies
+
+## VIII. Data Quality and Limitations
+- Assessment of data completeness and reliability
+- Missing data impacts on analysis
+- Assumptions and estimation methodologies used
+- Recommendations for improved financial reporting
+
+## IX. Appendices
+- Detailed financial statements and schedules
+- Ratio calculations and trend charts
+- Peer comparison tables
+- Statistical analysis and regression insights
+- Glossary of terms and methodologies
+
+---
+
+**Analysis Parameters:** {frequency} financial statements | Focus: {statement_type.replace('_', ' ')} | Data Scope: Comprehensive analysis of all available financial parameters
+
+**CRITICAL REQUIREMENTS:**
+1. Analyze EVERY financial metric and parameter present in the provided data - do not limit to predefined fields
+2. Provide exhaustive, board-level analysis with strategic implications
+3. Use precise numerical references with proper formatting (INR crores/lakhs, percentages, ratios)
+4. Identify trends, drivers, risks, and opportunities across all data dimensions
+5. Maintain professional, executive-level tone suitable for C-suite and board presentations
+6. Flag data limitations and provide conservative interpretations where uncertainty exists
+7. Generate actionable insights that drive strategic decision-making
+8. Structure report for easy navigation and executive summary consumption
+9. Include quantitative analysis with statistical context where applicable
+10. Provide forward-looking strategic recommendations based on historical trends
     """
 
-    user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(data, indent=2)}"
+    user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
 
     response = _invoke_llm(system_prompt, user_prompt, max_tokens=2500)
+
     token_usage = _extract_token_usage(response)
     normalized = _normalize_llm_response(response)
     return normalized.get("content", "No answer generated."), token_usage

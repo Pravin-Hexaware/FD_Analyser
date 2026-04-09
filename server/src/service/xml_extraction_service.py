@@ -7,6 +7,9 @@ import sys
 from typing import Any, Dict, List, Optional
 
 import pandas as pd  # type: ignore
+import requests
+from requests.exceptions import SSLError
+from urllib3.exceptions import InsecureRequestWarning
 
 # Hard-require lxml (prefix-aware parsing + robust HTML/iXBRL handling)
 try:
@@ -14,6 +17,9 @@ try:
 except Exception:
     print("ERROR: This script requires 'lxml'. Install with: pip install lxml", file=sys.stderr)
     sys.exit(1)
+
+# Disable SSL warnings
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
 # ----------------------
 # Constants / Config
@@ -170,6 +176,28 @@ def extract_xbrl_data_from_bytes(content: bytes, only_prefix: Optional[str] = No
     tree = load_tree_from_bytes(content)
     xbrl_root = get_xbrl_root(tree)
     return walk_collect(xbrl_root, only_prefix)
+
+
+def extract_xbrl_data(url: str, only_prefix: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
+    """Extract XBRL data from a URL."""
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+        }
+        response = requests.get(url, headers=headers, timeout=30, verify=False)
+        response.raise_for_status()
+        content = response.content
+        return extract_xbrl_data_from_bytes(content, only_prefix)
+    except Exception as e:
+        print(f"Error fetching or parsing XBRL from {url}: {e}", file=sys.stderr)
+        return {}
 
 
 def get_xbrl_root(tree: ET._ElementTree) -> ET._Element:

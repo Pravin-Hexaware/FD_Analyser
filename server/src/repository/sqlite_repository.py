@@ -1,7 +1,9 @@
+import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 
 class SqliteRepository:
@@ -17,12 +19,17 @@ class SqliteRepository:
         p.parent.mkdir(parents=True, exist_ok=True)
 
     def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        """Add a column to a table if it doesn't exist. Safely handles non-existent tables."""
         cur = self._conn.cursor()
-        cur.execute(f"PRAGMA table_info({table})")
-        columns = [row[1] for row in cur.fetchall()]
-        if column not in columns:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-            self._conn.commit()
+        try:
+            cur.execute(f"PRAGMA table_info({table})")
+            columns = [row[1] for row in cur.fetchall()]
+            if column not in columns:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                self._conn.commit()
+        except sqlite3.OperationalError:
+            # Table doesn't exist, skip silently
+            pass
 
     def _init_tables(self) -> None:
         cur = self._conn.cursor()
@@ -180,16 +187,11 @@ class SqliteRepository:
         
         self._conn.commit()
 
-        # If annual_table existed from earlier version, ensure new columns exist
-        for col_name, col_type in [
-            ("period", "TEXT"),
-            ("trade_payables_current", "REAL"),
-            ("total_equity", "REAL"),
-        ]:
-            self._ensure_column("annual_table", col_name, col_type)
+        # Ensure parsed_json column in quarterly_extractions
+        self._ensure_column("quarterly_extractions", "parsed_json", "TEXT")
         
-        # Ensure period column in quarterly_table
-        self._ensure_column("quarterly_table", "period", "TEXT")
+        # Ensure parsed_json column in annual_extractions
+        self._ensure_column("annual_extractions", "parsed_json", "TEXT")
         
         # Ensure raw_content column in xbrl_filing_table
         self._ensure_column("xbrl_filing_table", "raw_content", "TEXT")
@@ -398,45 +400,272 @@ class SqliteRepository:
         row = cur.fetchone()
         return row[0] if row else None
 
-    def get_latest_annual_data(self, scrip_code: str) -> Optional[dict]:
-        """Get the latest annual data for a scrip_code."""
+    def _load_parsed_json_row(self, row: sqlite3.Row) -> dict:
+        if not row:
+            return {}
+        row_dict = dict(row)
+        parsed = row_dict.get("parsed_json")
+        if isinstance(parsed, str):
+            try:
+                row_dict["parsed_json"] = json.loads(parsed)
+            except json.JSONDecodeError:
+                # Keep original string if it is not valid JSON
+                pass
+        return row_dict
+
+    def _extract_years_from_period_label(self, label: Optional[str]) -> list[int]:
+        if not label:
+            return []
+        return [int(year) for year in re.findall(r"\d{4}", str(label))]
+
+    def _matches_time_filter(
+        self,
+        publication_date: Optional[str],
+        period_filter: Optional[str],
+        last_n_years: Optional[int],
+    ) -> bool:
+        if last_n_years is not None:
+            return self._matches_recent_years(publication_date, last_n_years)
+
+        if not period_filter:
+            return True
+
+        period_text = period_filter.strip().lower()
+        if period_text in ["latest", "current", "recent", "latest quarter", "latest year", "latest financial year", "last year", "last financial year", "previous year", "previous financial year"]:
+            return True
+
+        last_years_match = re.search(r"last\s+(\d+)\s*years?", period_text)
+        if last_years_match:
+            return self._matches_time_filter(publication_date, None, int(last_years_match.group(1)))
+
+        years = self._extract_years_from_period_label(period_text)
+        if years:
+            return any(str(year) in str(publication_date or "") for year in years)
+
+        return period_text in str(publication_date or "").lower()
+
+    def _matches_recent_years(self, publication_date: Optional[str], last_n_years: int) -> bool:
+        years = self._extract_years_from_period_label(publication_date)
+        if not years:
+            return False
+
+        current_year = datetime.utcnow().year
+        start_year = current_year - last_n_years
+        end_year = current_year - 1
+        return any(start_year <= year <= end_year for year in years)
+
+    def get_latest_extraction(self, scrip_code: str, extraction_type: str) -> Optional[dict]:
+        table = "quarterly_extractions" if extraction_type == "quarterly" else "annual_extractions"
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT * FROM annual_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            f"SELECT * FROM {table} WHERE scrip_code = ?",
             (scrip_code,),
         )
-        row = cur.fetchone()
-        return dict(row) if row else None
+        rows = [self._load_parsed_json_row(row) for row in cur.fetchall()]
+        
+        if not rows:
+            return None
+        
+        # Sort by reporting end date (most recent first), fallback to created_at and id
+        def sort_key(row):
+            end_date = self._extract_reporting_end_date(row.get("parsed_json"), row.get("publication_date"))
+            if end_date:
+                return (0, end_date)  # 0 to prioritize rows with dates
+            created_at = row.get("created_at", "")
+            row_id = row.get("id", 0)
+            return (1, created_at, row_id)  # Fallback sorting
+        
+        rows.sort(key=sort_key, reverse=True)
+        
+        return rows[0]
+
+    def get_historical_extractions(
+        self,
+        scrip_code: str,
+        extraction_type: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        table = "quarterly_extractions" if extraction_type == "quarterly" else "annual_extractions"
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT * FROM {table} WHERE scrip_code = ?",
+            (scrip_code,),
+        )
+        rows = [self._load_parsed_json_row(row) for row in cur.fetchall()]
+        
+        # Sort by reporting end date (most recent first), fallback to created_at and id
+        def sort_key(row):
+            end_date = self._extract_reporting_end_date(row.get("parsed_json"))
+            if end_date:
+                return (0, end_date)  # 0 to prioritize rows with dates
+            created_at = row.get("created_at", "")
+            row_id = row.get("id", 0)
+            return (1, created_at, row_id)  # Fallback sorting
+        
+        rows.sort(key=sort_key, reverse=True)
+        
+        return rows[:limit]
+
+    def _extract_reporting_end_date(self, parsed_json: Any, publication_date: str = None) -> Optional[datetime]:
+        """Extract the DateOfEndOfReportingPeriod from parsed_json or infer from publication_date."""
+        if not isinstance(parsed_json, dict):
+            return None
+        
+        date_of_end = parsed_json.get("DateOfEndOfReportingPeriod")
+        if date_of_end and isinstance(date_of_end, list) and date_of_end:
+            date_str = date_of_end[0].get("value")
+            if date_str:
+                try:
+                    return datetime.fromisoformat(date_str)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Fallback: parse from publication_date for quarterly/annual
+        if publication_date:
+            return self._parse_end_date_from_publication(publication_date)
+        
+        return None
+
+    def _parse_end_date_from_publication(self, publication_date: str) -> Optional[datetime]:
+        """Parse end date from publication_date like 'DQ2025-2026'."""
+        import re
+        match = re.match(r'([A-Z]+)(\d{4})-(\d{4})', publication_date)
+        if not match:
+            return None
+        
+        quarter, start_year, end_year = match.groups()
+        start_year = int(start_year)
+        end_year = int(end_year)
+        
+        if quarter == 'MQ':  # March Quarter
+            return datetime(end_year, 3, 31)
+        elif quarter == 'JQ':  # June Quarter
+            return datetime(start_year, 6, 30)
+        elif quarter == 'SQ':  # September Quarter
+            return datetime(start_year, 9, 30)
+        elif quarter == 'DQ':  # December Quarter
+            return datetime(start_year, 12, 31)
+        elif publication_date.startswith('FY'):  # Annual
+            return datetime(end_year, 3, 31)
+        
+        return None
+
+    def _get_periods_priority(self, current_date: datetime) -> dict[str, int]:
+        """Get priority mapping for quarterly periods based on current date."""
+        year = current_date.year
+        month = current_date.month
+        periods = []
+        if month >= 4:
+            periods.append(f"MQ{year}-{year}")
+            periods.append(f"DQ{year-1}-{year}")
+            periods.append(f"SQ{year-1}-{year}")
+            periods.append(f"JQ{year-1}-{year}")
+            periods.append(f"MQ{year-1}-{year}")
+        else:
+            periods.append(f"MQ{year-1}-{year}")
+            periods.append(f"DQ{year-2}-{year-1}")
+            periods.append(f"SQ{year-2}-{year-1}")
+            periods.append(f"JQ{year-2}-{year-1}")
+            periods.append(f"MQ{year-2}-{year-1}")
+        return {p: i for i, p in enumerate(periods)}
+
+    def _get_annual_periods_priority(self, current_date: datetime) -> dict[str, int]:
+        """Get priority mapping for annual periods based on current date."""
+        year = current_date.year
+        month = current_date.month
+        periods = []
+        if month >= 4:
+            periods.append(f"FY{year-1}-{year}")
+            periods.append(f"FY{year-2}-{year-1}")
+            periods.append(f"FY{year-3}-{year-2}")
+        else:
+            periods.append(f"FY{year-2}-{year-1}")
+            periods.append(f"FY{year-3}-{year-2}")
+            periods.append(f"FY{year-4}-{year-3}")
+        return {p: i for i, p in enumerate(periods)}
+
+    def get_extraction_records(
+        self,
+        scrip_code: str,
+        extraction_type: str,
+        period: Optional[str] = None,
+        last_n_years: Optional[int] = None,
+        latest_only: bool = False,
+        limit: int = 5,
+    ) -> list[dict]:
+        table = "quarterly_extractions" if extraction_type == "quarterly" else "annual_extractions"
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT * FROM {table} WHERE scrip_code = ?",
+            (scrip_code,),
+        )
+        rows = [self._load_parsed_json_row(row) for row in cur.fetchall()]
+        
+        if period == "latest quarter":
+            # Special sorting for latest quarter based on current date
+            current_date = datetime.now()
+            periods_priority = self._get_periods_priority(current_date)
+            def priority_sort_key(row):
+                pub_date = row.get("publication_date", "")
+                priority = periods_priority.get(pub_date, 999)
+                # Secondary sort by reporting end date (most recent first)
+                end_date = self._extract_reporting_end_date(row.get("parsed_json"), pub_date)
+                if end_date:
+                    return (priority, -end_date.timestamp())  # Negative for descending
+                created_at = row.get("created_at", "")
+                row_id = row.get("id", 0)
+                return (priority, float('-inf'), created_at, row_id)  # Old records last
+            rows.sort(key=priority_sort_key)
+        elif period == "latest year":
+            # Special sorting for latest year based on current date
+            current_date = datetime.now()
+            periods_priority = self._get_annual_periods_priority(current_date)
+            def priority_sort_key(row):
+                pub_date = row.get("publication_date", "")
+                priority = periods_priority.get(pub_date, 999)
+                # Secondary sort by reporting end date (most recent first)
+                end_date = self._extract_reporting_end_date(row.get("parsed_json"), pub_date)
+                if end_date:
+                    return (priority, -end_date.timestamp())  # Negative for descending
+                created_at = row.get("created_at", "")
+                row_id = row.get("id", 0)
+                return (priority, float('-inf'), created_at, row_id)  # Old records last
+            rows.sort(key=priority_sort_key)
+        else:
+            # Sort by reporting end date (most recent first), fallback to created_at and id
+            def sort_key(row):
+                end_date = self._extract_reporting_end_date(row.get("parsed_json"), row.get("publication_date"))
+                if end_date:
+                    return (0, end_date)  # 0 to prioritize rows with dates
+                created_at = row.get("created_at", "")
+                row_id = row.get("id", 0)
+                return (1, created_at, row_id)  # Fallback sorting
+            
+            rows.sort(key=sort_key, reverse=True)
+        
+        filtered = [
+            row for row in rows
+            if self._matches_time_filter(row.get("publication_date"), period, last_n_years)
+        ]
+        if latest_only and filtered:
+            return [filtered[0]]
+        return filtered[:limit]
+
+    def get_latest_annual_data(self, scrip_code: str) -> Optional[dict]:
+        """Get the latest annual data for a scrip_code."""
+        return self.get_latest_extraction(scrip_code, "annual")
 
     def get_latest_quarterly_data(self, scrip_code: str) -> Optional[dict]:
         """Get the latest quarterly data for a scrip_code."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM quarterly_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
-            (scrip_code,),
-        )
-        row = cur.fetchone()
-        return dict(row) if row else None
+        return self.get_latest_extraction(scrip_code, "quarterly")
 
     def get_historical_annual_data(self, scrip_code: str, limit: int = 5) -> list[dict]:
         """Get historical annual data for a scrip_code, most recent first."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM annual_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
-            (scrip_code, limit),
-        )
-        rows = cur.fetchall()
-        return [dict(row) for row in rows]
+        return self.get_historical_extractions(scrip_code, "annual", limit)
 
     def get_historical_quarterly_data(self, scrip_code: str, limit: int = 5) -> list[dict]:
         """Get historical quarterly data for a scrip_code, most recent first."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM quarterly_table WHERE scrip_code = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
-            (scrip_code, limit),
-        )
-        rows = cur.fetchall()
-        return [dict(row) for row in rows]
+        return self.get_historical_extractions(scrip_code, "quarterly", limit)
 
     def find_peers(self, symbol: str) -> dict:
         """Find peers for the given company symbol based on annual sales +/-20% in same sector."""

@@ -75,6 +75,25 @@ export interface CompanyComparisonData {
   count: number;
 }
 
+export interface ComparisonTableRow {
+  parameter: string;
+  values: any[];
+}
+
+export interface ComparisonTable {
+  headers: string[];
+  rows: ComparisonTableRow[];
+}
+
+export interface ExtractionComparisonData {
+  companies: Record<string, any>;
+  frequency: string;
+  period: string;
+  available_periods: Record<string, string[]>;
+  table: ComparisonTable;
+  count: number;
+}
+
 /**
  * Send a chat query to the backend LLM endpoint
  * @param query - The user's query
@@ -255,6 +274,26 @@ export async function compareCompanies(
     const response = await apiClient.post<CompanyComparisonData>(
       '/companies/compare',
       { scrip_codes: scripCodes, frequency }
+    );
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.detail || error.message;
+      throw new Error(`Backend error: ${message}`);
+    }
+    throw error;
+  }
+}
+
+export async function compareExtractionData(
+  scripCodes: string[],
+  frequency: string = 'annual',
+  period: string = 'latest'
+): Promise<ExtractionComparisonData> {
+  try {
+    const response = await apiClient.post<ExtractionComparisonData>(
+      '/companies/extraction_compare',
+      { scrip_codes: scripCodes, frequency, period }
     );
     return response.data;
   } catch (error) {

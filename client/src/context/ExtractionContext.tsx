@@ -89,7 +89,7 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
       return new Promise((resolve, reject) => {
         const wsEndpoint =
           endpoint === "fetch"
-            ? "ws://localhost:8001/api/ws/xbrl-fetch-latest"
+            ? "ws://localhost:8001/api/ws/xbrl-fetch-all-std"
             : "ws://localhost:8001/api/ws/xbrl-extract-from-db";
 
         const ws = new WebSocket(wsEndpoint);

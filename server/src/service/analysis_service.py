@@ -12,22 +12,22 @@ from utils.llm_testing import get_azure_chat_openai
 _LLM: Any = None
 
 HARDCODED_PEERS: Dict[str, List[str]] = {
-    "tcs": ["infy", "wipro","hcltech","ofss"],
-    "infy": ["tcs", "wipro","hcltech","ltim"],
-    "wipro": ["tcs", "infy","hcltech","ltim"],
-     "hcltech": ["tcs", "infy","wipro","ltim"],
-     "ltim": ["tcs", "infy","wipro","hcltech"],
-     "ofss": ["tcs", "infy","hcltech","ltim"],
+    "tcs": ["infy", "wipro"],
+    "infy": ["tcs", "wipro"],
+    "wipro": ["infy","hcltech"],
+     "hcltech": ["tcs", "infy"],
+     "ltim": ["wipro","hcltech"],
+     "ofss": ["tcs","hcltech"],
     "hext":["coforge","ltim"],
     "coforge":["hext","ltim"],
-    "axisbank": ["hdfcbank", "icicibank", "kotakbank", "sbin"],
-    "hdfcbank": ["axisbank", "icicibank", "kotakbank", "sbin"],
-    "icicibank": ["axisbank", "hdfcbank", "kotakbank", "sbin"],
-    "kotakbank": ["axisbank", "hdfcbank", "icicibank", "sbin"],
-    "sbin": ["axisbank", "hdfcbank", "icicibank", "kotakbank"],
-    "reliance": ["adaniports", "indusindbank", "lt", "itc"],
-    "adaniports": ["reliance", "indusindbank", "lt", "itc"],
-    "indusindbank": ["reliance", "adaniports", "lt", "itc"],
+    "axisbank": ["hdfcbank", "icicibank"],
+    "hdfcbank": ["axisbank", "sbin"],
+    "icicibank": [ "kotakbank", "sbin"],
+    "kotakbank": [ "hdfcbank", "icicibank"],
+    "sbin": ["axisbank", "hdfcbank"],
+    "reliance": ["adaniports", "indusindbank"],
+    "adaniports": ["reliance", "itc"],
+    "indusindbank": ["lt", "itc"],
 }
 
 
@@ -495,7 +495,7 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
         "- **target_companies**: List of company names mentioned.\n"
         "- **industries**: Any industries mentioned.\n"
         "- **other_requirements**: Any other specific requirements or questions.\n"
-        "- **get_peer**: Set to true if the query requires peer company analysis/comparison, false otherwise.\n\n"
+        "- **get_peer**: Set to true ONLY if the query explicitly asks for peers, competitors, industry comparisons, or benchmark analysis. Set to false if the query mentions specific companies to compare directly.\n\n"
         "Then, based on the breakdown, generate a structured JSON response identifying target companies.\n"
         "If get_peer is true, the system will first apply hardcoded peer mappings and then fall back to database peer lookup if needed.\n"
         "Ensure scrip_codes are accurate BSE codes.\n\n"
@@ -564,93 +564,220 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
     return parsed, system_prompt, peer_extraction_log if 'peer_extraction_log' in locals() else ""
 
 
+def _format_period_from_publication_date(publication_date: Optional[str]) -> str:
+    """Extract and format the period from publication_date field.
+    
+    Handles formats like:
+    - 'Q1 FY19 (Apr-Jun)' -> 'June 2019'
+    - 'Q4 2025-26 (Jan-Mar)' -> 'March 2026'
+    - 'DQ2025-2026' -> '2025-2026'
+    - Direct date strings
+    """
+    if not publication_date:
+        return "Unspecified"
+    
+    pub_str = str(publication_date).strip()
+    
+    # Month mapping
+    months = {
+        'Apr': 'April', 'Jan': 'January', 'Feb': 'February', 'Mar': 'March',
+        'May': 'May', 'Jun': 'June', 'Jul': 'July', 'Aug': 'August',
+        'Sep': 'September', 'Oct': 'October', 'Nov': 'November', 'Dec': 'December'
+    }
+    
+    # Try to extract (Month, Year) from parentheses format with fiscal year range
+    # Example: "Q4 2025-26 (Jan-Mar)" should return "March 2026", "Q3 2025-26 (Oct-Dec)" should return "December 2025"
+    paren_match = re.search(r'\(([A-Z][a-z]{2})-([A-Z][a-z]{2})\)', pub_str)
+    if paren_match:
+        month_str = paren_match.group(2)  # Get end month (e.g., 'Mar')
+        # Try to extract fiscal year range like "2025-26"
+        fy_match = re.search(r'(\d{4})-(\d{2,4})', pub_str)
+        if fy_match:
+            start_year = fy_match.group(1)
+            end_year_part = fy_match.group(2)
+            # Handle both "2025-26" and "2025-2026" formats
+            if len(end_year_part) == 2:
+                end_year = start_year[:2] + end_year_part  # "2025-26" -> "2026"
+            else:
+                end_year = end_year_part
+            
+            # Fiscal year: Apr-Jun(Q1), Jul-Sep(Q2), Oct-Dec(Q3) are in start_year
+            # Jan-Mar(Q4) is in end_year
+            if month_str in ['Jan', 'Feb', 'Mar']:
+                year_to_use = end_year
+            else:
+                year_to_use = start_year
+            
+            month_name = months.get(month_str, month_str)
+            return f"{month_name} {year_to_use}"
+        else:
+            # Fallback: extract first 4-digit year
+            year_match = re.search(r'(\d{4})', pub_str)
+            if year_match:
+                year = year_match.group(1)
+                month_name = months.get(month_str, month_str)
+                return f"{month_name} {year}"
+    
+    # Try format like 'DQ2025-2026' -> extract just the period
+    if 'D' in pub_str and '-' in pub_str:
+        year_match = re.search(r'(\d{4})-(\d{4})', pub_str)
+        if year_match:
+            return f"{year_match.group(1)}-{year_match.group(2)}"
+    
+    # Fallback: try to find any year
+    year_match = re.search(r'(\d{4})', pub_str)
+    if year_match:
+        return pub_str  # Return as-is if it contains a year
+    
+    return pub_str  # Return original if no pattern matched
+
+
 def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> tuple[str, dict[str, int]]:
     """Use LLM to generate an answer based on the query and fetched data.
 
     Returns a tuple of (answer_text, token_usage).
     """
+    # Pre-process data to format periods nicely
+    formatted_data = data
+    if isinstance(data, list):
+        formatted_data = []
+        for record in data:
+            formatted_record = record.copy() if isinstance(record, dict) else record
+            if isinstance(formatted_record, dict) and "publication_date" in formatted_record:
+                formatted_record["Period"] = _format_period_from_publication_date(
+                    formatted_record.get("publication_date")
+                )
+            formatted_data.append(formatted_record)
+    elif isinstance(data, dict):
+        formatted_data = data.copy()
+        # If it has a publication_date, add formatted Period
+        if "publication_date" in formatted_data:
+            formatted_data["Period"] = _format_period_from_publication_date(
+                formatted_data.get("publication_date")
+            )
+    
     system_prompt = f"""
-You are a Senior Financial Analyst preparing institutional-grade financial analysis reports for C-suite executives, board members, and institutional investors.
+You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
 
-Generate a professional, data-driven financial analysis report in Markdown format. Your audience expects rigorous financial analysis with actionable insights.
+Generate a detailed, professional financial analysis report in Markdown format. The report should comprehensively analyze ALL available financial data, metrics, and parameters provided in the input, not just a subset. Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data.
 
-# Company Financial Analysis Report
+The report should be extremely detailed and thorough, suitable for board-level strategic discussions, investment committee reviews, and executive decision-making. Length is not a constraint - provide exhaustive analysis that covers all aspects of the financial performance, risks, opportunities, and implications.
+
+# Comprehensive Financial Analysis Report
 
 ## I. Executive Summary
-Provide a concise overview of key financial highlights across all periods presented, including:
-- Revenue growth trajectory (absolute and %)
-- Profitability trends and margins
-- Key operational highlights
-- Notable KPIs or metrics that require attention
-Keep to 3-4 sentences maximum.
+Provide a comprehensive executive overview synthesizing key findings across all periods and companies:
+- Strategic financial performance highlights and trajectory
+- Critical profitability, efficiency, and growth metrics
+- Major risk indicators and opportunities
+- Strategic implications for business direction and governance
+- Key recommendations for immediate executive attention
 
-## II. Financial Performance Analysis
-Present a comprehensive period-by-period analysis using tables. Each table MUST have:
-- **Period** column (exact quarter/year provided in data)
-- Key metrics: Revenue, Operating Profit, Net Profit, EPS
-- All metrics shown as absolute values
+## II. Company Overview and Strategic Context
+For each company analyzed:
+- Business model and industry positioning
+- Strategic objectives and market dynamics
+- Key value drivers and competitive advantages
+- Regulatory and macroeconomic context implications
 
-Calculate and highlight in the narrative:
-- Quarter-over-Quarter (QoQ) growth rates (%)
-- Year-over-Year (YoY) growth rates (%)
-- Trend direction and acceleration/deceleration
+## III. Comprehensive Financial Performance Analysis
+Conduct exhaustive period-by-period and cross-company analysis of ALL financial metrics available:
 
-## III. Profitability & Margin Analysis
-Analyze margin trends across all periods:
-- Operating Profit Margin (OPM %): Trend analysis with drivers
-- Net Profit Margin (NPM): Movement and reasons
-- Other income contribution: Material changes
-- Tax rate trends: Normalized vs reported
+### Revenue Analysis
+- Detailed revenue composition and sources
+- Revenue growth drivers and sustainability
+- Geographic and segment revenue breakdown (if available)
+- Revenue quality indicators and recurring vs. one-time components
 
-Identify margin expansion/compression drivers and sustainability.
+### Profitability Deep Dive
+- Operating profit margins: Trends, drivers, and sustainability
+- Net profit margins: Components and influencing factors
+- EBITDA margins and operating efficiency metrics
+- Gross margins by business segment or product line
 
-## IV. Cost Structure & Operational Efficiency
-- Major cost components: Employee benefits, Subcontracting, Finance costs, Depreciation
-- Cost as % of Revenue: Trends across periods
-- Operational efficiency indicators: Revenue per employee (if calculable), fixed vs variable cost splits
-- Material cost movements and their drivers
+### Cost Structure Analysis
+- Detailed cost breakdown: Fixed vs. variable costs
+- Major expense categories: Personnel, R&D, marketing, administrative
+- Cost optimization opportunities and efficiency trends
+- Cost-to-revenue ratios and benchmarking
 
-## V. Cash Generation & Reinvestment
-- Operating income to sales conversion
-- Tax impact on bottom line
-- Depreciation trends indicating capex patterns
-- Overall profitability quality assessment
+### Balance Sheet Analysis
+- Asset quality and composition
+- Liability structure and debt management
+- Working capital efficiency and cash conversion cycles
+- Capital structure optimization and financial leverage
 
-## VI. Comparative & Trend Analysis
-- If multiple periods are provided, calculate multi-period trends (linear if < 5 periods, trend lines if longer)
-- Identify inflection points or significant changes
-- Segment analysis if different business lines are visible
-- Peer positioning (if industry context provided)
+### Cash Flow Analysis
+- Operating cash flow generation and quality
+- Investment and financing cash flows
+- Free cash flow trends and utilization
+- Cash flow forecasting implications
 
-## VII. Key Observations & Risk Factors
-Highlight:
-- Positive developments: Growing revenue, margin expansion, improved efficiency
-- Areas of concern: Margin compression, rising costs, declining profitability
-- One-time or extraordinary items impacting comparability
-- Data quality notes: Missing periods, incomplete metrics
+### Key Financial Ratios and Metrics
+- Liquidity ratios: Current ratio, quick ratio, cash ratios
+- Solvency ratios: Debt-to-equity, debt-to-assets, interest coverage
+- Efficiency ratios: Asset turnover, inventory turnover, receivables days
+- Profitability ratios: ROA, ROE, ROCE, EPS trends
+- Valuation metrics: P/E, P/B, EV/EBITDA (if market data available)
 
-## VIII. Strategic Recommendations & Outlook
-- Based ONLY on historical data trends, outline positive developments and areas requiring management attention
-- Clearly separate fact-based analysis from forward-looking interpretation
-- Do NOT project future performance beyond the data provided
-- Recommend areas for deeper management discussion
+## IV. Trend Analysis and Forecasting Insights
+- Multi-period trend analysis with statistical significance
+- Growth acceleration/deceleration patterns
+- Cyclical vs. structural performance changes
+- Forward-looking indicators from historical trends
+
+## V. Comparative Analysis
+- Peer group comparisons across all metrics
+- Industry benchmarking and positioning
+- Competitive advantages and disadvantages
+- Market share and growth relative to peers
+
+## VI. Risk Assessment and Mitigation
+- Financial risk factors: Liquidity, solvency, currency, interest rate
+- Operational risks: Cost pressures, margin compression, supply chain
+- Market risks: Competition, demand fluctuations, regulatory changes
+- Strategic risks: Market positioning, technology disruption, M&A implications
+- Quantitative risk metrics and stress testing insights
+
+## VII. Strategic Implications and Recommendations
+- Strategic opportunities identified from financial trends
+- Areas requiring management intervention
+- Capital allocation recommendations
+- Risk mitigation strategies
+- Governance and compliance considerations
+- Long-term value creation strategies
+
+## VIII. Data Quality and Limitations
+- Assessment of data completeness and reliability
+- Missing data impacts on analysis
+- Assumptions and estimation methodologies used
+- Recommendations for improved financial reporting
+
+## IX. Appendices
+- Detailed financial statements and schedules
+- Ratio calculations and trend charts
+- Peer comparison tables
+- Statistical analysis and regression insights
+- Glossary of terms and methodologies
 
 ---
 
-**Analysis Parameters:** {frequency} financial statements | Focus: {statement_type.replace('_', ' ')}
+**Analysis Parameters:** {frequency} financial statements | Focus: {statement_type.replace('_', ' ')} | Data Scope: Comprehensive analysis of all available financial parameters
 
 **CRITICAL REQUIREMENTS:**
-1. Present ONLY data explicitly provided in the input - no fabrication or extrapolation
-2. Always show period labels in tables and references
-3. Calculate all QoQ and YoY changes explicitly
-4. Use proper number formatting with Indian currency conventions (INR, lakhs, crores) unless USD provided
-5. Be specific with metrics: cite exact values with periods
-6. Flag any incomplete or missing data clearly
-7. Provide actionable insights suitable for board-level decision making
-8. Maintain professional tone throughout
+1. Analyze EVERY financial metric and parameter present in the provided data - do not limit to predefined fields
+2. Provide exhaustive, board-level analysis with strategic implications
+3. Use precise numerical references with proper formatting (INR crores/lakhs, percentages, ratios)
+4. Identify trends, drivers, risks, and opportunities across all data dimensions
+5. Maintain professional, executive-level tone suitable for C-suite and board presentations
+6. Flag data limitations and provide conservative interpretations where uncertainty exists
+7. Generate actionable insights that drive strategic decision-making
+8. Structure report for easy navigation and executive summary consumption
+9. Include quantitative analysis with statistical context where applicable
+10. Provide forward-looking strategic recommendations based on historical trends
     """
 
-    user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(data, indent=2)}"
+    user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
 
     response = _invoke_llm(system_prompt, user_prompt, max_tokens=2500)
 

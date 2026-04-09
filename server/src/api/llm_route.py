@@ -84,7 +84,7 @@ First, break down the query into key components:
 - **target_companies**: List of company names mentioned.
 - **industries**: Any industries mentioned.
 - **other_requirements**: Any other specific requirements or questions.
-- **get_peer**: Set to true if the query requires peer company analysis/comparison, false otherwise.
+- **get_peer**: Set to true ONLY if the query explicitly asks for peers, competitors, industry comparisons, or benchmark analysis. Set to false if the query mentions specific companies to compare directly.
 
 Then, based on the breakdown, generate a structured JSON response identifying target companies.
 If get_peer is true, the system will automatically fetch appropriate peers from the database.
@@ -225,14 +225,34 @@ def _interpret_time_window(period: str, time_horizon: str) -> tuple[bool, Option
         normalized_period = period.strip().lower()
         if normalized_period in ["unspecified", "none", "n/a", "na", ""]:
             period_filter = None
+        elif normalized_period.isdigit() and len(normalized_period) == 4:
+            # Specific year like "2024"
+            year = int(normalized_period)
+            period_filter = f"FY{year}-{year+1}"
         else:
             # Check for "latest X quarters" or "last X quarters"
             quarters_match = re.search(r"(?:latest|last)\s+(\d+)\s+quarters?", normalized_period)
             if quarters_match:
                 limit_records = int(quarters_match.group(1))
                 latest_only = False  # Don't limit to single record
-            elif "latest q" in normalized_period or "most recent" in normalized_period:
+                # Ensure we get recent quarters by setting last_n_years to 1 if not already set
+                if last_n_years is None:
+                    last_n_years = 1
+            elif "latest q" in normalized_period or "most recent" in normalized_period or "last quarter" in normalized_period or "previous quarter" in normalized_period:
                 latest_only = True
+                period_filter = "latest quarter"
+            elif any(keyword in normalized_period for keyword in ["latest year", "latest financial year", "last year", "last financial year", "previous year", "previous financial year"]):
+                latest_only = True
+                period_filter = "latest year"
+                last_n_years = 1
+            elif "latest" in normalized_period:
+                latest_only = True
+                if "quarter" in normalized_period:
+                    period_filter = "latest quarter"
+                    last_n_years = 1
+                elif "year" in normalized_period:
+                    period_filter = "latest year"
+                    last_n_years = 1
             elif last_n_years is None:
                 years_match = re.search(r"(\d+)\s*years?", normalized_period)
                 if years_match:

@@ -330,6 +330,39 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 # -------------------- API Route --------------------
 
+
+
+# -------------------- Format Conversion for XML --------------------
+
+def _convert_xml_grouped_to_list(grouped_data: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """
+    Convert XML extraction's grouped dictionary format to flat list format (matching HTML service format).
+    XML returns: {"elementname": [{"contextRef": "oned", "value": 123}, ...]}
+    HTML returns: [{"localname": "elementname", "contextRef": "oned", "value": 123}, ...]
+    """
+    flat_list: List[Dict[str, Any]] = []
+    
+    if not grouped_data:
+        return flat_list
+    
+    for element_name, occurrences in grouped_data.items():
+        if not occurrences:
+            continue
+        for occurrence in occurrences:
+            record = {
+                "localname": element_name.lower(),
+                "contextRef": occurrence.get("contextRef"),
+                "contextref": occurrence.get("contextRef"),
+                "unitRef": occurrence.get("unitRef"),
+                "value": occurrence.get("value"),
+            }
+            flat_list.append(record)
+    
+    return flat_list
+
+
+# -------------------- API Route --------------------
+
 @router.post("/extract/urls", response_model=List[CompanyMetrics])
 async def extract_xbrl(request: ExtractXBRLRequest):
     """
@@ -344,11 +377,18 @@ async def extract_xbrl(request: ExtractXBRLRequest):
     for url in request.url:
         try:
             if url.endswith(".xml"):
-                # Allow all prefixes to avoid data loss in XML
-                only_prefix = None  # keep signature compatibility
-                extracted_data = extract_xbrl_data(url, only_prefix)
+                # XML parser returns grouped dict, convert to list format
+                only_prefix = None
+                extracted_data_grouped = extract_xbrl_data(url, only_prefix)
+                
+                # Debug: Check if extraction was successful
+                if not extracted_data_grouped:
+                    raise Exception(f"XML extraction returned empty data for {url}. The XML file may not contain valid XBRL data or the structure is unexpected.")
+                
+                extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
                 data_type = "xml"
             elif url.endswith((".html", ".htm", ".xhtml")):
+                # HTML parser returns list format directly
                 extracted_data = extract_html_data(url)
                 data_type = "html"
             else:
@@ -360,12 +400,12 @@ async def extract_xbrl(request: ExtractXBRLRequest):
             # print(f"Extracted metrics for {url}: {metrics}")
 
             # Persist raw extracted facts (optional)
-            if data_type == "xml":
-                repo = XMLDataRepository()
-            else:
+            # Note: XMLDataRepository expects grouped dict format, not flat list
+            # Since we converted to flat list, we skip persistence for XML
+            if data_type == "html":
                 repo = HTMLDataRepository()
-            repo.save_to_json(extracted_data)
-            repo.save_to_csv(extracted_data)
+                repo.save_to_json(extracted_data)
+                repo.save_to_csv(extracted_data)
 
             response.append(CompanyMetrics(url=url, type=data_type, **metrics))
 
@@ -475,7 +515,8 @@ async def extract_annual(report: ExtractAnnualRequest):
         # Parse file
         if url.endswith(".xml"):
             only_prefix = None
-            extracted_data = extract_xbrl_data(url, only_prefix)
+            extracted_data_grouped = extract_xbrl_data(url, only_prefix)
+            extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
             data_type = "xml"
         elif url.endswith((".html", ".htm", ".xhtml")):
             extracted_data = extract_html_data(url)

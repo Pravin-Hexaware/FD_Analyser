@@ -454,6 +454,14 @@ def calculate_metrics_fourd(extracted_data: List[Dict[str, Any]]) -> Dict[str, A
     CashFromFinancingActivity = _first_by_keys(fourd, ["cashflowsfromusedinfinancingactivities", "cashflowfromfinancingactivities"]) if fourd is not None else None
 
     return {
+        # Include metadata from the meta dict collected above
+        "company_name": meta.get("company_name"),
+        "company_symbol": meta.get("company_symbol"),
+        "currency": meta.get("currency"),
+        "level_of_rounding": meta.get("level_of_rounding"),
+        "reporting_type": meta.get("reporting_type"),
+        
+        # Financial metrics
         "Sales": float(Sales) if Sales is not None else None,
         "Expenses": float(Expenses) if Expenses is not None else None,
         "OperatingProfit": float(OperatingProfit) if OperatingProfit is not None else None,
@@ -531,8 +539,8 @@ async def extract_annual(report: ExtractAnnualRequest) -> List[dict]:
             if not isinstance(extracted_data, list):
                 raise Exception(f"extracted_data is {type(extracted_data).__name__}, expected list")
 
-            # Call the same calculation function as quarterly endpoint
-            metrics = calculate_metrics(extracted_data)
+            # Call the annual-specific calculation function (uses fourd context for annual data)
+            metrics = calculate_metrics_fourd(extracted_data)
 
             # Persist raw extracted facts (optional)
             # Note: XMLDataRepository expects grouped dict format, not flat list
@@ -542,11 +550,51 @@ async def extract_annual(report: ExtractAnnualRequest) -> List[dict]:
                 repo.save_to_json(extracted_data)
                 repo.save_to_csv(extracted_data)
 
-            # Build response object with metrics
+            # Build response object with organized sections
             result = {
                 "url": url,
                 "type": data_type,
-                **metrics  # Spread all metrics into result
+                "company_name": metrics.get("company_name"),
+                "company_symbol": metrics.get("company_symbol"),
+                "currency": metrics.get("currency"),
+                "level_of_rounding": metrics.get("level_of_rounding"),
+                "reporting_type": metrics.get("reporting_type"),
+                # Profit & Loss (Year level)
+                "Profit_and_Loss": {
+                    "Sales": metrics.get("Sales"),
+                    "Expenses": metrics.get("Expenses"),
+                    "OperatingProfit": metrics.get("OperatingProfit"),
+                    "OPM_percentage": metrics.get("OPM_percentage"),
+                    "OtherIncome": metrics.get("OtherIncome"),
+                    "Interest": metrics.get("Interest"),
+                    "Depreciation": metrics.get("Depreciation"),
+                    "ProfitBeforeTax": metrics.get("ProfitBeforeTax"),
+                    "CurrentTax": metrics.get("CurrentTax"),
+                    "DeferredTax": metrics.get("DeferredTax"),
+                    "Tax": metrics.get("Tax"),
+                    "Tax_percent": metrics.get("Tax_percent"),
+                    "NetProfit": metrics.get("NetProfit"),
+                    "EPS_in_RS": metrics.get("EPS_in_RS"),
+                },
+                # Balance sheet (Year level)
+                "Balance_Sheet": {
+                    "EquityCapital": metrics.get("EquityCapital"),
+                    "Reserves": metrics.get("Reserves"),
+                    "Borrowings": metrics.get("Borrowings"),
+                    "OtherLiabilities": metrics.get("OtherLiabilities"),
+                    "TotalLiabilities": metrics.get("TotalLiabilities"),
+                    "TotalEquity": metrics.get("TotalEquity"),
+                    "FixedAssets": metrics.get("FixedAssets"),
+                    "CWIP": metrics.get("CWIP"),
+                    "Investments": metrics.get("Investments"),
+                    "TotalAssets": metrics.get("TotalAssets"),
+                },
+                # Cash Flow (Year level)
+                "Cash_Flow": {
+                    "CashFromOperatingActivity": metrics.get("CashFromOperatingActivity"),
+                    "CashFromInvestingActivity": metrics.get("CashFromInvestingActivity"),
+                    "CashFromFinancingActivity": metrics.get("CashFromFinancingActivity"),
+                }
             }
             response.append(result)
 

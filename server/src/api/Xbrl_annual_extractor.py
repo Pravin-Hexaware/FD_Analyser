@@ -8,7 +8,7 @@ from service.html_extraction_service import extract_html_data
 from service.xml_extraction_service import extract_xbrl_data
 from repository.html_data_repository import HTMLDataRepository
 from repository.xml_data_repository import XMLDataRepository
-from api.xbrl_route import calculate_metrics
+from api.xbrl_route import calculate_metrics, _convert_xml_grouped_to_list
 
 # (router already defined above)
 router = APIRouter()
@@ -635,7 +635,8 @@ async def extract_annual(report: ExtractAnnualRequest):
         # parse file
         if url.endswith(".xml"):
             only_prefix = None
-            extracted_data = extract_xbrl_data(url, only_prefix)
+            extracted_data_grouped = extract_xbrl_data(url, only_prefix)
+            extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
             data_type = "xml"
         elif url.endswith((".html", ".htm", ".xhtml")):
             extracted_data = extract_html_data(url)

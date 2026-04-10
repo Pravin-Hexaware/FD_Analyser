@@ -6,12 +6,64 @@ import uuid
 import json
 import os
 import re
+import csv
 from pathlib import Path
 
 from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data
 from repository.sqlite_repository import SqliteRepository
 
 router = APIRouter()
+
+
+
+def _missing_tracker_csv_path() -> Path:
+    src_dir = Path(__file__).resolve().parents[1]   # points to src/
+    data_dir = src_dir / "Data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir / "missing_companies.csv"
+
+
+
+def _append_missing_company(
+    company_name: str,
+    symbol: Optional[str],
+    scrip_code: Optional[str],
+    frequency: str,
+    period: str,
+    time_horizon: str,
+    is_peer: bool,
+    query: str,
+) -> None:
+    file_path = _missing_tracker_csv_path()
+    header = [
+        "timestamp",
+        "company_name",
+        "symbol",
+        "scrip_code",
+        "frequency",
+        "period",
+        "time_horizon",
+        "is_peer",
+        "query",
+    ]
+    row = {
+        "timestamp": datetime.now().isoformat(),
+        "company_name": company_name,
+        "symbol": symbol or "",
+        "scrip_code": scrip_code or "",
+        "frequency": frequency,
+        "period": period,
+        "time_horizon": time_horizon,
+        "is_peer": "true" if is_peer else "false",
+        "query": query,
+    }
+    write_header = not file_path.exists()
+    print(f"Tracking missing company to CSV: {file_path} -> {company_name} ({scrip_code})")
+    with open(file_path, mode="a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=header)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def write_llm_log(user_query: str, llm_prompt: str, llm_response: str, db_data: Dict[str, Any], data_passed_to_llm: Dict[str, Any], final_prompt: str, final_response: str, peer_extraction_log: str = "", token_usage: Optional[Dict[str, int]] = None):
@@ -306,6 +358,7 @@ def _fetch_company_data(
     else:
         extraction_type = "annual" if frequency == "annual" else "quarterly"
         effective_limit = annual_limit if extraction_type == "annual" else quarterly_limit
+        results = []
 
         if latest_only and not requires_historical and last_n_years is None:
             latest_record = repo.get_latest_extraction(scrip_code, extraction_type)
@@ -394,6 +447,7 @@ async def llm_target_companies(request: LLMQueryRequest):
         print("Step 2: Fetching data for target companies" + (" + peers" if get_peer else ""))
         all_data = {}
         target_companies = parsed.get("target_companies", {})
+        tracked_missing = set()
 
         db_fetch_log = {
             "frequency": frequency,
@@ -417,6 +471,20 @@ async def llm_target_companies(request: LLMQueryRequest):
                     "data": data
                 }
                 print(f"Fetched extraction records for {company_name} ({scrip_code}): {data}")
+                if not data:
+                    missing_key = (company_name, scrip_code, frequency, period, time_horizon, False)
+                    if missing_key not in tracked_missing:
+                        _append_missing_company(
+                            company_name=company_name,
+                            symbol=company.get("symbol"),
+                            scrip_code=scrip_code,
+                            frequency=frequency,
+                            period=period,
+                            time_horizon=time_horizon,
+                            is_peer=False,
+                            query=request.query,
+                        )
+                        tracked_missing.add(missing_key)
 
             if get_peer:
                 peers = company.get("peers", {})
@@ -435,6 +503,20 @@ async def llm_target_companies(request: LLMQueryRequest):
                             "data": p_data
                         }
                         print(f"Fetched extraction records for peer {peer_name} ({p_scrip}): {p_data}")
+                        if not p_data:
+                            missing_key = (peer_name, p_scrip, frequency, period, time_horizon, True)
+                            if missing_key not in tracked_missing:
+                                _append_missing_company(
+                                    company_name=peer_name,
+                                    symbol=peer.get("symbol"),
+                                    scrip_code=p_scrip,
+                                    frequency=frequency,
+                                    period=period,
+                                    time_horizon=time_horizon,
+                                    is_peer=True,
+                                    query=request.query,
+                                )
+                                tracked_missing.add(missing_key)
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log

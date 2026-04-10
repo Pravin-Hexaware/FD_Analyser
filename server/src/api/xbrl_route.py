@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from decimal import Decimal, InvalidOperation
 
 from service.html_extraction_service import extract_html_data
-from service.xml_extraction_service import extract_xbrl_data
+from service.xml_parser_service import extract_xbrl_data
 from repository.html_data_repository import HTMLDataRepository
 from repository.xml_data_repository import XMLDataRepository
 
@@ -101,7 +101,15 @@ def _first_by_keys(data_map: Dict[str, Decimal], keys: List[str]) -> Optional[De
     return None
 
 
-# -------------------- Canonical Synonyms (ALL LOWERCASE localnames) --------------------
+def _is_xml_url(url: str) -> bool:
+    """Detect XML/XBRL URLs robustly, even with query strings or uppercase extensions."""
+    if not isinstance(url, str):
+        return False
+    normalized = url.strip().lower().split("?", 1)[0].split("#", 1)[0]
+    return normalized.endswith(".xml") or normalized.endswith(".xbrl")
+
+
+# -------------------- Canonical Synonyms (ALL LOWERCASE localnames)
 # IMPORTANT: localnames in your extractors should be lowercased in this module.
 
 STRING_SYNONYMS = {
@@ -330,7 +338,7 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 # -------------------- API Route --------------------
 
-@router.post("/extract/urls", response_model=List[CompanyMetrics])
+@router.post("/extract/quarterly", response_model=List[CompanyMetrics])
 async def extract_xbrl(request: ExtractXBRLRequest):
     """
     Extract XBRL/iXBRL data from multiple URLs and calculate Screener-style metrics.
@@ -343,12 +351,12 @@ async def extract_xbrl(request: ExtractXBRLRequest):
 
     for url in request.url:
         try:
-            if url.endswith(".xml"):
+            if _is_xml_url(url):
                 # Allow all prefixes to avoid data loss in XML
                 only_prefix = None  # keep signature compatibility
                 extracted_data = extract_xbrl_data(url, only_prefix)
                 data_type = "xml"
-            elif url.endswith((".html", ".htm", ".xhtml")):
+            elif url.strip().lower().split("?", 1)[0].split("#", 1)[0].endswith((".html", ".htm", ".xhtml")):
                 extracted_data = extract_html_data(url)
                 data_type = "html"
             else:

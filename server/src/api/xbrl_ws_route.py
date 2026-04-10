@@ -14,7 +14,7 @@ from api.batch_xbrl_finder import (
     fetch_xbrl_for_company,
     get_all_std_xbrl_urls,
 )
-from api.xbrl_route import calculate_metrics, extract_annual
+from api.xbrl_route import calculate_metrics
 from api.Xbrl_annual_extractor import calculate_metrics_fourd
 from service.html_extraction_service import extract_html_data
 from service.xml_extraction_service import (

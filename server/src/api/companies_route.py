@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from api.service.company_service import CompanyService
 from api.models.company_model import Company
-from api.xbrl_route import extract_annual, ExtractAnnualRequest
+from api.Xbrl_annual_extractor import extract_annual, ExtractAnnualRequest
 import httpx
 
 router = APIRouter()

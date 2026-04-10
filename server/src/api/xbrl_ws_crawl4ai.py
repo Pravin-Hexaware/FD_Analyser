@@ -20,7 +20,7 @@ from repository.sqlite_repository import SqliteRepository
 from api.crawl4ai_wrapper import fetch_xbrl_with_crawl4ai
 from service.html_extraction_service import extract_html_data
 from service.xml_extraction_service import extract_xbrl_data
-from api.xbrl_route import calculate_metrics, extract_annual
+from api.xbrl_route import calculate_metrics
 from api.Xbrl_annual_extractor import calculate_metrics_fourd
 
 logger = logging.getLogger(__name__)

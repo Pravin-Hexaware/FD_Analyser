@@ -4,15 +4,6 @@ import { Plus, X, Search, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { AppShell } from "../components/AppShell";
 import { fetchCompanies, fetchCompanyFinancials, compareExtractionData, type CompanyInfo } from "../services/api";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
 
 const COMPANY_COLORS = ["#4f46e5", "#0d9488", "#7c3aed", "#dc2626", "#ea580c"];
 
@@ -30,8 +21,6 @@ export default function ComparisonPage() {
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
-  const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
-  const [viewMode, setViewMode] = useState<"visualizations" | "table">("table");
 
   // Load companies from backend on mount
   useEffect(() => {
@@ -471,141 +460,11 @@ export default function ComparisonPage() {
               </div>
             </div>
 
-            {/* View Mode Toggle */}
-            <div className="flex items-center gap-2 p-4 border-b border-gray-100">
-              <span className="text-sm font-semibold text-gray-900">View Mode:</span>
-              <div className="flex gap-2 ml-auto">
-                {/*<button
-                  onClick={() => setViewMode("visualizations")}
-                  className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                    viewMode === "visualizations"
-                      ? "bg-indigo-600 text-white"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                  📊 Visualizations
-                </button> */}
-                <button
-                  onClick={() => setViewMode("table")}
-                  className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                    viewMode === "table"
-                      ? "bg-indigo-600 text-white"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                   Table View
-                </button>
-              </div>
-            </div>
-
-            {/* Metrics Visualization Section */}
-            {selectedCompanies.length >= 2 && viewMode === "visualizations" && (
-              <div className="p-4 space-y-4">
-                {(() => {
-                  // Get all available metrics from first company
-                  const firstCompanyCode = selectedCompanies[0];
-                  const firstCompanyData = comparisonData[firstCompanyCode];
-                  
-                  if (!firstCompanyData || !firstCompanyData.financials || firstCompanyData.financials.length === 0) {
-                    return <div className="text-gray-400">No data available</div>;
-                  }
-                  
-                  const firstData = firstCompanyData.financials[0];
-                  const allKeys = Object.keys(firstData || {});
-                  
-                  // Define all available metrics based on frequency
-                  const quarterlyMetrics = [
-                    'sales', 'expenses', 'operating_profit', 'opm_percentage', 'other_income',
-                    'cost_of_materials_consumed', 'employee_benefit_expense', 'other_expenses',
-                    'interest', 'depreciation', 'profit_before_tax', 'current_tax', 'deferred_tax', 'tax', 'tax_percent', 'net_profit', 'eps_in_rs'
-                  ];
-                  
-                  const annualMetrics = [
-                    'sales', 'expenses', 'operating_profit', 'opm_percentage', 'other_income',
-                    'interest', 'depreciation', 'profit_before_tax', 'tax_percent', 'net_profit', 'eps_in_rs',
-                    // Balance Sheet
-                    'equity_capital', 'reserves', 'trade_payables_current', 'borrowings',
-                    'other_liabilities', 'total_liabilities', 'total_equity', 'fixed_assets',
-                    'cwip', 'investments', 'total_assets',
-                    // Cash Flow
-                    'cash_from_operating_activity', 'cash_from_investing_activity', 'cash_from_financing_activity'
-                  ];
-                  
-                  // Select metrics based on frequency and filter to only available ones
-                  const availableMetrics = (frequency === 'annual' ? annualMetrics : quarterlyMetrics)
-                    .filter(key => allKeys.includes(key));
-
-                  return (
-                    <>
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-gray-900">Financial Metrics Visualization</h3>
-                        <div className="flex gap-2 flex-wrap">
-                          {availableMetrics.map((metric) => (
-                            <button
-                              key={metric}
-                              onClick={() => {
-                                setSelectedMetrics((prev) =>
-                                  prev.includes(metric)
-                                    ? prev.filter((m) => m !== metric)
-                                    : [...prev, metric]
-                                );
-                              }}
-                              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                                selectedMetrics.includes(metric)
-                                  ? "bg-indigo-600 text-white"
-                                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                              }`}
-                            >
-                              {metric.replace(/_/g, " ").toUpperCase()}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Charts */}
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        {selectedMetrics.filter(m => availableMetrics.includes(m)).map((metric) => {
-                          const chartData = selectedCompanies.map((code) => {
-                            const company = backendCompanies.find((c) => c.scrip_code === code);
-                            const data = comparisonData[code]?.financials?.[0];
-                            const value = data?.[metric as keyof typeof data];
-                            return {
-                              name: company?.symbol || code,
-                              [metric]: typeof value === "number" ? value : 0,
-                            };
-                          });
-
-                          return (
-                            <div key={metric} className="bg-gray-50 p-4 rounded-lg border border-gray-200">
-                              <h4 className="text-sm font-semibold text-gray-900 mb-4">
-                                {metric.replace(/_/g, " ").toUpperCase()}
-                              </h4>
-                              <ResponsiveContainer width="100%" height={300}>
-                                <BarChart data={chartData}>
-                                  <CartesianGrid strokeDasharray="3 3" />
-                                  <XAxis dataKey="name" />
-                                  <YAxis />
-                                  <Tooltip />
-                                  <Bar dataKey={metric} fill="#4f46e5" />
-                                </BarChart>
-                              </ResponsiveContainer>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </>
-                  );
-                })()}
-              </div>
-            )}
-
             {/* Comparison Table Data */}
-            {viewMode === "table" && (
-              <>
-                {loading ? (
-                  <div className="p-8 text-center text-gray-400">Loading financial data...</div>
-                ) : selectedCompanies.length >= 2 ? (
-                  <div className="overflow-x-auto">
+            {loading ? (
+              <div className="p-8 text-center text-gray-400">Loading financial data...</div>
+            ) : selectedCompanies.length >= 2 ? (
+              <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
@@ -775,8 +634,6 @@ export default function ComparisonPage() {
               </div>
             ) : (
               <div className="p-8 text-center text-gray-400">Select at least 2 companies to compare</div>
-            )}
-              </>
             )}
           </div>
         )}

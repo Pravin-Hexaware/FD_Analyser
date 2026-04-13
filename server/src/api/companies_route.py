@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Query, HTTPException, Header
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from api.service.company_service import CompanyService
 from api.models.company_model import Company
 from api.Xbrl_annual_extractor import extract_annual, ExtractAnnualRequest
+from api.xbrl_route import extract_xbrl, ExtractXBRLRequest
+from repository.sqlite_repository import SqliteRepository
 import httpx
 
 router = APIRouter()
@@ -247,6 +249,192 @@ async def get_company_annual(company_id: str):
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ExtractionCompareRequest(BaseModel):
+    scrip_codes: List[str]
+    frequency: str = "annual"
+    period: Optional[str] = "latest year"
+
+
+def _flatten_extraction_metrics(extracted: Any, publication_date: Optional[str] = None) -> dict:
+    if hasattr(extracted, "dict") and callable(getattr(extracted, "dict")):
+        extracted = extracted.dict()
+
+    if not isinstance(extracted, dict):
+        return {}
+
+    def map_key(key: str) -> str:
+        mapping = {
+            "Sales": "sales",
+            "Expenses": "expenses",
+            "OperatingProfit": "operating_profit",
+            "OPM_percentage": "opm_percentage",
+            "OtherIncome": "other_income",
+            "CostOfMaterialsConsumed": "cost_of_materials_consumed",
+            "EmployeeBenefitExpense": "employee_benefit_expense",
+            "OtherExpenses": "other_expenses",
+            "Interest": "interest",
+            "Depreciation": "depreciation",
+            "ProfitBeforeTax": "profit_before_tax",
+            "CurrentTax": "current_tax",
+            "DeferredTax": "deferred_tax",
+            "Tax": "tax",
+            "Tax_percent": "tax_percent",
+            "NetProfit": "net_profit",
+            "EPS_in_RS": "eps_in_rs",
+            "EquityCapital": "equity_capital",
+            "Reserves": "reserves",
+            "Borrowings": "borrowings",
+            "OtherLiabilities": "other_liabilities",
+            "TotalLiabilities": "total_liabilities",
+            "TotalEquity": "total_equity",
+            "FixedAssets": "fixed_assets",
+            "CWIP": "cwip",
+            "Investments": "investments",
+            "TotalAssets": "total_assets",
+            "CashFromOperatingActivity": "cash_from_operating_activity",
+            "CashFromInvestingActivity": "cash_from_investing_activity",
+            "CashFromFinancingActivity": "cash_from_financing_activity",
+            "company_name": "company_name",
+            "company_symbol": "company_symbol",
+            "currency": "currency",
+            "level_of_rounding": "level_of_rounding",
+            "reporting_type": "reporting_type",
+            "NatureOfReport": "nature_of_report",
+            "type": "type",
+            "url": "url",
+            "error": "error",
+        }
+        return mapping.get(key, key.lower())
+
+    flattened = {}
+
+    for key, value in extracted.items():
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                flattened[map_key(nested_key)] = nested_value
+            continue
+        flattened[map_key(key)] = value
+
+    if publication_date and not flattened.get("period"):
+        flattened["period"] = publication_date
+    return flattened
+
+
+@router.post("/companies/extraction_compare")
+async def compare_extraction(request: ExtractionCompareRequest):
+    try:
+        print(f"[EXTRACTION_COMPARE] endpoint triggered")
+        print(f"[EXTRACTION_COMPARE] request: frequency={request.frequency}, period={request.period}, scrip_codes={request.scrip_codes}")
+
+        if not request.scrip_codes or len(request.scrip_codes) < 2:
+            raise HTTPException(status_code=400, detail="At least 2 companies required for extraction comparison")
+
+        frequency = request.frequency.lower()
+        if frequency not in {"annual", "quarterly"}:
+            raise HTTPException(status_code=400, detail="frequency must be 'annual' or 'quarterly'")
+
+        repo = SqliteRepository()
+        url_to_scrip: Dict[str, str] = {}
+        payload_urls: list[str] = []
+        companies_payload: Dict[str, Any] = {}
+        available_periods: Dict[str, list[str]] = {}
+
+        for scrip_code in request.scrip_codes:
+            company = company_service.get_company_details(scrip_code)
+            matched = repo.get_extraction_records(
+                scrip_code,
+                extraction_type=frequency,
+                period=request.period,
+                latest_only=True,
+                limit=1,
+            )
+
+            available = repo.get_extraction_records(
+                scrip_code,
+                extraction_type=frequency,
+                limit=10,
+            )
+            available_periods[scrip_code] = [row.get("publication_date") for row in available if row.get("publication_date")]
+
+            print(f"[EXTRACTION_COMPARE] company={scrip_code} available_records={len(available)} matched_records={len(matched)} available_periods={available_periods.get(scrip_code)}")
+
+            if matched and len(matched) > 0:
+                record = matched[0]
+                xbrl_link = record.get("xbrl_link")
+                print(f"[EXTRACTION_COMPARE] selected_record for {scrip_code}: publication_date={record.get('publication_date')} report_type={record.get('report_type')} xbrl_link={xbrl_link}")
+                if xbrl_link:
+                    payload_urls.append(xbrl_link)
+                    url_to_scrip[xbrl_link] = scrip_code
+                    companies_payload[scrip_code] = {
+                        "company_name": record.get("company_name") or (company.name if company else None),
+                        "company_symbol": record.get("symbol") or (company.symbol if company else None),
+                        "scrip_code": scrip_code,
+                        "publication_date": record.get("publication_date"),
+                        "report_type": record.get("report_type"),
+                        "xbrl_url": xbrl_link,
+                        "financials": [],
+                    }
+                else:
+                    print(f"[EXTRACTION_COMPARE] warning: matched record for {scrip_code} has no xbrl_link")
+            else:
+                print(f"[EXTRACTION_COMPARE] no matching extraction record found for company={scrip_code} period={request.period}")
+                companies_payload[scrip_code] = {
+                    "company_name": company.name if company else None,
+                    "company_symbol": company.symbol if company else None,
+                    "scrip_code": scrip_code,
+                    "publication_date": None,
+                    "report_type": None,
+                    "xbrl_url": None,
+                    "financials": [],
+                }
+
+        print(f"[EXTRACTION_COMPARE] payload_urls={payload_urls}")
+        extracted_results = []
+        if payload_urls:
+            if frequency == "annual":
+                print("[EXTRACTION_COMPARE] calling endpoint /api/extract/annual")
+                extracted_results = await extract_annual(ExtractAnnualRequest(url=payload_urls))
+            else:
+                print("[EXTRACTION_COMPARE] calling endpoint /api/extract/urls")
+                extracted_results = await extract_xbrl(ExtractXBRLRequest(url=payload_urls))
+
+            print(f"[EXTRACTION_COMPARE] extracted_results count={len(extracted_results)}")
+            for raw_result in extracted_results:
+                result = raw_result.dict() if hasattr(raw_result, "dict") and callable(getattr(raw_result, "dict")) else raw_result
+                url = result.get("url") if isinstance(result, dict) else None
+                result_type = result.get("type") if isinstance(result, dict) else None
+                error_msg = result.get("error") if isinstance(result, dict) else None
+                print(f"[EXTRACTION_COMPARE] raw result url={url} type={result_type} error={error_msg}")
+                if url and url_to_scrip.get(url):
+                    scrip_code = url_to_scrip[url]
+                    flattened = _flatten_extraction_metrics(result, companies_payload[scrip_code].get("publication_date"))
+                    companies_payload[scrip_code]["financials"] = [flattened]
+                    companies_payload[scrip_code]["extraction"] = result
+                    print(f"[EXTRACTION_COMPARE] attached extraction result to {scrip_code}")
+                else:
+                    print(f"[EXTRACTION_COMPARE] warning: extracted result url={url} did not match any requested company")
+
+        else:
+            print("[EXTRACTION_COMPARE] no URLs to extract, skipping extraction call")
+
+        response_payload = {
+            "success": True,
+            "companies": companies_payload,
+            "frequency": frequency,
+            "period": request.period,
+            "available_periods": available_periods,
+            "table": {"headers": [], "rows": []},
+            "count": len(companies_payload),
+        }
+        print(f"[EXTRACTION_COMPARE] response prepared count={len(companies_payload)}")
+        return response_payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[EXTRACTION_COMPARE] ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

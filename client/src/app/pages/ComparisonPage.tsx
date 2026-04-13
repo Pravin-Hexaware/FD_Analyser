@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import { Plus, X, Search, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { AppShell } from "../components/AppShell";
-import { fetchCompanies, fetchCompanyFinancials, type CompanyInfo } from "../services/api";
+import { fetchCompanies, fetchCompanyFinancials, compareExtractionData, type CompanyInfo } from "../services/api";
 import {
   BarChart,
   Bar,
@@ -25,6 +25,7 @@ export default function ComparisonPage() {
   const [selectedCompanies, setSelectedCompanies] = useState<string[]>([]);
   const [backendCompanies, setBackendCompanies] = useState<CompanyInfo[]>([]);
   const [frequency, setFrequency] = useState<"annual" | "quarterly">("annual");
+  const [selectedPeriod, setSelectedPeriod] = useState<string>("latest year");
   const [comparisonData, setComparisonData] = useState<Record<string, FinancialData>>({});
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -64,25 +65,42 @@ export default function ComparisonPage() {
     if (selectedCompanies.length >= 2) {
       loadComparisonData();
     }
-  }, [selectedCompanies, frequency]);
+  }, [selectedCompanies, frequency, selectedPeriod]);
 
   const loadComparisonData = async () => {
     setLoading(true);
-    const data: Record<string, FinancialData> = {};
-    
-    for (const scripCode of selectedCompanies) {
-      try {
-        const financials = await fetchCompanyFinancials(scripCode, frequency);
-        console.log(`Loaded ${frequency} data for ${scripCode}:`, financials);
-        data[scripCode] = financials;
-      } catch (error) {
-        console.error(`Failed to load data for ${scripCode}:`, error);
+
+    try {
+      const response = await compareExtractionData(selectedCompanies, frequency, selectedPeriod);
+      if (response?.companies && Object.keys(response.companies).length > 0) {
+        setComparisonData(response.companies);
+      } else {
+        const fallbackData: Record<string, FinancialData> = {};
+        for (const scripCode of selectedCompanies) {
+          try {
+            const financials = await fetchCompanyFinancials(scripCode, frequency);
+            fallbackData[scripCode] = financials;
+          } catch (error) {
+            console.error(`Failed to load fallback data for ${scripCode}:`, error);
+          }
+        }
+        setComparisonData(fallbackData);
       }
+    } catch (error) {
+      console.error("Comparison extraction failed:", error);
+      const fallbackData: Record<string, FinancialData> = {};
+      for (const scripCode of selectedCompanies) {
+        try {
+          const financials = await fetchCompanyFinancials(scripCode, frequency);
+          fallbackData[scripCode] = financials;
+        } catch (fetchError) {
+          console.error(`Failed to load fallback data for ${scripCode}:`, fetchError);
+        }
+      }
+      setComparisonData(fallbackData);
+    } finally {
+      setLoading(false);
     }
-    
-    console.log("Comparison data loaded:", data);
-    setComparisonData(data);
-    setLoading(false);
   };
 
   const available = backendCompanies.filter((c) => !selectedCompanies.includes(c.scrip_code));
@@ -90,8 +108,21 @@ export default function ComparisonPage() {
     .map((code: string) => backendCompanies.find((c) => c.scrip_code === code))
     .filter(Boolean) as CompanyInfo[];
 
+  const getRecentFiscalYears = () => {
+    const now = new Date();
+    const endYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    return Array.from({ length: 5 }, (_, index) => {
+      const year = endYear - index;
+      const startYear = year - 1;
+      return {
+        label: `FY${startYear}-${year}`,
+        value: `${year}`,
+      };
+    });
+  };
+
   // Filter companies based on search query and sector
-  const selectedSectors = [...new Set(selectedData.map(c => c.sector))];
+  const selectedSectors = Array.from(new Set(selectedData.map(c => c.sector)));
   
   // Include BOTH selected and available companies in the list, but filter by search and sector
   const allCompanies = backendCompanies;
@@ -370,7 +401,10 @@ export default function ComparisonPage() {
               <span className="text-sm font-semibold text-gray-900">Financial Period:</span>
               <div className="flex gap-2 ml-auto">
                 <button
-                  onClick={() => setFrequency("annual")}
+                  onClick={() => {
+                    setFrequency("annual");
+                    setSelectedPeriod("latest year");
+                  }}
                   className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                     frequency === "annual"
                       ? "bg-indigo-600 text-white"
@@ -380,7 +414,10 @@ export default function ComparisonPage() {
                   Annual
                 </button>
                 <button
-                  onClick={() => setFrequency("quarterly")}
+                  onClick={() => {
+                    setFrequency("quarterly");
+                    setSelectedPeriod("latest quarter");
+                  }}
                   className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                     frequency === "quarterly"
                       ? "bg-indigo-600 text-white"
@@ -389,6 +426,48 @@ export default function ComparisonPage() {
                 >
                   Quarterly
                 </button>
+              </div>
+            </div>
+
+            {/* Period Selection Toggle */}
+            <div className="flex items-center gap-2 p-4 border-b border-gray-100">
+              <span className="text-sm font-semibold text-gray-900">Period:</span>
+              <div className="flex flex-wrap gap-2 ml-auto">
+                {frequency === "quarterly" ? (
+                  [
+                    { label: "Latest quarter", value: "latest quarter" },
+                    { label: "March", value: "march" },
+                    { label: "June", value: "june" },
+                    { label: "September", value: "september" },
+                    { label: "December", value: "december" },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setSelectedPeriod(option.value)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                        selectedPeriod === option.value
+                          ? "bg-indigo-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))
+                ) : (
+                  [{ label: "Latest year", value: "latest year" }, ...getRecentFiscalYears()].map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setSelectedPeriod(option.value)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                        selectedPeriod === option.value
+                          ? "bg-indigo-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))
+                )}
               </div>
             </div>
 

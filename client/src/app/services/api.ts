@@ -305,4 +305,54 @@ export async function compareExtractionData(
   }
 }
 
+export async function getAvailablePeriods(
+  scripCodes: string[],
+  frequency: string = 'annual'
+): Promise<any> {
+  try {
+    const response = await apiClient.post(
+      '/companies/available-periods',
+      {
+        scrip_codes: scripCodes,
+        frequency,
+        year: undefined,
+        quarter_type: undefined
+      }
+    );
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.detail || error.message;
+      throw new Error(`Backend error: ${message}`);
+    }
+    throw error;
+  }
+}
+
+export async function compareCompaniesWithExtraction(
+  scripCodes: string[],
+  frequency: string = 'annual',
+  year?: string,
+  quarterType?: string
+): Promise<any> {
+  try {
+    const response = await apiClient.post(
+      '/companies/compare-extract',
+      {
+        scrip_codes: scripCodes,
+        frequency,
+        year,
+        quarter_type: quarterType
+      }
+    );
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.detail || error.message;
+      throw new Error(`Backend error: ${message}`);
+    }
+    throw error;
+  }
+}
+
 export default apiClient;

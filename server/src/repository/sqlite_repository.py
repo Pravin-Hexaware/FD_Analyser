@@ -434,6 +434,22 @@ class SqliteRepository:
         if period_text in ["latest", "current", "recent", "latest quarter", "latest year", "latest financial year", "last year", "last financial year", "previous year", "previous financial year"]:
             return True
 
+        quarter_map = {
+            "march": "mq",
+            "mq": "mq",
+            "june": "jq",
+            "jq": "jq",
+            "september": "sq",
+            "sep": "sq",
+            "sq": "sq",
+            "december": "dq",
+            "dec": "dq",
+            "dq": "dq",
+        }
+        if period_text in quarter_map:
+            normalized = quarter_map[period_text]
+            return normalized in str(publication_date or "").lower()
+
         last_years_match = re.search(r"last\s+(\d+)\s*years?", period_text)
         if last_years_match:
             return self._matches_time_filter(publication_date, None, int(last_years_match.group(1)))

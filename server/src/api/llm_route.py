@@ -77,7 +77,11 @@ def _validation_csv_path() -> Path:
 def _normalize_text(text: Optional[str]) -> str:
     if text is None:
         return ""
-    return re.sub(r"\s+", " ", text.strip().lower())
+    normalized = text.strip().lower()
+    normalized = re.sub(r"\.|,|\(|\)|&", "", normalized)
+    normalized = re.sub(r"\b(ltd|ltd\b|limited)\b", "limited", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
 
 
 def _load_validation_companies() -> List[Dict[str, str]]:
@@ -109,40 +113,50 @@ def _load_validation_companies() -> List[Dict[str, str]]:
 def _resolve_company_validation(company_name: str, symbol: Optional[str] = None) -> Dict[str, Any]:
     normalized_query_name = _normalize_text(company_name)
     validation_rows = _load_validation_companies()
-    if not normalized_query_name or not validation_rows:
+    if not validation_rows:
         return {
             "valid": False,
             "company_name": company_name,
-            "reason": "No matching validation rows found or validation data unavailable.",
+            "reason": "Validation data unavailable.",
         }
 
-    name_matches = [
-        row for row in validation_rows
-        if normalized_query_name in _normalize_text(row["issuer_name"]) or _normalize_text(row["issuer_name"]).find(normalized_query_name) >= 0
-    ]
-
-    if not name_matches:
-        return {
-            "valid": False,
-            "company_name": company_name,
-            "reason": "Company name not found in Validation.csv.",
-        }
-
+    normalized_symbol = _normalize_text(symbol) if symbol else ""
     matched_row = None
-    symbol_matched = None
-    matched_symbol = symbol or ""
-    if symbol:
-        normalized_symbol = _normalize_text(symbol)
+    symbol_matched = False
+    name_matches: List[Dict[str, str]] = []
+
+    if normalized_symbol:
         symbol_candidates = [
-            row for row in name_matches
-            if normalized_symbol and (normalized_symbol in _normalize_text(row["security_id"]) or normalized_symbol == _normalize_text(row["security_code"]))
+            row for row in validation_rows
+            if normalized_symbol == _normalize_text(row["security_id"]) 
+            or normalized_symbol == _normalize_text(row["security_code"])
         ]
         if symbol_candidates:
             matched_row = symbol_candidates[0]
             symbol_matched = True
 
     if matched_row is None:
-        # Use the best name match when symbol is missing or does not match
+        if not normalized_query_name:
+            return {
+                "valid": False,
+                "company_name": company_name,
+                "reason": "Company name not provided and symbol did not match Validation.csv.",
+            }
+
+        name_matches = [
+            row for row in validation_rows
+            if normalized_query_name in _normalize_text(row["issuer_name"]) 
+            or _normalize_text(row["issuer_name"]).find(normalized_query_name) >= 0
+            or normalized_query_name in _normalize_text(row["security_name"])
+        ]
+
+        if not name_matches:
+            return {
+                "valid": False,
+                "company_name": company_name,
+                "reason": "Company name not found in Validation.csv.",
+            }
+
         matched_row = sorted(
             name_matches,
             key=lambda row: len(_normalize_text(row["issuer_name"])),

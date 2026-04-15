@@ -678,7 +678,9 @@ def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: 
     system_prompt = f"""
 You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
 
-Generate a detailed, professional financial analysis report in Markdown format. The report should comprehensively analyze ALL available financial data, metrics, and parameters provided in the input, not just a subset. Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data.
+Generate a detailed, professional financial analysis report in Markdown format. The report should comprehensively analyze ALL available financial data, metrics, and parameters provided in the input, not just a subset. Pay special attention to any notes, comments, observations, or qualitative text embedded in the JSON data. Use those notes as evidence and integrate them with numeric findings.
+
+Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data.
 
 The report should be extremely detailed and thorough, suitable for board-level strategic discussions, investment committee reviews, and executive decision-making. Length is not a constraint - provide exhaustive analysis that covers all aspects of the financial performance, risks, opportunities, and implications.
 
@@ -798,7 +800,7 @@ Conduct exhaustive period-by-period and cross-company analysis of ALL financial 
 
     user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
 
-    response = _invoke_llm(system_prompt, user_prompt, max_tokens=2500)
+    response = _invoke_llm(system_prompt, user_prompt)
 
     token_usage = _extract_token_usage(response)
     normalized = _normalize_llm_response(response)

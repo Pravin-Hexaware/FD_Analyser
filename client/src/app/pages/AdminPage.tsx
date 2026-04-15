@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  Database, CheckCircle, RefreshCw, FileText, Plus,
-  Play, Activity, XCircle,
-  Clock, Check, X, Upload, BarChart3, ChevronDown, Edit2, Trash2
+  CheckCircle, RefreshCw, Plus,
+  Play, XCircle,
+  Clock, Check, X, Upload, ChevronDown, Edit2, Trash2,
+  AlertCircle, Zap
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -42,6 +43,12 @@ export default function AdminPage() {
   const [newSource, setNewSource] = useState({ name: "", standard: "", formats: "" });
   const logRef = useRef<HTMLDivElement>(null);
 
+  // Missing companies state
+  const [missingCompanies, setMissingCompanies] = useState<any[]>([]);
+  const [selectedMissingCompanies, setSelectedMissingCompanies] = useState<Set<string>>(new Set());
+  const [processingMissing, setProcessingMissing] = useState(false);
+  const [showMissingDropdown, setShowMissingDropdown] = useState(true);
+
   const [newCompany, setNewCompany] = useState({ name: "", symbol: "", bseCode: "", sector: "" });
 
   // Fetch companies from database on mount
@@ -58,6 +65,26 @@ export default function AdminPage() {
     };
 
     loadCompanies();
+  }, []);
+
+  // Load missing companies
+  useEffect(() => {
+    const loadMissingCompanies = async () => {
+      try {
+        const response = await fetch("http://localhost:8001/api/missing-companies/status");
+        if (response.ok) {
+          const data = await response.json();
+          console.log("Loaded missing companies with status:", data);
+          setMissingCompanies(data);
+        } else {
+          console.error("Failed to load missing companies, status:", response.status);
+        }
+      } catch (error) {
+        console.error("Failed to load missing companies:", error);
+      }
+    };
+
+    loadMissingCompanies();
   }, []);
 
   // Set up callback to add extracted companies to the list
@@ -101,6 +128,80 @@ export default function AdminPage() {
     setNewCompany({ name: "", symbol: "", bseCode: "", sector: "" });
     setShowAddForm(false);
     toast.success(`${company.name} added to master list.`);
+  };
+
+  const handleProcessMissingCompanies = async () => {
+    if (selectedMissingCompanies.size === 0) {
+      toast.error("Please select at least one company to process");
+      return;
+    }
+
+    setProcessingMissing(true);
+    try {
+      const response = await fetch("http://localhost:8001/api/missing-companies/add-to-bse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scrip_codes: Array.from(selectedMissingCompanies),
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        // Refresh main companies list from database
+        try {
+          const dbCompanies = await apiClient.getAllCompanies();
+          if (dbCompanies && dbCompanies.length > 0) {
+            setCompanies(dbCompanies as any);
+          }
+        } catch (error) {
+          console.error("Failed to reload companies list:", error);
+        }
+        
+        // Refresh missing companies list
+        const refreshResponse = await fetch("http://localhost:8001/api/missing-companies");
+        if (refreshResponse.ok) {
+          const updated = await refreshResponse.json();
+          setMissingCompanies(updated);
+        }
+        
+        setSelectedMissingCompanies(new Set());
+        
+        if (result.added_count > 0) {
+          toast.success(`Added ${result.added_count} companies to BSE Filings! You can now process them using the XBRL extraction.`);
+        }
+        if (result.errors && result.errors.length > 0) {
+          toast.error(`Some errors: ${result.errors.join(', ')}`);
+        }
+      } else {
+        const error = await response.json();
+        toast.error(error.detail || "Failed to add companies to BSE Filings");
+      }
+    } catch (error) {
+      console.error("Error adding to BSE Filings:", error);
+      toast.error("Error adding companies to BSE Filings");
+    } finally {
+      setProcessingMissing(false);
+    }
+  };
+
+  const handleToggleMissingCompany = (scripCode: string) => {
+    const newSelected = new Set(selectedMissingCompanies);
+    if (newSelected.has(scripCode)) {
+      newSelected.delete(scripCode);
+    } else {
+      newSelected.add(scripCode);
+    }
+    setSelectedMissingCompanies(newSelected);
+  };
+
+  const handleToggleAllMissing = () => {
+    if (selectedMissingCompanies.size === missingCompanies.length) {
+      setSelectedMissingCompanies(new Set());
+    } else {
+      setSelectedMissingCompanies(new Set(missingCompanies.map((c) => c.scrip_code)));
+    }
   };
 
   const handleAddDataSource = () => {
@@ -421,6 +522,106 @@ export default function AdminPage() {
             </div>
           </div>
         </div>
+        )}
+
+        {/* ── Missing Companies ────────────────────────────────── */}
+        {missingCompanies.length > 0 && (
+          <div className="bg-white rounded-2xl border border-amber-200 shadow-sm overflow-hidden">
+            <button
+              onClick={() => setShowMissingDropdown(!showMissingDropdown)}
+              className="w-full px-6 py-4 border-b border-amber-100 flex items-center justify-between hover:bg-amber-50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <AlertCircle className="size-5 text-amber-600" />
+                <div className="text-left">
+                  <h2 className="font-semibold text-gray-900">Missing Companies Tracker</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">{missingCompanies.length} companies awaiting XBRL processing</p>
+                </div>
+              </div>
+              <ChevronDown 
+                className={`size-4 text-amber-600 transition-transform ${showMissingDropdown ? "rotate-180" : ""}`}
+              />
+            </button>
+
+            {showMissingDropdown && (
+              <div className="p-6 space-y-4">
+                {/* Selection Header */}
+                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedMissingCompanies.size === missingCompanies.length && missingCompanies.length > 0}
+                      onChange={handleToggleAllMissing}
+                      className="w-4 h-4 rounded border-gray-300"
+                    />
+                    <span className="text-sm font-medium text-gray-700">
+                      {selectedMissingCompanies.size > 0 
+                        ? `${selectedMissingCompanies.size} selected` 
+                        : "Select all"}
+                    </span>
+                  </label>
+                  <Button
+                    size="sm"
+                    onClick={handleProcessMissingCompanies}
+                    disabled={selectedMissingCompanies.size === 0 || processingMissing}
+                    className="bg-amber-600 hover:bg-amber-700 text-white text-xs"
+                  >
+                    <Zap className="size-3.5 mr-1.5" />
+                    {processingMissing ? "Adding..." : `Add to BSE Filings (${selectedMissingCompanies.size})`}
+                  </Button>
+                </div>
+
+                {/* Companies List */}
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {missingCompanies.map((company) => (
+                    <label
+                      key={company.scrip_code}
+                      className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-amber-50 cursor-pointer transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedMissingCompanies.has(company.scrip_code)}
+                        onChange={() => handleToggleMissingCompany(company.scrip_code)}
+                        className="w-4 h-4 rounded border-gray-300"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <div className="font-medium text-gray-900 text-sm">{company.company_name}</div>
+                          {company.has_filings ? (
+                            <div className="text-xs px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full font-medium">
+                              {company.filing_count} filings
+                            </div>
+                          ) : (
+                            <div className="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded-full font-medium">
+                              No filings
+                            </div>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {company.symbol && <span>{company.symbol} · </span>}
+                          {company.scrip_code && <span>Code: {company.scrip_code}</span>}
+                        </div>
+                        {company.query && (
+                          <div className="text-xs text-gray-400 mt-0.5">Query: {company.query}</div>
+                        )}
+                      </div>
+                      <div className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded">
+                        {company.frequency}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+
+                {/* Info Message */}
+                <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                  <p className="text-xs text-blue-700">
+                    Selected companies will be added to <strong>BSE Filings</strong> data source. 
+                    You can then process them using the standard XBRL extraction workflow.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
         )}
 
         {/* ── Company Master List ──────────────────────────────── */}

@@ -1,11 +1,16 @@
 from fastapi import APIRouter, Query, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+import json
+import asyncio
 from api.service.company_service import CompanyService
 from api.models.company_model import Company
-from api.Xbrl_annual_extractor import extract_annual, ExtractAnnualRequest
-from api.xbrl_route import extract_xbrl, ExtractXBRLRequest
+from api.Xbrl_annual_extractor import extract_annual, ExtractAnnualRequest, calculate_metrics_fourd
+from api.xbrl_route import extract_xbrl, ExtractXBRLRequest, calculate_metrics, _convert_xml_grouped_to_list
 from repository.sqlite_repository import SqliteRepository
+from service.html_extraction_service import extract_html_data, extract_ix_facts_from_root
+from service.xml_extraction_service import extract_xbrl_data_from_bytes
+from lxml import html as lxml_html
 import httpx
 
 router = APIRouter()
@@ -325,8 +330,16 @@ def _flatten_extraction_metrics(extracted: Any, publication_date: Optional[str] 
 
 @router.post("/companies/extraction_compare")
 async def compare_extraction(request: ExtractionCompareRequest):
+    """
+    Compare companies using raw_content from xbrl_filing_table.
+    NEW APPROACH: 
+    1. Query annual_extractions or quarterly_extractions table to find available publication dates
+    2. Select appropriate record based on period requested
+    3. Use company_name + publication_date to find matching raw_content in xbrl_filing_table
+    4. Parse raw_content and extract metrics
+    """
     try:
-        print(f"[EXTRACTION_COMPARE] endpoint triggered")
+        print(f"[EXTRACTION_COMPARE] endpoint triggered (NEW: raw_content from DB using extraction tables)")
         print(f"[EXTRACTION_COMPARE] request: frequency={request.frequency}, period={request.period}, scrip_codes={request.scrip_codes}")
 
         if not request.scrip_codes or len(request.scrip_codes) < 2:
@@ -337,89 +350,191 @@ async def compare_extraction(request: ExtractionCompareRequest):
             raise HTTPException(status_code=400, detail="frequency must be 'annual' or 'quarterly'")
 
         repo = SqliteRepository()
-        url_to_scrip: Dict[str, str] = {}
-        payload_urls: list[str] = []
         companies_payload: Dict[str, Any] = {}
         available_periods: Dict[str, list[str]] = {}
 
+        # Step 1: Get extraction records from appropriate table (annual or quarterly)
         for scrip_code in request.scrip_codes:
             company = company_service.get_company_details(scrip_code)
-            matched = repo.get_extraction_records(
+            
+            # Get extraction records from the appropriate table
+            extraction_records = repo.get_extraction_records(
                 scrip_code,
                 extraction_type=frequency,
-                period=request.period,
-                latest_only=True,
-                limit=1,
+                limit=10
             )
+            
+            # Collect available periods
+            available_periods[scrip_code] = [
+                r.get("publication_date") for r in extraction_records 
+                if r.get("publication_date")
+            ]
+            print(f"[EXTRACTION_COMPARE] company={scrip_code} extraction_records={len(extraction_records)} periods={available_periods.get(scrip_code)}")
 
-            available = repo.get_extraction_records(
-                scrip_code,
-                extraction_type=frequency,
-                limit=10,
-            )
-            available_periods[scrip_code] = [row.get("publication_date") for row in available if row.get("publication_date")]
+            # Initialize company payload
+            companies_payload[scrip_code] = {
+                "company_name": company.name if company else None,
+                "company_symbol": company.symbol if company else None,
+                "scrip_code": scrip_code,
+                "publication_date": None,
+                "report_type": None,
+                "xbrl_url": None,
+                "financials": [],
+            }
 
-            print(f"[EXTRACTION_COMPARE] company={scrip_code} available_records={len(available)} matched_records={len(matched)} available_periods={available_periods.get(scrip_code)}")
-
-            if matched and len(matched) > 0:
-                record = matched[0]
-                xbrl_link = record.get("xbrl_link")
-                print(f"[EXTRACTION_COMPARE] selected_record for {scrip_code}: publication_date={record.get('publication_date')} report_type={record.get('report_type')} xbrl_link={xbrl_link}")
-                if xbrl_link:
-                    payload_urls.append(xbrl_link)
-                    url_to_scrip[xbrl_link] = scrip_code
-                    companies_payload[scrip_code] = {
-                        "company_name": record.get("company_name") or (company.name if company else None),
-                        "company_symbol": record.get("symbol") or (company.symbol if company else None),
-                        "scrip_code": scrip_code,
-                        "publication_date": record.get("publication_date"),
-                        "report_type": record.get("report_type"),
-                        "xbrl_url": xbrl_link,
-                        "financials": [],
-                    }
-                else:
-                    print(f"[EXTRACTION_COMPARE] warning: matched record for {scrip_code} has no xbrl_link")
+            # Step 2: Select appropriate extraction record based on period
+            selected_record = None
+            if request.period in ["latest year", "latest quarter"]:
+                # Use the first (most recent) record
+                if extraction_records:
+                    selected_record = extraction_records[0]
             else:
-                print(f"[EXTRACTION_COMPARE] no matching extraction record found for company={scrip_code} period={request.period}")
-                companies_payload[scrip_code] = {
-                    "company_name": company.name if company else None,
-                    "company_symbol": company.symbol if company else None,
-                    "scrip_code": scrip_code,
-                    "publication_date": None,
-                    "report_type": None,
-                    "xbrl_url": None,
-                    "financials": [],
-                }
+                # Look for specific period
+                for record in extraction_records:
+                    if record.get("publication_date") == request.period:
+                        selected_record = record
+                        break
+                if not selected_record and extraction_records:
+                    selected_record = extraction_records[0]
 
-        print(f"[EXTRACTION_COMPARE] payload_urls={payload_urls}")
-        extracted_results = []
-        if payload_urls:
-            if frequency == "annual":
-                print("[EXTRACTION_COMPARE] calling endpoint /api/extract/annual")
-                extracted_results = await extract_annual(ExtractAnnualRequest(url=payload_urls))
-            else:
-                print("[EXTRACTION_COMPARE] calling endpoint /api/extract/urls")
-                extracted_results = await extract_xbrl(ExtractXBRLRequest(url=payload_urls))
+            # Step 3: If we have a record, use company_name + publication_date to find raw_content in xbrl_filing_table
+            if selected_record:
+                company_name = selected_record.get("company_name")
+                publication_date = selected_record.get("publication_date")
+                xbrl_link = selected_record.get("xbrl_link")
+                
+                print(f"[EXTRACTION_COMPARE] selected_record for {scrip_code}: company_name={company_name}, publication_date={publication_date}, xbrl_link={xbrl_link}")
+                
+                # Query xbrl_filing_table using company_name and publication_date as keys
+                if company_name and publication_date:
+                    cur = repo._conn.cursor()
+                    cur.execute(
+                        """
+                        SELECT scrip_code, symbol, xbrl_link, publication_date, report_type, raw_content
+                        FROM xbrl_filing_table
+                        WHERE scrip_code = ? AND publication_date = ? AND raw_content IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (scrip_code, publication_date)
+                    )
+                    xbrl_record = cur.fetchone()
+                    
+                    if xbrl_record:
+                        raw_content = dict(xbrl_record).get("raw_content")
+                        print(f"[EXTRACTION_COMPARE] found raw_content in xbrl_filing_table for {scrip_code} with publication_date={publication_date}")
+                        
+                        # Step 4: Parse raw_content
+                        if raw_content:
+                            try:
+                                print(f"[EXTRACTION_COMPARE] parsing raw_content for {scrip_code}")
+                                
+                                # Determine content type and parse accordingly
+                                xbrl_link = dict(xbrl_record).get("xbrl_link", "")
+                                raw_text = raw_content if isinstance(raw_content, str) else raw_content.decode('utf-8', errors='replace')
+                                raw_preview = raw_text.lstrip()[:1024].lower()
+                                raw_bytes = raw_text.encode('utf-8')
 
-            print(f"[EXTRACTION_COMPARE] extracted_results count={len(extracted_results)}")
-            for raw_result in extracted_results:
-                result = raw_result.dict() if hasattr(raw_result, "dict") and callable(getattr(raw_result, "dict")) else raw_result
-                url = result.get("url") if isinstance(result, dict) else None
-                result_type = result.get("type") if isinstance(result, dict) else None
-                error_msg = result.get("error") if isinstance(result, dict) else None
-                print(f"[EXTRACTION_COMPARE] raw result url={url} type={result_type} error={error_msg}")
-                if url and url_to_scrip.get(url):
-                    scrip_code = url_to_scrip[url]
-                    flattened = _flatten_extraction_metrics(result, companies_payload[scrip_code].get("publication_date"))
-                    companies_payload[scrip_code]["financials"] = [flattened]
-                    companies_payload[scrip_code]["extraction"] = result
-                    print(f"[EXTRACTION_COMPARE] attached extraction result to {scrip_code}")
+                                # Detect content type by looking at actual content
+                                is_html_content = (
+                                    '<html' in raw_preview or 
+                                    '<!doctype html' in raw_preview or 
+                                    '<body' in raw_preview or 
+                                    '<ix:' in raw_preview or
+                                    xbrl_link.lower().endswith('.html') or 
+                                    xbrl_link.lower().endswith('.htm')
+                                )
+                                
+                                is_xml_content = (
+                                    '<?xml' in raw_preview or
+                                    '<xbrli:xbrl' in raw_preview or
+                                    '<xbrl' in raw_preview or
+                                    xbrl_link.lower().endswith('.xml')
+                                )
+
+                                # Parse content with fallback mechanism
+                                if is_html_content:
+                                    print(f"[EXTRACTION_COMPARE] parsing HTML/iXBRL content for {scrip_code}")
+                                    try:
+                                        tree = lxml_html.fromstring(raw_bytes)
+                                        extracted_data = extract_ix_facts_from_root(tree)
+                                        print(f"[EXTRACTION_COMPARE] extracted {len(extracted_data)} facts from HTML for {scrip_code}")
+                                    except Exception as html_error:
+                                        print(f"[EXTRACTION_COMPARE] HTML parsing failed, trying XML fallback for {scrip_code}: {str(html_error)}")
+                                        try:
+                                            extracted_data_grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
+                                            extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
+                                            print(f"[EXTRACTION_COMPARE] XML fallback succeeded - extracted {len(extracted_data)} facts for {scrip_code}")
+                                        except Exception as xml_error:
+                                            print(f"[EXTRACTION_COMPARE] XML fallback also failed for {scrip_code}: {str(xml_error)}")
+                                            raise html_error
+                                elif is_xml_content:
+                                    print(f"[EXTRACTION_COMPARE] parsing XML content for {scrip_code}")
+                                    try:
+                                        extracted_data_grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
+                                        extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
+                                        print(f"[EXTRACTION_COMPARE] extracted {len(extracted_data)} facts from XML for {scrip_code}")
+                                    except Exception as xml_error:
+                                        print(f"[EXTRACTION_COMPARE] XML parsing failed, trying HTML fallback for {scrip_code}: {str(xml_error)}")
+                                        try:
+                                            tree = lxml_html.fromstring(raw_bytes)
+                                            extracted_data = extract_ix_facts_from_root(tree)
+                                            print(f"[EXTRACTION_COMPARE] HTML fallback succeeded - extracted {len(extracted_data)} facts for {scrip_code}")
+                                        except Exception as html_error:
+                                            print(f"[EXTRACTION_COMPARE] HTML fallback also failed for {scrip_code}: {str(html_error)}")
+                                            raise xml_error
+                                else:
+                                    # Unknown format - try HTML first, then XML
+                                    print(f"[EXTRACTION_COMPARE] unknown content type for {scrip_code}, trying HTML first")
+                                    try:
+                                        tree = lxml_html.fromstring(raw_bytes)
+                                        extracted_data = extract_ix_facts_from_root(tree)
+                                        print(f"[EXTRACTION_COMPARE] HTML parsing succeeded - extracted {len(extracted_data)} facts for {scrip_code}")
+                                    except Exception as html_error:
+                                        print(f"[EXTRACTION_COMPARE] HTML parsing failed, trying XML fallback for {scrip_code}: {str(html_error)}")
+                                        try:
+                                            extracted_data_grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
+                                            extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
+                                            print(f"[EXTRACTION_COMPARE] XML fallback succeeded - extracted {len(extracted_data)} facts for {scrip_code}")
+                                        except Exception as xml_error:
+                                            print(f"[EXTRACTION_COMPARE] both HTML and XML parsing failed for {scrip_code}")
+                                            raise html_error
+
+                                # Extract metrics from parsed content
+                                print(f"[EXTRACTION_COMPARE] extracting metrics for {scrip_code}")
+                                
+                                # Calculate metrics based on frequency
+                                if frequency == "annual":
+                                    metrics = calculate_metrics_fourd(extracted_data)
+                                else:
+                                    metrics = calculate_metrics(extracted_data)
+
+                                # Flatten and prepare metrics
+                                flattened = _flatten_extraction_metrics(
+                                    metrics, 
+                                    publication_date
+                                )
+                                
+                                # Update company payload with extracted data
+                                companies_payload[scrip_code]["financials"] = [flattened]
+                                companies_payload[scrip_code]["publication_date"] = publication_date
+                                companies_payload[scrip_code]["report_type"] = dict(xbrl_record).get("report_type")
+                                companies_payload[scrip_code]["xbrl_url"] = xbrl_link
+                                companies_payload[scrip_code]["extraction"] = metrics
+                                
+                                print(f"[EXTRACTION_COMPARE] successfully extracted metrics for {scrip_code}")
+                                
+                            except Exception as e:
+                                import traceback
+                                print(f"[EXTRACTION_COMPARE] error parsing raw_content for {scrip_code}: {str(e)}")
+                                print(f"[EXTRACTION_COMPARE] traceback: {traceback.format_exc()}")
+                    else:
+                        print(f"[EXTRACTION_COMPARE] no raw_content found in xbrl_filing_table for {scrip_code} with publication_date={publication_date}")
                 else:
-                    print(f"[EXTRACTION_COMPARE] warning: extracted result url={url} did not match any requested company")
+                    print(f"[EXTRACTION_COMPARE] selected record missing company_name or publication_date for {scrip_code}")
+            else:
+                print(f"[EXTRACTION_COMPARE] no extraction record found for {scrip_code} with period={request.period}")
 
-        else:
-            print("[EXTRACTION_COMPARE] no URLs to extract, skipping extraction call")
-
+        # Prepare response
         response_payload = {
             "success": True,
             "companies": companies_payload,
@@ -431,10 +546,13 @@ async def compare_extraction(request: ExtractionCompareRequest):
         }
         print(f"[EXTRACTION_COMPARE] response prepared count={len(companies_payload)}")
         return response_payload
+        
     except HTTPException:
         raise
     except Exception as e:
         print(f"[EXTRACTION_COMPARE] ERROR: {str(e)}")
+        import traceback
+        print(f"[EXTRACTION_COMPARE] traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

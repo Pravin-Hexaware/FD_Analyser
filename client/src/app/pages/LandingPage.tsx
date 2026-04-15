@@ -271,7 +271,7 @@ export default function LandingPage() {
       </section>
 
       {/* ── Ticker ──────────────────────────────────────────── */}
-      <div className="bg-slate-950 border-y border-slate-800 py-3 overflow-hidden">
+      {/*<div className="bg-slate-950 border-y border-slate-800 py-3 overflow-hidden">
         <div
           className="flex items-center gap-0 whitespace-nowrap"
           style={{ transform: `translateX(${tickerPos}px)`, transition: "none" }}
@@ -291,7 +291,7 @@ export default function LandingPage() {
             </div>
           ))}
         </div>
-      </div>
+      </div>*/}
 
       {/* ── Features ────────────────────────────────────────── */}
       <section className="py-20 max-w-7xl mx-auto px-6">
@@ -344,7 +344,7 @@ export default function LandingPage() {
           <div className="grid md:grid-cols-3 gap-8">
             {steps.map((step, idx) => (
               <div key={idx} className="relative">
-                {idx < steps.length - 1 && (
+                {idx < steps.length  -1 && (
                   <div className="hidden md:block absolute top-8 left-full w-full h-px border-t-2 border-dashed border-indigo-200 z-0" />
                 )}
                 <div className="relative z-10 text-center">

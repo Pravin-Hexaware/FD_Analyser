@@ -227,8 +227,8 @@ def get_actual_initial_prompt() -> str:
 First, break down the query into key components:
 - **statement_frequency**: 'quarterly', 'annual', 'both', or 'unspecified'.
 - **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.
-- **period**: Specific period like 'latest quarter', 'Q3 2023', 'FY2024', or 'unspecified'.
-- **time_horizon**: Normalized window such as 'latest', '2years', '5years', or 'unspecified'.
+- **period**: Specific period like 'latest quarter', 'latest financial year', 'all quarters of latest financial year', 'Q3 2023', 'FY2024-2025', or 'unspecified'.
+- **time_horizon**: Normalized window such as 'quarterly', 'annual', 'latest', '2years', '5years', or 'unspecified'.
 - **target_companies**: List of company names mentioned.
 - **industries**: Any industries mentioned.
 - **other_requirements**: Any other specific requirements or questions.
@@ -353,7 +353,7 @@ def _requires_historical_data(query: str) -> bool:
     return any(keyword in q for keyword in historical_keywords)
 
 
-def _interpret_time_window(period: str, time_horizon: str) -> tuple[bool, Optional[int], Optional[str], int]:
+def _interpret_time_window(period: str, time_horizon: str, frequency: str) -> tuple[bool, Optional[int], Optional[str], int]:
     """Parse period and time_horizon and return (latest_only, last_n_years, period_filter, limit_records)."""
     latest_only = False
     last_n_years = None
@@ -383,16 +383,26 @@ def _interpret_time_window(period: str, time_horizon: str) -> tuple[bool, Option
             if quarters_match:
                 limit_records = int(quarters_match.group(1))
                 latest_only = False  # Don't limit to single record
-                # Ensure we get recent quarters by setting last_n_years to 1 if not already set
                 if last_n_years is None:
                     last_n_years = 1
+            elif "all quarter" in normalized_period:
+                latest_only = False
+                if last_n_years is None:
+                    last_n_years = 1
+                if frequency == "quarterly":
+                    limit_records = max(limit_records, 4)
+                period_filter = period_filter or "latest year"
             elif "latest q" in normalized_period or "most recent" in normalized_period or "last quarter" in normalized_period or "previous quarter" in normalized_period:
                 latest_only = True
                 period_filter = "latest quarter"
             elif any(keyword in normalized_period for keyword in ["latest year", "latest financial year", "last year", "last financial year", "previous year", "previous financial year"]):
-                latest_only = True
                 period_filter = "latest year"
-                last_n_years = 1
+                last_n_years = last_n_years or 1
+                if frequency == "quarterly":
+                    latest_only = False
+                    limit_records = max(limit_records, 4)
+                else:
+                    latest_only = True
             elif "latest" in normalized_period:
                 latest_only = True
                 if "quarter" in normalized_period:
@@ -421,7 +431,7 @@ def _fetch_company_data(
     query: str = "",
 ) -> Dict[str, Any]:
     """Fetch data for a company and return the best matching extraction records."""
-    latest_only, last_n_years, period_filter, limit_records = _interpret_time_window(period, time_horizon)
+    latest_only, last_n_years, period_filter, limit_records = _interpret_time_window(period, time_horizon, frequency)
     requires_historical = _requires_historical_data(query)
 
     annual_limit = limit_records
@@ -665,6 +675,52 @@ async def llm_target_companies(request: LLMQueryRequest):
             }),
             output_data=json.dumps(db_fetch_log)
         )
+
+        # Check if any data was fetched
+        has_data = bool(all_data) and any(all_data.values())
+
+        if not has_data:
+            # No data available, return message without calling LLM
+            answer = "Company data for the specified period was unavailable. Please try some other company or period."
+            tokens_used = {}
+            final_llm_response = answer
+            final_llm_prompt = ""
+
+            # Save assistant message
+            repo.save_message(conversation_id, "llm", answer)
+
+            # Log that no data was found
+            repo.save_detailed_log(
+                chat_id=chat_id,
+                step_name="No Data Available",
+                input_data=json.dumps({
+                    "reason": "No extraction records found for requested companies/period"
+                }),
+                output_data=json.dumps({
+                    "message": answer
+                })
+            )
+
+            repo.close()
+
+            # Write log
+            write_llm_log(
+                user_query=user_query,
+                llm_prompt=initial_llm_prompt,
+                llm_response=initial_llm_response,
+                db_data=db_fetched_data,
+                data_passed_to_llm=data_passed_to_llm,
+                final_prompt=final_llm_prompt,
+                final_response=final_llm_response,
+                peer_extraction_log=peer_extraction_log if 'peer_extraction_log' in locals() else "",
+                token_usage=tokens_used
+            )
+
+            return {
+                "chat_id": chat_id,
+                "answer": answer,
+                "tokens_used": tokens_used
+            }
 
         # Step 3: Generate answer using LLM
         print("Step 3: Generating answer with 2nd LLM")

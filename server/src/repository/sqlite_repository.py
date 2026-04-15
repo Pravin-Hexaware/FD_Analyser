@@ -510,8 +510,12 @@ class SqliteRepository:
             return True
 
         period_text = period_filter.strip().lower()
-        if period_text in ["latest", "current", "recent", "latest quarter", "latest year", "latest financial year", "last year", "last financial year", "previous year", "previous financial year"]:
+        if period_text in ["latest", "current", "recent"]:
             return True
+        if period_text in ["latest quarter"]:
+            return True
+        if period_text in ["latest year", "latest financial year", "last year", "last financial year", "previous year", "previous financial year"]:
+            return self._matches_latest_fiscal_year(publication_date)
 
         quarter_map = {
             "march": "mq",
@@ -538,6 +542,21 @@ class SqliteRepository:
             return any(str(year) in str(publication_date or "") for year in years)
 
         return period_text in str(publication_date or "").lower()
+
+    def _matches_latest_fiscal_year(self, publication_date: Optional[str]) -> bool:
+        if not publication_date:
+            return False
+
+        current_date = datetime.utcnow()
+        if current_date.month >= 4:
+            start_year = current_date.year - 1
+            end_year = current_date.year
+        else:
+            start_year = current_date.year - 2
+            end_year = current_date.year - 1
+
+        years = self._extract_years_from_period_label(publication_date)
+        return bool(years and start_year in years and end_year in years)
 
     def _matches_recent_years(self, publication_date: Optional[str], last_n_years: int) -> bool:
         years = self._extract_years_from_period_label(publication_date)

@@ -126,7 +126,7 @@ def _try_parse_numeric_value(raw_value: Any) -> Optional[float]:
     return None
 
 
-def _invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int = 800) -> Any:
+def _invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int = 8000) -> Any:
     """Invoke the LangChain AzureChatOpenAI model and return the raw response."""
     llm = _get_llm()
     # LangChain returns an object with a .content attribute.
@@ -511,8 +511,8 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
         "First, break down the query into key components:\n"
         "- **statement_frequency**: 'quarterly', 'annual', 'both', or 'unspecified'.\n"
         "- **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.\n"
-        "- **period**: Specific period like 'latest quarter', 'Q3 2023', 'FY2024', or 'unspecified'.\n"
-        "- **time_horizon**: Normalized timeframe such as 'latest', '2years', '5years', or 'unspecified'.\n"
+        "- **period**: Specific period like 'latest quarter', 'latest financial year', 'all quarters of latest financial year', 'Q3 2023', 'FY2024-2025', or 'unspecified'.\n"
+        "- **time_horizon**: Normalized timeframe such as 'quarterly', 'annual', 'latest', '2years', '5years', or 'unspecified'.\n"
         "- **target_companies**: List of company names mentioned.\n"
         "- **industries**: Any industries mentioned.\n"
         "- **other_requirements**: Any other specific requirements or questions.\n"
@@ -678,11 +678,23 @@ def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: 
     system_prompt = f"""
 You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
 
-Generate a detailed, professional financial analysis report in Markdown format. The report should comprehensively analyze ALL available financial data, metrics, and parameters provided in the input, not just a subset. Pay special attention to any notes, comments, observations, or qualitative text embedded in the JSON data. Use those notes as evidence and integrate them with numeric findings.
+Generate a complete, exhaustive financial analysis report in Markdown format WITHOUT ANY TRUNCATION OR LENGTH RESTRICTIONS. The report should comprehensively analyze ALL available financial data, metrics, parameters, and textual information provided in the input - not just a subset.
 
-Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data.
+## CRITICAL: TEXTUAL INFORMATION AND NOTES
+The provided data includes TEXTUAL INFORMATION sections with financial notes, auditor remarks, management commentary, qualification statements, and other narrative disclosures. These are ESSENTIAL to include in your analysis as they provide critical context for understanding:
+- Audit qualifications or modifications to audit opinions
+- Management disclosure notes explaining financial performance
+- Regulatory compliance information
+- Special circumstances affecting financial results
+- Risk disclosures and material contingencies
+- Related party transaction disclosures
+- Any caveats or limitations on financial results
 
-The report should be extremely detailed and thorough, suitable for board-level strategic discussions, investment committee reviews, and executive decision-making. Length is not a constraint - provide exhaustive analysis that covers all aspects of the financial performance, risks, opportunities, and implications.
+Extract and prominently feature ALL textual information and narrative disclosures in your analysis. Do not omit or minimize these contextual notes - they are often more important than raw numbers.
+
+Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data. Include all footnotes, explanations, and textual annotations.
+
+The report should be extremely detailed and thorough, suitable for board-level strategic discussions, investment committee reviews, and executive decision-making. LENGTH IS NOT A CONSTRAINT - provide exhaustive, complete analysis without any truncation.
 
 # Comprehensive Financial Analysis Report
 
@@ -693,6 +705,7 @@ Provide a comprehensive executive overview synthesizing key findings across all 
 - Major risk indicators and opportunities
 - Strategic implications for business direction and governance
 - Key recommendations for immediate executive attention
+- Material qualifications, audit findings, or management disclosures
 
 ## II. Company Overview and Strategic Context
 For each company analyzed:
@@ -700,6 +713,7 @@ For each company analyzed:
 - Strategic objectives and market dynamics
 - Key value drivers and competitive advantages
 - Regulatory and macroeconomic context implications
+- Any material management disclosures or special circumstances
 
 ## III. Comprehensive Financial Performance Analysis
 Conduct exhaustive period-by-period and cross-company analysis of ALL financial metrics available:
@@ -709,58 +723,78 @@ Conduct exhaustive period-by-period and cross-company analysis of ALL financial 
 - Revenue growth drivers and sustainability
 - Geographic and segment revenue breakdown (if available)
 - Revenue quality indicators and recurring vs. one-time components
+- Management commentary on revenue performance
 
 ### Profitability Deep Dive
 - Operating profit margins: Trends, drivers, and sustainability
 - Net profit margins: Components and influencing factors
 - EBITDA margins and operating efficiency metrics
 - Gross margins by business segment or product line
+- Margin drivers and sustainability factors
+- Management notes on profitability
 
 ### Cost Structure Analysis
 - Detailed cost breakdown: Fixed vs. variable costs
 - Major expense categories: Personnel, R&D, marketing, administrative
 - Cost optimization opportunities and efficiency trends
 - Cost-to-revenue ratios and benchmarking
+- Root causes of cost variations
 
 ### Balance Sheet Analysis
 - Asset quality and composition
 - Liability structure and debt management
 - Working capital efficiency and cash conversion cycles
 - Capital structure optimization and financial leverage
+- Management commentary on balance sheet changes
 
 ### Cash Flow Analysis
 - Operating cash flow generation and quality
 - Investment and financing cash flows
 - Free cash flow trends and utilization
 - Cash flow forecasting implications
+- Conversion efficiency from profit to cash
 
 ### Key Financial Ratios and Metrics
 - Liquidity ratios: Current ratio, quick ratio, cash ratios
 - Solvency ratios: Debt-to-equity, debt-to-assets, interest coverage
 - Efficiency ratios: Asset turnover, inventory turnover, receivables days
 - Profitability ratios: ROA, ROE, ROCE, EPS trends
-- Valuation metrics: P/E, P/B, EV/EBITDA (if market data available)
+- Valuation metrics and peer benchmarking
 
-## IV. Trend Analysis and Forecasting Insights
+## IV. Audit Findings, Qualifications & Management Disclosures
+CRITICAL SECTION - Include ALL:
+- Audit opinion qualifications or modifications
+- Auditor reservations or concerns
+- Management commentary on audit findings
+- Going concern assessments
+- Related party transactions and related management disclosures
+- Material contingencies or uncertain liabilities
+- Regulatory compliance matters
+- Any other material management notes or explanations
+
+## V. Trend Analysis and Forecasting Insights
 - Multi-period trend analysis with statistical significance
 - Growth acceleration/deceleration patterns
 - Cyclical vs. structural performance changes
 - Forward-looking indicators from historical trends
+- Sustainability of observed trends
 
-## V. Comparative Analysis
+## VI. Comparative Analysis
 - Peer group comparisons across all metrics
 - Industry benchmarking and positioning
 - Competitive advantages and disadvantages
 - Market share and growth relative to peers
+- Relative financial health assessment
 
-## VI. Risk Assessment and Mitigation
+## VII. Risk Assessment and Mitigation
 - Financial risk factors: Liquidity, solvency, currency, interest rate
 - Operational risks: Cost pressures, margin compression, supply chain
 - Market risks: Competition, demand fluctuations, regulatory changes
 - Strategic risks: Market positioning, technology disruption, M&A implications
 - Quantitative risk metrics and stress testing insights
+- Disclosed management concerns and risk factors
 
-## VII. Strategic Implications and Recommendations
+## VIII. Strategic Implications and Recommendations
 - Strategic opportunities identified from financial trends
 - Areas requiring management intervention
 - Capital allocation recommendations
@@ -768,39 +802,42 @@ Conduct exhaustive period-by-period and cross-company analysis of ALL financial 
 - Governance and compliance considerations
 - Long-term value creation strategies
 
-## VIII. Data Quality and Limitations
+## IX. Data Quality and Limitations
 - Assessment of data completeness and reliability
 - Missing data impacts on analysis
 - Assumptions and estimation methodologies used
+- Audit qualifications or any hedges on financial reliability
 - Recommendations for improved financial reporting
 
-## IX. Appendices
+## X. Appendices
 - Detailed financial statements and schedules
 - Ratio calculations and trend charts
 - Peer comparison tables
 - Statistical analysis and regression insights
-- Glossary of terms and methodologies
+- Complete text of all management disclosures and audit findings
 
 ---
 
-**Analysis Parameters:** {frequency} financial statements | Focus: {statement_type.replace('_', ' ')} | Data Scope: Comprehensive analysis of all available financial parameters
+**Analysis Parameters:** {frequency} financial statements | Focus: {statement_type.replace('_', ' ')} | Data Scope: EXHAUSTIVE analysis of ALL available financial parameters and narrative disclosures
 
 **CRITICAL REQUIREMENTS:**
-1. Analyze EVERY financial metric and parameter present in the provided data - do not limit to predefined fields
-2. Provide exhaustive, board-level analysis with strategic implications
-3. Use precise numerical references with proper formatting (INR crores/lakhs, percentages, ratios)
-4. Identify trends, drivers, risks, and opportunities across all data dimensions
-5. Maintain professional, executive-level tone suitable for C-suite and board presentations
-6. Flag data limitations and provide conservative interpretations where uncertainty exists
-7. Generate actionable insights that drive strategic decision-making
-8. Structure report for easy navigation and executive summary consumption
-9. Include quantitative analysis with statistical context where applicable
-10. Provide forward-looking strategic recommendations based on historical trends
+1. Analyze EVERY financial metric, parameter, and textual information present - DO NOT OMIT ANYTHING
+2. PROMINENTLY FEATURE all audit findings, qualifications, management notes, and disclosures
+3. Provide exhaustive, board-level analysis with strategic implications - NO TRUNCATION
+4. Use precise numerical references with proper formatting (INR crores/lakhs, percentages, ratios)
+5. Identify trends, drivers, risks, and opportunities across ALL data dimensions
+6. Maintain professional, executive-level tone suitable for C-suite and board presentations
+7. Include ALL contextual information from textual sections - do not minimize or omit
+8. Generate actionable insights that drive strategic decision-making
+9. Structure report for easy navigation while maintaining complete depth
+10. Include quantitative analysis with statistical context where applicable
+11. Provide forward-looking strategic recommendations based on historical trends
+12. Do NOT artificially limit the report length - provide complete, exhaustive analysis
     """
 
     user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
 
-    response = _invoke_llm(system_prompt, user_prompt)
+    response = _invoke_llm(system_prompt, user_prompt, max_tokens=8000)
 
     token_usage = _extract_token_usage(response)
     normalized = _normalize_llm_response(response)

@@ -20,6 +20,7 @@ from api.Xbrl_annual_extractor import router as xbrl_annual_router
 from api.llm_route import router as llm_router
 from api.companies_route import router as companies_router
 from api.company_route import router as company_router
+from api.missing_companies_route import router as missing_companies_router
 
 
 load_dotenv()
@@ -48,6 +49,7 @@ app.include_router(xbrl_annual_router, prefix="/api", tags=["xbrl_annual"])
 app.include_router(llm_router, prefix="/api", tags=["llm"])
 app.include_router(companies_router, prefix="/api", tags=["companies"])
 app.include_router(company_router, prefix="/api/companies", tags=["company_financials"])
+app.include_router(missing_companies_router, prefix="/api", tags=["missing_companies"])
 
 if __name__ == "__main__":
     import uvicorn

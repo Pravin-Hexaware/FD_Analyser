@@ -381,6 +381,46 @@ class SqliteRepository:
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
+    def get_xbrl_filings_by_scrip_codes(
+        self,
+        scrip_codes: list[str],
+        report_type: str = "std",
+        limit: int = 10,
+    ) -> dict[str, list[dict]]:
+        """
+        Get XBRL filings with raw_content for multiple scrip_codes.
+        Returns a dict mapping scrip_code to list of filing records.
+        Only includes records with:
+        - report_type == report_type (default "std")
+        - raw_content is not NULL
+        """
+        result = {code: [] for code in scrip_codes}
+        cur = self._conn.cursor()
+        
+        for scrip_code in scrip_codes:
+            cur.execute(
+                """
+                SELECT 
+                    f.scrip_code, 
+                    f.symbol, 
+                    f.xbrl_link, 
+                    f.publication_date, 
+                    f.report_type, 
+                    f.raw_content,
+                    c.company_name
+                FROM xbrl_filing_table f
+                LEFT JOIN company_table c ON f.scrip_code = c.scrip_code
+                WHERE f.scrip_code = ? AND f.report_type = ? AND f.raw_content IS NOT NULL
+                ORDER BY f.publication_date DESC
+                LIMIT ?
+                """,
+                (scrip_code, report_type, limit),
+            )
+            rows = cur.fetchall()
+            result[scrip_code] = [dict(row) for row in rows]
+        
+        return result
+
     def get_xbrl_filings_count(self, scrip_code: str) -> int:
         """Get count of XBRL filings for a specific company."""
         cur = self._conn.cursor()
@@ -399,6 +439,45 @@ class SqliteRepository:
         )
         row = cur.fetchone()
         return row[0] if row else None
+
+    def get_extraction_records(
+        self,
+        scrip_code: str,
+        extraction_type: str = "annual",
+        limit: int = 10
+    ) -> list[dict]:
+        """
+        Get extraction records (annual or quarterly) for a company.
+        Returns list of records with company_name and publication_date.
+        extraction_type: "annual" or "quarterly"
+        """
+        if extraction_type.lower() not in {"annual", "quarterly"}:
+            extraction_type = "annual"
+        
+        table_name = f"{extraction_type.lower()}_extractions"
+        cur = self._conn.cursor()
+        
+        # Query extraction records ordered by publication_date (newest first)
+        cur.execute(
+            f"""
+            SELECT 
+                id,
+                scrip_code,
+                company_name,
+                xbrl_link,
+                publication_date,
+                report_type,
+                parsed_json
+            FROM {table_name}
+            WHERE scrip_code = ?
+            ORDER BY publication_date DESC
+            LIMIT ?
+            """,
+            (scrip_code, limit),
+        )
+        
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
 
     def _load_parsed_json_row(self, row: sqlite3.Row) -> dict:
         if not row:

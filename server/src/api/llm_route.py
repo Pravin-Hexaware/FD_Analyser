@@ -66,6 +66,102 @@ def _append_missing_company(
         writer.writerow(row)
 
 
+_validation_companies_cache: Optional[List[Dict[str, str]]] = None
+
+
+def _validation_csv_path() -> Path:
+    src_dir = Path(__file__).resolve().parents[1]
+    return src_dir / "Data" / "Validation.csv"
+
+
+def _normalize_text(text: Optional[str]) -> str:
+    if text is None:
+        return ""
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _load_validation_companies() -> List[Dict[str, str]]:
+    global _validation_companies_cache
+    if _validation_companies_cache is not None:
+        return _validation_companies_cache
+
+    validation_path = _validation_csv_path()
+    rows: List[Dict[str, str]] = []
+    if not validation_path.exists():
+        print(f"Validation CSV not found: {validation_path}")
+        _validation_companies_cache = rows
+        return rows
+
+    with open(validation_path, newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            rows.append({
+                "security_code": row.get("Security Code", "").strip(),
+                "issuer_name": row.get("Issuer Name", "").strip(),
+                "security_id": row.get("Security Id", "").strip(),
+                "security_name": row.get("Security Name", "").strip(),
+            })
+
+    _validation_companies_cache = rows
+    return rows
+
+
+def _resolve_company_validation(company_name: str, symbol: Optional[str] = None) -> Dict[str, Any]:
+    normalized_query_name = _normalize_text(company_name)
+    validation_rows = _load_validation_companies()
+    if not normalized_query_name or not validation_rows:
+        return {
+            "valid": False,
+            "company_name": company_name,
+            "reason": "No matching validation rows found or validation data unavailable.",
+        }
+
+    name_matches = [
+        row for row in validation_rows
+        if normalized_query_name in _normalize_text(row["issuer_name"]) or _normalize_text(row["issuer_name"]).find(normalized_query_name) >= 0
+    ]
+
+    if not name_matches:
+        return {
+            "valid": False,
+            "company_name": company_name,
+            "reason": "Company name not found in Validation.csv.",
+        }
+
+    matched_row = None
+    symbol_matched = None
+    matched_symbol = symbol or ""
+    if symbol:
+        normalized_symbol = _normalize_text(symbol)
+        symbol_candidates = [
+            row for row in name_matches
+            if normalized_symbol and (normalized_symbol in _normalize_text(row["security_id"]) or normalized_symbol == _normalize_text(row["security_code"]))
+        ]
+        if symbol_candidates:
+            matched_row = symbol_candidates[0]
+            symbol_matched = True
+
+    if matched_row is None:
+        # Use the best name match when symbol is missing or does not match
+        matched_row = sorted(
+            name_matches,
+            key=lambda row: len(_normalize_text(row["issuer_name"])),
+            reverse=True,
+        )[0]
+        symbol_matched = False if symbol else True
+
+    return {
+        "valid": True,
+        "company_name": company_name,
+        "resolved_issuer_name": matched_row["issuer_name"],
+        "resolved_scrip_code": matched_row["security_code"],
+        "resolved_security_id": matched_row["security_id"],
+        "parsed_symbol": symbol,
+        "symbol_matched": symbol_matched,
+        "name_matches": [row["issuer_name"] for row in name_matches],
+    }
+
+
 def write_llm_log(user_query: str, llm_prompt: str, llm_response: str, db_data: Dict[str, Any], data_passed_to_llm: Dict[str, Any], final_prompt: str, final_response: str, peer_extraction_log: str = "", token_usage: Optional[Dict[str, int]] = None):
     """Write detailed LLM interaction logs to timestamped file."""
     try:
@@ -443,10 +539,38 @@ async def llm_target_companies(request: LLMQueryRequest):
         frequency = _determine_frequency(statement_frequency, statement_type, period)
         print(f"Determined frequency: {frequency}, statement_frequency: {statement_frequency}, statement_type: {statement_type}, period: {period}, time_horizon: {time_horizon}, get_peer: {get_peer}")
 
+        target_companies = parsed.get("target_companies", {})
+        validation_results: Dict[str, Dict[str, Any]] = {}
+        invalid_companies = []
+
+        for key, company in target_companies.items():
+            company_name = company.get("company", key)
+            validation_results[company_name] = _resolve_company_validation(company_name, company.get("symbol"))
+            if not validation_results[company_name]["valid"]:
+                invalid_companies.append(company_name)
+
+        if invalid_companies:
+            repo.save_detailed_log(
+                chat_id=chat_id,
+                step_name="Validation",
+                input_data=json.dumps({
+                    "parsed_companies": target_companies,
+                    "invalid_companies": invalid_companies,
+                }),
+                output_data=json.dumps({
+                    "error": "Invalid company names",
+                    "invalid_companies": invalid_companies,
+                })
+            )
+            repo.close()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid company name(s) not found in Validation.csv: {', '.join(invalid_companies)}"
+            )
+
         # Step 2: Fetch data for target companies and peers
         print("Step 2: Fetching data for target companies" + (" + peers" if get_peer else ""))
         all_data = {}
-        target_companies = parsed.get("target_companies", {})
         tracked_missing = set()
 
         db_fetch_log = {
@@ -458,33 +582,41 @@ async def llm_target_companies(request: LLMQueryRequest):
         }
 
         for key, company in target_companies.items():
-            scrip_code = company.get("scrip_code")
             company_name = company.get("company", key)
-            if scrip_code:
-                data = _fetch_company_data(repo, scrip_code, frequency, statement_type, period, time_horizon, request.query)
-                all_data[company_name] = data
-                db_fetch_log["fetched_data"][company_name] = {
-                    "scrip_code": scrip_code,
-                    "frequency": frequency,
-                    "period": period,
-                    "time_horizon": time_horizon,
-                    "data": data
-                }
-                print(f"Fetched extraction records for {company_name} ({scrip_code}): {data}")
-                if not data:
-                    missing_key = (company_name, scrip_code, frequency, period, time_horizon, False)
-                    if missing_key not in tracked_missing:
-                        _append_missing_company(
-                            company_name=company_name,
-                            symbol=company.get("symbol"),
-                            scrip_code=scrip_code,
-                            frequency=frequency,
-                            period=period,
-                            time_horizon=time_horizon,
-                            is_peer=False,
-                            query=request.query,
-                        )
-                        tracked_missing.add(missing_key)
+            validation_info = validation_results[company_name]
+            resolved_scrip_code = validation_info["resolved_scrip_code"]
+            company["scrip_code"] = resolved_scrip_code
+
+            if validation_info.get("parsed_symbol") and validation_info.get("symbol_matched") is False:
+                print(f"Symbol mismatch for {company_name}: parsed symbol '{validation_info['parsed_symbol']}' did not match Validation.csv; using scrip code {resolved_scrip_code}")
+
+            data = _fetch_company_data(repo, resolved_scrip_code, frequency, statement_type, period, time_horizon, request.query)
+            all_data[company_name] = data
+            db_fetch_log["fetched_data"][company_name] = {
+                "parsed_symbol": validation_info.get("parsed_symbol"),
+                "symbol_matched": validation_info.get("symbol_matched"),
+                "resolved_issuer_name": validation_info.get("resolved_issuer_name"),
+                "resolved_scrip_code": resolved_scrip_code,
+                "frequency": frequency,
+                "period": period,
+                "time_horizon": time_horizon,
+                "data": data
+            }
+            print(f"Fetched extraction records for {company_name} ({resolved_scrip_code}): {data}")
+            if not data:
+                missing_key = (company_name, resolved_scrip_code, frequency, period, time_horizon, False)
+                if missing_key not in tracked_missing:
+                    _append_missing_company(
+                        company_name=company_name,
+                        symbol=company.get("symbol"),
+                        scrip_code=resolved_scrip_code,
+                        frequency=frequency,
+                        period=period,
+                        time_horizon=time_horizon,
+                        is_peer=False,
+                        query=request.query,
+                    )
+                    tracked_missing.add(missing_key)
 
             if get_peer:
                 peers = company.get("peers", {})

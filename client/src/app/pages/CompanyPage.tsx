@@ -158,20 +158,15 @@ interface IndianApiData {
 export default function CompanyPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState("Overview");
+  const [activeTab, setActiveTab] = useState("Financials");
   const [company, setCompany] = useState<any>(null);
   const [indianApiData, setIndianApiData] = useState<IndianApiData | null>(null);
   const [annualData, setAnnualData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
+{/*"Analytics","News","Charts","Overview",    "Peers"*/}
   const tabs = [
-    "Overview",
-    "Charts",
     "Financials",
-    "Peers",
-    "Analytics",
-    "News"
   ];
 
   useEffect(() => {
@@ -817,7 +812,7 @@ export default function CompanyPage() {
         {activeTab === "Financials" && (
           <div className="space-y-6">
             {/* Key Financial Metrics Charts */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/*<div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="bg-white rounded-xl border border-gray-100 p-6">
                 <div className="flex items-center gap-3 mb-6">
                   <DollarSign className="size-5 text-green-600" />
@@ -873,7 +868,7 @@ export default function CompanyPage() {
                   </ResponsiveContainer>
                 </div>
               </div>
-            </div>
+            </div>*/}
 
             {/* Comprehensive Financial Statements Table */}
             <div className="bg-white rounded-xl border border-gray-100 p-6">
@@ -1349,7 +1344,7 @@ export default function CompanyPage() {
       </div>
 
       {/* Sticky floating mini indicators */}
-      <div className="fixed right-5 bottom-5 z-50 space-y-2">
+      {/*<div className="fixed right-5 bottom-5 z-50 space-y-2">
         <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-lg w-52">
           <div className="text-xs text-gray-500">F&O</div>
           <div className="font-semibold text-gray-900">{Number(priceChange) > 0 ? "Bullish" : "Bearish"}</div>
@@ -1362,7 +1357,7 @@ export default function CompanyPage() {
           <div className="text-xs text-gray-500">Weakness</div>
           <div className="font-semibold text-red-600">{Number(priceChange) < -1 ? "High" : "Low"}</div>
         </div>
-      </div>
+      </div>*/}
     </AppShell>
   );
 }

@@ -50,7 +50,9 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
     loadCompanies();
   }, []);
 
-  const sidebarContent = (
+  const isCompareOrAdmin = location.pathname === "/compare" || location.pathname === "/admin";
+
+  const sidebarContent = isCompareOrAdmin ? null : (
     <div className="space-y-0.5">
       {companiesList.map((company, idx) => {
         const isActive = location.pathname === `/company/${company.scrip_code}`;

@@ -40,23 +40,23 @@ def extract_table(table: _Element) -> Any:
     if not rows:
         return None
 
-    # 2-column key-value table (only if all rows have exactly 2 columns)
-    if len(rows) > 0 and len(rows[0]) == 2 and all(len(row) == 2 for row in rows):
-        result = {}
-        for row in rows:
-            result[row[0]] = row[1]
-        return result
+    if len(rows) > 0:
+        if len(rows[0]) == 2:
+            headers = ['key', 'value']
+            data_rows = rows
+        else:
+            if len(rows) > 1:
+                headers = rows[0]
+                data_rows = rows[1:]
+            else:
+                return rows
 
-    if len(rows) > 1:
-        headers = rows[0]
-        data_rows = rows[1:]
         normalized_rows = []
         previous_len = len(headers)
 
         for row in data_rows:
             last_cell_empty = bool(row) and row[-1].strip() == ''
 
-            # ✅ BOTH CONDITIONS COMBINED
             if last_cell_empty:
                 grouped_value = ' '.join(cell for cell in row if cell).strip()
 
@@ -76,12 +76,21 @@ def extract_table(table: _Element) -> Any:
                     extra = len(row) - len(headers)
                     mapped = {headers[0]: ' '.join(row[:extra + 1]).strip()}
                     for j in range(1, len(headers)):
-                        mapped[headers[j]] = row[extra + j]
+                        mapped[headers[j]] = row[extra + j] if extra + j < len(row) else ''
                     normalized_rows.append(mapped)
 
             previous_len = len(row)
 
-        return normalized_rows
+        if len(headers) == 2:
+            result = {}
+            for row in normalized_rows:
+                key = row.get('key', '').strip()
+                value = row.get('value', '').strip()
+                if key:
+                    result[key] = value
+            return result
+        else:
+            return normalized_rows
 
     return rows
 

@@ -1,5 +1,4 @@
-import { useState, useEffect } from "react";
-import { useLocation } from "react-router-dom";
+import { useState, useEffect, useRef } from "react";
 import { Plus, X, Search, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { AppShell } from "../components/AppShell";
@@ -12,7 +11,6 @@ interface FinancialData {
 }
 
 export default function ComparisonPage() {
-  const location = useLocation();
   const [selectedCompanies, setSelectedCompanies] = useState<string[]>([]);
   const [backendCompanies, setBackendCompanies] = useState<CompanyInfo[]>([]);
   const [frequency, setFrequency] = useState<"annual" | "quarterly">("annual");
@@ -21,6 +19,7 @@ export default function ComparisonPage() {
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Load companies from backend on mount
   useEffect(() => {
@@ -37,17 +36,22 @@ export default function ComparisonPage() {
     }
   };
 
+  // Handle clicks outside dropdown to close it
   useEffect(() => {
-    const stateCompanies = (location.state as any)?.companyIds;
-    const sessionCompanies = sessionStorage.getItem("comparisonData");
-    if (stateCompanies) {
-      setSelectedCompanies(stateCompanies);
-    } else if (sessionCompanies) {
-      const parsed = JSON.parse(sessionCompanies);
-      setSelectedCompanies(parsed);
-      sessionStorage.removeItem("comparisonData");
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setShowDropdown(false);
+      }
+    };
+
+    if (showDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
     }
-  }, [location.state]);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showDropdown]);
 
   // Fetch comparison data when companies or frequency changes
   useEffect(() => {
@@ -152,81 +156,62 @@ export default function ComparisonPage() {
         {/* Enhanced Company Selector */}
         <div className="bg-white rounded-lg border border-gray-100 shadow-sm p-6">
           {/* Header with Counter */}
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="font-semibold text-gray-900">Select Companies to Compare</h3>
-              <p className="text-xs text-gray-500 mt-1">Choose 2-5 companies for detailed comparison</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="flex items-center justify-center size-8 rounded-full bg-indigo-100">
-                <span className="text-sm font-semibold text-indigo-600">{selectedCompanies.length}/5</span>
+          <div className="mb-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-semibold text-gray-900">Select Companies to Compare</h3>
+                <p className="text-xs text-gray-500 mt-1">Choose 2-5 companies for detailed comparison</p>
               </div>
-              {selectedCompanies.length > 0 && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={handleClearAll}
-                  className="text-xs text-red-600 hover:text-red-700 hover:bg-red-50"
-                >
-                  <Trash2 className="size-3 mr-1" />
-                  Clear
-                </Button>
-              )}
-            </div>
-          </div>
 
-          {/* Selected Companies Tiles */}
-          {selectedCompanies.length > 0 && (
-            <div className="mb-6 pb-4 border-b border-gray-200">
-              <p className="text-xs font-semibold text-gray-600 mb-3">Selected Companies</p>
-              <div className="flex flex-wrap gap-3">
-                {selectedData.map((company) => (
-                  <div
-                    key={company.scrip_code}
-                    className="flex items-center gap-2 px-4 py-2.5 rounded-full border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 transition-all"
-                    style={{ borderColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "40", backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "10" }}
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center size-8 rounded-full bg-indigo-100">
+                  <span className="text-sm font-semibold text-indigo-600">{selectedCompanies.length}/5</span>
+                </div>
+                {selectedCompanies.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleClearAll}
+                    className="text-xs text-red-600 hover:text-red-700 hover:bg-red-50"
                   >
-                    {/* Company Avatar */}
-                    <div
-                      className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
-                      style={{ backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] }}
-                    >
-                      {company.symbol.charAt(0)}
-                    </div>
-
-                    {/* Company Name and Symbol */}
-                    <div className="flex flex-col">
-                      <span className="font-semibold text-sm text-gray-900">{company.symbol}</span>
-                      <span className="text-xs text-gray-600">{company.company_name.substring(0, 25)}</span>
-                    </div>
-
-                    {/* Close Button */}
-                    <button
-                      onClick={() => handleRemoveCompany(company.scrip_code)}
-                      className="flex-shrink-0 ml-2 p-1 hover:bg-red-100 hover:text-red-600 text-gray-400 rounded-full transition-colors"
-                      title="Remove company"
-                    >
-                      <X className="size-4" />
-                    </button>
-                  </div>
-                ))}
-
-                {/* Add More Button - Show if less than 5 selected */}
-                {selectedCompanies.length < 5 && (
-                  <button
-                    onClick={() => setShowDropdown(true)}
-                    className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full border-2 border-dashed border-indigo-300 hover:border-indigo-500 hover:bg-indigo-50 transition-all"
-                  >
-                    <Plus className="size-4 text-indigo-600" />
-                    <span className="font-semibold text-sm text-indigo-600">Add</span>
-                  </button>
+                    <Trash2 className="size-3 mr-1" />
+                    Clear
+                  </Button>
                 )}
               </div>
             </div>
-          )}
+
+            {selectedCompanies.length > 0 && (
+              <div className="mt-4 border-t border-gray-100 pt-4">
+                <div className="text-xs font-semibold text-gray-700 mb-2">Selected companies</div>
+                <div className="flex flex-wrap gap-2">
+                  {selectedData.map((company) => (
+                    <div
+                      key={company.scrip_code}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-all"
+                      style={{
+                        borderColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "40",
+                        backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "10",
+                        color: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length]
+                      }}
+                    >
+                      <span className="font-semibold">{company.symbol}</span>
+                      <button
+                        onClick={() => handleRemoveCompany(company.scrip_code)}
+                        className="flex-shrink-0 ml-1 p-0.5 hover:bg-red-100 hover:text-red-600 text-gray-400 rounded-full transition-colors"
+                        title="Remove company"
+                      >
+                        <X className="size-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Search Bar */}
-          <div className="mb-4 relative">
+          <div className="mb-4 relative isolate">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 size-4 text-gray-400" />
               <input
@@ -255,7 +240,10 @@ export default function ComparisonPage() {
 
             {/* Multi-select Dropdown with Sector Filter */}
             {showDropdown && selectedCompanies.length < 5 && (
-              <div className="absolute top-full mt-2 w-full bg-white border border-gray-200 rounded-lg shadow-lg z-10">
+              <div 
+                ref={dropdownRef}
+                className="absolute top-full mt-2 w-full bg-white border border-gray-200 rounded-xl shadow-2xl z-[100]"
+              >
                 {/* Sector Info (if companies already selected) */}
                 {selectedData.length > 0 && (
                   <div className="px-4 py-3 bg-blue-50 border-b border-gray-200">
@@ -285,14 +273,6 @@ export default function ComparisonPage() {
                             </div>
                           </div>
 
-                          {/* Company Avatar */}
-                          <div
-                            className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
-                            style={{ backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] }}
-                          >
-                            {company.symbol.charAt(0)}
-                          </div>
-
                           {/* Company Info */}
                           <div className="flex-1 min-w-0">
                             <div className="font-semibold text-gray-900 text-sm">{company.symbol}</div>
@@ -305,7 +285,7 @@ export default function ComparisonPage() {
                     {/* Show Available Companies */}
                     {available.filter(c => 
                       filteredCompanies.find(fc => fc.scrip_code === c.scrip_code)
-                    ).map((company, idx) => {
+                    ).map((company) => {
                       return (
                         <div
                           key={company.scrip_code}
@@ -320,14 +300,6 @@ export default function ComparisonPage() {
                           {/* Toggle Indicator */}
                           <div className="flex-shrink-0">
                             <div className="w-6 h-6 rounded-full border-2 border-gray-300 flex items-center justify-center"></div>
-                          </div>
-
-                          {/* Company Avatar */}
-                          <div
-                            className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
-                            style={{ backgroundColor: COMPANY_COLORS[idx % COMPANY_COLORS.length] }}
-                          >
-                            {company.symbol.charAt(0)}
                           </div>
 
                           {/* Company Info */}
@@ -464,22 +436,23 @@ export default function ComparisonPage() {
             {loading ? (
               <div className="p-8 text-center text-gray-400">Loading financial data...</div>
             ) : selectedCompanies.length >= 2 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="text-left px-4 py-3 font-semibold text-gray-900">Metric</th>
-                      {selectedCompanies.map((code, idx) => {
-                        const company = backendCompanies.find(c => c.scrip_code === code);
-                        return (
-                          <th key={code} className="text-right px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
-                            <div className="font-bold" style={{ color: COMPANY_COLORS[idx] }}>{company?.symbol}</div>
-                            <div className="text-xs font-normal text-gray-500">{company?.company_name}</div>
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
+              <div className="relative">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-full text-xs">
+                    <thead className="bg-gray-50 shadow-sm">
+                      <tr className="border-b border-gray-200">
+                        <th className="sticky top-0 z-20 text-left px-4 py-3 font-semibold text-gray-900 bg-gray-50">Metric</th>
+                        {selectedCompanies.map((code, idx) => {
+                          const company = backendCompanies.find(c => c.scrip_code === code);
+                          return (
+                            <th key={code} className="sticky top-0 z-20 text-right px-4 py-3 font-semibold text-gray-900 whitespace-nowrap bg-gray-50">
+                              <div className="font-bold" style={{ color: COMPANY_COLORS[idx] }}>{company?.symbol}</div>
+                              <div className="text-xs font-normal text-gray-500">{company?.company_name}</div>
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
                   <tbody>
                     {(() => {
                       // Use selectedCompanies directly instead of selectedData
@@ -631,6 +604,7 @@ export default function ComparisonPage() {
                     })()}
                   </tbody>
                 </table>
+                </div>
               </div>
             ) : (
               <div className="p-8 text-center text-gray-400">Select at least 2 companies to compare</div>

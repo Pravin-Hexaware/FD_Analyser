@@ -98,7 +98,7 @@ export function AppShell({ children, title, subtitle, breadcrumb, actions, noPad
       <Sidebar
         navItems={navItems}
         activePath={location.pathname}
-        sidebarHeading="Companies"
+        sidebarHeading={isCompareOrAdmin ? undefined : "Companies"}
         sidebarContent={sidebarContent}
         footer={footer}
       />

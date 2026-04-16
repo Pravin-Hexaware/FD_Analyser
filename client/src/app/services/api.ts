@@ -306,3 +306,92 @@ export async function compareExtractionData(
 }
 
 export default apiClient;
+
+/**
+ * Missing company data structure
+ */
+export interface MissingCompany {
+  timestamp: string;
+  company_name: string;
+  symbol: string;
+  scrip_code: string;
+  frequency: string;
+  period: string;
+  time_horizon: string;
+  is_peer: boolean;
+  query: string;
+}
+
+/**
+ * Missing company with filing status
+ */
+export interface MissingCompanyWithStatus extends MissingCompany {
+  has_filings: boolean;
+  filing_count: number;
+  needs_fetching: boolean;
+}
+
+/**
+ * Response for adding missing companies to BSE
+ */
+export interface AddMissingCompaniesResponse {
+  success: boolean;
+  message: string;
+  added_count: number;
+  errors: string[];
+}
+
+/**
+ * Fetch all missing companies
+ * @returns List of missing companies
+ */
+export async function fetchMissingCompanies(): Promise<MissingCompany[]> {
+  try {
+    const response = await apiClient.get<MissingCompany[]>('/missing-companies');
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.detail || error.message;
+      throw new Error(`Backend error: ${message}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Fetch missing companies with their filing status
+ * @returns List of missing companies with status information
+ */
+export async function fetchMissingCompaniesStatus(): Promise<MissingCompanyWithStatus[]> {
+  try {
+    const response = await apiClient.get<MissingCompanyWithStatus[]>('/missing-companies/status');
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.detail || error.message;
+      throw new Error(`Backend error: ${message}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Add selected missing companies to BSE metadata
+ * @param scripCodes - Array of scrip codes to add
+ * @returns Response with success status and details
+ */
+export async function addMissingCompaniesToBSE(scripCodes: string[]): Promise<AddMissingCompaniesResponse> {
+  try {
+    const response = await apiClient.post<AddMissingCompaniesResponse>(
+      '/missing-companies/add-to-bse',
+      { scrip_codes: scripCodes }
+    );
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.detail || error.message;
+      throw new Error(`Backend error: ${message}`);
+    }
+    throw error;
+  }
+}

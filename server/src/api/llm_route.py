@@ -258,45 +258,14 @@ Log File: {log_filename}
 
 
 def get_actual_initial_prompt() -> str:
-    """Get the actual initial prompt used for query parsing."""
-    # This should match the system prompt in parse_query_and_get_companies
-    return """You are a Senior Financial Analyst and Data Extraction Expert. Your task is to analyze a user query for financial data extraction.
-
-First, break down the query into key components:
-- **statement_frequency**: 'quarterly', 'annual', 'both', or 'unspecified'.
-- **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.
-- **period**: Specific period like 'latest quarter', 'latest financial year', 'all quarters of latest financial year', 'Q3 2023', 'FY2024-2025', or 'unspecified'.
-- **time_horizon**: Normalized window such as 'quarterly', 'annual', 'latest', '2years', '5years', or 'unspecified'.
-- **target_companies**: List of company names mentioned.
-- **industries**: Any industries mentioned.
-- **other_requirements**: Any other specific requirements or questions.
-- **get_peer**: Set to true ONLY if the query explicitly asks for peers, competitors, industry comparisons, or benchmark analysis. Set to false if the query mentions specific companies to compare directly.
-
-Then, based on the breakdown, generate a structured JSON response identifying target companies.
-If get_peer is true, the system will automatically fetch appropriate peers from the database.
-Ensure scrip_codes are accurate BSE codes.
-
-Return strictly valid JSON with no additional text.
-
-JSON Schema:
-{
-  "intent": {
-    "statement_frequency": "string",
-    "statement_type": "string",
-    "period": "string",
-    "time_horizon": "string",
-    "get_peer": boolean
-  },
-  "target_companies": {
-    "1": {
-      "company": "company_name",
-      "symbol": "company_symbol",
-      "scrip_code": "company_scrip_code",
-      "industry": "company_industry"
-    }
-  }
-}
-"""
+    """Get the actual initial prompt used for query parsing (NLP-based, no LLM)."""
+    # NLP-based extraction now - this is just for logging/documentation
+    return """NLP-Based Query Parsing (No LLM):
+- Uses pattern matching and fuzzy matching against BSE company list
+- Extracts statement frequency, type, period, time horizon, and target companies
+- Deterministic rule-based extraction for company names from query
+- Automatically detects peer request indicators
+- Returns structured JSON compatible with existing pipeline"""
 
 
 def get_actual_final_prompt(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
@@ -559,9 +528,9 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         peer_extraction_log = ""
 
         # Step 1: Parse user query
-        print("Step 1: Parsing user query with LLM")
+        print("Step 1: Parsing user query with NLP (no LLM)")
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(request.query)
-        print("1st LLM returned:", parsed)
+        print("1st NLP extraction returned:", parsed)
 
         # Store initial LLM interaction for logging
         initial_llm_response = json.dumps(parsed)
@@ -780,8 +749,8 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
             return response
 
-        # Step 3: Generate answer using LLM
-        print("Step 3: Generating answer with 2nd LLM")
+        # Step 3: Generate answer using LLM (with data fetched and company names resolved via NLP)
+        print("Step 3: Generating answer with LLM")
 
         # Prepare the EXACT data being sent to LLM
         system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided financial data.

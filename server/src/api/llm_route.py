@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import asyncio
+import threading
 import uuid
 import json
 import os
@@ -24,6 +26,23 @@ def _missing_tracker_csv_path() -> Path:
 
 
 
+def _schedule_missing_company_processing() -> None:
+    """Schedule background processing of missing companies."""
+    try:
+        from api.service.missing_company_service import MissingCompanyService
+
+        def _run():
+            try:
+                asyncio.run(MissingCompanyService.process_missing_companies_batch(None))
+            except Exception as exc:
+                print(f"[WARN] Missing company background task failed: {exc}")
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+    except Exception as exc:
+        print(f"[WARN] Failed to schedule missing company processing: {exc}")
+
+
 def _append_missing_company(
     company_name: str,
     symbol: Optional[str],
@@ -33,6 +52,8 @@ def _append_missing_company(
     time_horizon: str,
     is_peer: bool,
     query: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+    schedule_processing: bool = False,
 ) -> None:
     file_path = _missing_tracker_csv_path()
     header = [
@@ -64,6 +85,9 @@ def _append_missing_company(
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+    if background_tasks is not None and schedule_processing:
+        background_tasks.add_task(_schedule_missing_company_processing)
 
 
 _validation_companies_cache: Optional[List[Dict[str, str]]] = None
@@ -234,45 +258,14 @@ Log File: {log_filename}
 
 
 def get_actual_initial_prompt() -> str:
-    """Get the actual initial prompt used for query parsing."""
-    # This should match the system prompt in parse_query_and_get_companies
-    return """You are a Senior Financial Analyst and Data Extraction Expert. Your task is to analyze a user query for financial data extraction.
-
-First, break down the query into key components:
-- **statement_frequency**: 'quarterly', 'annual', 'both', or 'unspecified'.
-- **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.
-- **period**: Specific period like 'latest quarter', 'latest financial year', 'all quarters of latest financial year', 'Q3 2023', 'FY2024-2025', or 'unspecified'.
-- **time_horizon**: Normalized window such as 'quarterly', 'annual', 'latest', '2years', '5years', or 'unspecified'.
-- **target_companies**: List of company names mentioned.
-- **industries**: Any industries mentioned.
-- **other_requirements**: Any other specific requirements or questions.
-- **get_peer**: Set to true ONLY if the query explicitly asks for peers, competitors, industry comparisons, or benchmark analysis. Set to false if the query mentions specific companies to compare directly.
-
-Then, based on the breakdown, generate a structured JSON response identifying target companies.
-If get_peer is true, the system will automatically fetch appropriate peers from the database.
-Ensure scrip_codes are accurate BSE codes.
-
-Return strictly valid JSON with no additional text.
-
-JSON Schema:
-{
-  "intent": {
-    "statement_frequency": "string",
-    "statement_type": "string",
-    "period": "string",
-    "time_horizon": "string",
-    "get_peer": boolean
-  },
-  "target_companies": {
-    "1": {
-      "company": "company_name",
-      "symbol": "company_symbol",
-      "scrip_code": "company_scrip_code",
-      "industry": "company_industry"
-    }
-  }
-}
-"""
+    """Get the actual initial prompt used for query parsing (NLP-based, no LLM)."""
+    # NLP-based extraction now - this is just for logging/documentation
+    return """NLP-Based Query Parsing (No LLM):
+- Uses pattern matching and fuzzy matching against BSE company list
+- Extracts statement frequency, type, period, time horizon, and target companies
+- Deterministic rule-based extraction for company names from query
+- Automatically detects peer request indicators
+- Returns structured JSON compatible with existing pipeline"""
 
 
 def get_actual_final_prompt(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
@@ -506,7 +499,7 @@ def _fetch_company_data(
 
 
 @router.post("/llm/target_companies", response_model=Dict[str, Any])
-async def llm_target_companies(request: LLMQueryRequest):
+async def llm_target_companies(request: LLMQueryRequest, background_tasks: BackgroundTasks):
     """Parse user query, fetch data, and generate answer with Azure LLM."""
     try:
         repo = SqliteRepository()
@@ -535,9 +528,9 @@ async def llm_target_companies(request: LLMQueryRequest):
         peer_extraction_log = ""
 
         # Step 1: Parse user query
-        print("Step 1: Parsing user query with LLM")
+        print("Step 1: Parsing user query with NLP (no LLM)")
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(request.query)
-        print("1st LLM returned:", parsed)
+        print("1st NLP extraction returned:", parsed)
 
         # Store initial LLM interaction for logging
         initial_llm_response = json.dumps(parsed)
@@ -582,15 +575,19 @@ async def llm_target_companies(request: LLMQueryRequest):
                     "invalid_companies": invalid_companies,
                 }),
                 output_data=json.dumps({
-                    "error": "Invalid company names",
+                    "answer": "Invalid company name(s). Please try a different company.",
                     "invalid_companies": invalid_companies,
                 })
             )
+            answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
+            repo.save_message(conversation_id, "llm", answer)
             repo.close()
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid company name(s) not found in Validation.csv: {', '.join(invalid_companies)}"
-            )
+            return {
+                "chat_id": chat_id,
+                "answer": answer,
+                "invalid_companies": invalid_companies,
+                "tokens_used": {},
+            }
 
         # Step 2: Fetch data for target companies and peers
         print("Step 2: Fetching data for target companies" + (" + peers" if get_peer else ""))
@@ -605,6 +602,7 @@ async def llm_target_companies(request: LLMQueryRequest):
             "fetched_data": {}
         }
 
+        missing_processing_scheduled = False
         for key, company in target_companies.items():
             company_name = company.get("company", key)
             validation_info = validation_results[company_name]
@@ -639,8 +637,11 @@ async def llm_target_companies(request: LLMQueryRequest):
                         time_horizon=time_horizon,
                         is_peer=False,
                         query=request.query,
+                        background_tasks=background_tasks,
+                        schedule_processing=not missing_processing_scheduled,
                     )
                     tracked_missing.add(missing_key)
+                    missing_processing_scheduled = True
 
             if get_peer:
                 peers = company.get("peers", {})
@@ -671,8 +672,11 @@ async def llm_target_companies(request: LLMQueryRequest):
                                     time_horizon=time_horizon,
                                     is_peer=True,
                                     query=request.query,
+                                    background_tasks=background_tasks,
+                                    schedule_processing=not missing_processing_scheduled,
                                 )
                                 tracked_missing.add(missing_key)
+                                missing_processing_scheduled = True
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log
@@ -700,6 +704,10 @@ async def llm_target_companies(request: LLMQueryRequest):
             final_llm_response = answer
             final_llm_prompt = ""
 
+            background_note = None
+            if missing_processing_scheduled:
+                background_note = "Background XBRL fetch has been scheduled. Data will be extracted once available."
+
             # Save assistant message
             repo.save_message(conversation_id, "llm", answer)
 
@@ -711,7 +719,8 @@ async def llm_target_companies(request: LLMQueryRequest):
                     "reason": "No extraction records found for requested companies/period"
                 }),
                 output_data=json.dumps({
-                    "message": answer
+                    "message": answer,
+                    "background_note": background_note
                 })
             )
 
@@ -730,14 +739,18 @@ async def llm_target_companies(request: LLMQueryRequest):
                 token_usage=tokens_used
             )
 
-            return {
+            response = {
                 "chat_id": chat_id,
                 "answer": answer,
-                "tokens_used": tokens_used
+                "tokens_used": tokens_used,
             }
+            if background_note:
+                response["background_note"] = background_note
 
-        # Step 3: Generate answer using LLM
-        print("Step 3: Generating answer with 2nd LLM")
+            return response
+
+        # Step 3: Generate answer using LLM (with data fetched and company names resolved via NLP)
+        print("Step 3: Generating answer with LLM")
 
         # Prepare the EXACT data being sent to LLM
         system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided financial data.
@@ -802,6 +815,8 @@ Provide a clear, concise answer to the query. If data is missing for some compan
             "tokens_used": tokens_used
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("Error:", str(e))
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Plus, X, Search, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { Portal } from "../../components/Portal";
 import { AppShell } from "../components/AppShell";
 import { fetchCompanies, fetchCompanyFinancials, compareExtractionData, type CompanyInfo } from "../services/api";
 
@@ -20,6 +21,8 @@ export default function ComparisonPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0, width: 0 });
 
   // Load companies from backend on mount
   useEffect(() => {
@@ -39,7 +42,8 @@ export default function ComparisonPage() {
   // Handle clicks outside dropdown to close it
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node) && 
+          searchInputRef.current && !searchInputRef.current.contains(event.target as Node)) {
         setShowDropdown(false);
       }
     };
@@ -50,6 +54,29 @@ export default function ComparisonPage() {
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showDropdown]);
+
+  // Update dropdown position whenever it should show
+  useEffect(() => {
+    const updatePosition = () => {
+      if (searchInputRef.current && showDropdown) {
+        const rect = searchInputRef.current.getBoundingClientRect();
+        setDropdownPosition({
+          top: rect.bottom + 8,
+          left: rect.left,
+          width: rect.width
+        });
+      }
+    };
+
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
     };
   }, [showDropdown]);
 
@@ -211,10 +238,11 @@ export default function ComparisonPage() {
           </div>
 
           {/* Search Bar */}
-          <div className="mb-4 relative isolate">
+          <div className="mb-4 relative">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 size-4 text-gray-400" />
               <input
+                ref={searchInputRef}
                 type="text"
                 placeholder="Search by company name, symbol, or sector..."
                 value={searchQuery}
@@ -240,10 +268,18 @@ export default function ComparisonPage() {
 
             {/* Multi-select Dropdown with Sector Filter */}
             {showDropdown && selectedCompanies.length < 5 && (
-              <div 
-                ref={dropdownRef}
-                className="absolute top-full mt-2 w-full bg-white border border-gray-200 rounded-xl shadow-2xl z-[100]"
-              >
+              <Portal>
+                <div 
+                  ref={dropdownRef}
+                  className="fixed bg-white border border-gray-200 rounded-xl shadow-2xl z-[10000]"
+                  style={{
+                    top: `${dropdownPosition.top}px`,
+                    left: `${dropdownPosition.left}px`,
+                    width: `${dropdownPosition.width}px`,
+                    maxHeight: '400px',
+                    overflowY: 'auto'
+                  }}
+                >
                 {/* Sector Info (if companies already selected) */}
                 {selectedData.length > 0 && (
                   <div className="px-4 py-3 bg-blue-50 border-b border-gray-200">
@@ -333,7 +369,8 @@ export default function ComparisonPage() {
                     Close
                   </button>
                 </div>
-              </div>
+                </div>
+              </Portal>
             )}
 
             {/* Dropdown closed message */}

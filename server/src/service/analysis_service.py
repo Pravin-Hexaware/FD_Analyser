@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from repository.sqlite_repository import SqliteRepository
 from utils.llm_testing import get_azure_chat_openai
+from service.nlp_company_extractor import parse_query_and_get_companies_nlp
 
 _LLM: Any = None
 
@@ -498,65 +499,30 @@ def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> T
     return peers_result, full_log
 
 
-def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
-    """Use Azure LLM to break down the user query and generate structured response with companies.
+def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str, str]:
+    """Parse user query using NLP-based extraction (replacing LLM-based approach).
+    
+    This function now uses deterministic NLP pattern matching and fuzzy matching
+    against the BSE company list instead of calling an expensive LLM service.
     
     If get_peer is true, automatically fetch peers from database based on sales range and sector.
+    
+    Returns:
+        Tuple of (parsed_response, system_prompt_used, peer_extraction_log)
     """
     if not query or not query.strip():
         raise ValueError("Query must not be empty.")
 
-    system_prompt = (
-        "You are a Senior Financial Analyst and Data Extraction Expert. Your task is to analyze a user query for financial data extraction.\n\n"
-        "First, break down the query into key components:\n"
-        "- **statement_frequency**: 'quarterly', 'annual', 'both', or 'unspecified'.\n"
-        "- **statement_type**: 'balance_sheet', 'cash_flow', 'income_statement', 'ratios', or 'unspecified'.\n"
-        "- **period**: Specific period like 'latest quarter', 'latest financial year', 'all quarters of latest financial year', 'Q3 2023', 'FY2024-2025', or 'unspecified'.\n"
-        "- **time_horizon**: Normalized timeframe such as 'quarterly', 'annual', 'latest', '2years', '5years', or 'unspecified'.\n"
-        "- **target_companies**: List of company names mentioned.\n"
-        "- **industries**: Any industries mentioned.\n"
-        "- **other_requirements**: Any other specific requirements or questions.\n"
-        "- **get_peer**: Set to true ONLY if the query explicitly asks for peers, competitors, industry comparisons, or benchmark analysis. Set to false if the query mentions specific companies to compare directly.\n\n"
-        "Then, based on the breakdown, generate a structured JSON response identifying target companies.\n"
-        "If get_peer is true, the system will first apply hardcoded peer mappings and then fall back to database peer lookup if needed.\n"
-        "Ensure scrip_codes are accurate BSE codes.\n\n"
-        "Return strictly valid JSON with no additional text.\n\n"
-        "JSON Schema:\n"
-        "{\n"
-        "  \"intent\": {\n"
-        "    \"statement_frequency\": \"string\",\n"
-        "    \"statement_type\": \"string\",\n"
-        "    \"period\": \"string\",\n"
-        "    \"time_horizon\": \"string\",\n"
-        "    \"get_peer\": boolean\n"
-        "  },\n"
-        "  \"target_companies\": {\n"
-        "    \"1\": {\n"
-        "      \"company\": \"company_name\",\n"
-        "      \"symbol\": \"company_symbol\",\n"
-        "      \"scrip_code\": \"company_scrip_code\",\n"
-        "      \"industry\": \"company_industry\"\n"
-        "    }\n"
-        "  }\n"
-        "}\n"
-    )
-
-    response = _invoke_llm(system_prompt, query, max_tokens=800)
-    normalized = _normalize_llm_response(response)
-    text = normalized.get("content", "")
-
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            candidate = text[start : end + 1]
-            try:
-                parsed = json.loads(candidate)
-            except Exception:
-                parsed = {"error": "Failed to parse JSON"}
-
+    # Use NLP-based extraction instead of LLM
+    parsed, system_prompt = parse_query_and_get_companies_nlp(query)
+    
+    # Check for extraction errors
+    if parsed.get("error"):
+        print(f"Query parsing error: {parsed.get('error')}")
+        return parsed, system_prompt, ""
+    
+    peer_extraction_log = ""
+    
     # If get_peer is true, fetch peers from database
     if parsed.get("intent", {}).get("get_peer", False):
         target_companies = parsed.get("target_companies", {})
@@ -580,7 +546,8 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str]:
                 for i, peer in enumerate(peers, 1):
                     company_data["peers"][str(i)] = peer
 
-    return parsed, system_prompt, peer_extraction_log if 'peer_extraction_log' in locals() else ""
+    return parsed, system_prompt, peer_extraction_log
+
 
 
 def _format_period_from_publication_date(publication_date: Optional[str]) -> str:

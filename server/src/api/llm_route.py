@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import asyncio
+import threading
 import uuid
 import json
 import os
@@ -24,6 +26,23 @@ def _missing_tracker_csv_path() -> Path:
 
 
 
+def _schedule_missing_company_processing() -> None:
+    """Schedule background processing of missing companies."""
+    try:
+        from api.service.missing_company_service import MissingCompanyService
+
+        def _run():
+            try:
+                asyncio.run(MissingCompanyService.process_missing_companies_batch(None))
+            except Exception as exc:
+                print(f"[WARN] Missing company background task failed: {exc}")
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+    except Exception as exc:
+        print(f"[WARN] Failed to schedule missing company processing: {exc}")
+
+
 def _append_missing_company(
     company_name: str,
     symbol: Optional[str],
@@ -33,6 +52,8 @@ def _append_missing_company(
     time_horizon: str,
     is_peer: bool,
     query: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+    schedule_processing: bool = False,
 ) -> None:
     file_path = _missing_tracker_csv_path()
     header = [
@@ -64,6 +85,9 @@ def _append_missing_company(
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+    if background_tasks is not None and schedule_processing:
+        background_tasks.add_task(_schedule_missing_company_processing)
 
 
 _validation_companies_cache: Optional[List[Dict[str, str]]] = None
@@ -506,7 +530,7 @@ def _fetch_company_data(
 
 
 @router.post("/llm/target_companies", response_model=Dict[str, Any])
-async def llm_target_companies(request: LLMQueryRequest):
+async def llm_target_companies(request: LLMQueryRequest, background_tasks: BackgroundTasks):
     """Parse user query, fetch data, and generate answer with Azure LLM."""
     try:
         repo = SqliteRepository()
@@ -582,15 +606,19 @@ async def llm_target_companies(request: LLMQueryRequest):
                     "invalid_companies": invalid_companies,
                 }),
                 output_data=json.dumps({
-                    "error": "Invalid company names",
+                    "answer": "Invalid company name(s). Please try a different company.",
                     "invalid_companies": invalid_companies,
                 })
             )
+            answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
+            repo.save_message(conversation_id, "llm", answer)
             repo.close()
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid company name(s) not found in Validation.csv: {', '.join(invalid_companies)}"
-            )
+            return {
+                "chat_id": chat_id,
+                "answer": answer,
+                "invalid_companies": invalid_companies,
+                "tokens_used": {},
+            }
 
         # Step 2: Fetch data for target companies and peers
         print("Step 2: Fetching data for target companies" + (" + peers" if get_peer else ""))
@@ -605,6 +633,7 @@ async def llm_target_companies(request: LLMQueryRequest):
             "fetched_data": {}
         }
 
+        missing_processing_scheduled = False
         for key, company in target_companies.items():
             company_name = company.get("company", key)
             validation_info = validation_results[company_name]
@@ -639,8 +668,11 @@ async def llm_target_companies(request: LLMQueryRequest):
                         time_horizon=time_horizon,
                         is_peer=False,
                         query=request.query,
+                        background_tasks=background_tasks,
+                        schedule_processing=not missing_processing_scheduled,
                     )
                     tracked_missing.add(missing_key)
+                    missing_processing_scheduled = True
 
             if get_peer:
                 peers = company.get("peers", {})
@@ -671,8 +703,11 @@ async def llm_target_companies(request: LLMQueryRequest):
                                     time_horizon=time_horizon,
                                     is_peer=True,
                                     query=request.query,
+                                    background_tasks=background_tasks,
+                                    schedule_processing=not missing_processing_scheduled,
                                 )
                                 tracked_missing.add(missing_key)
+                                missing_processing_scheduled = True
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log
@@ -700,6 +735,10 @@ async def llm_target_companies(request: LLMQueryRequest):
             final_llm_response = answer
             final_llm_prompt = ""
 
+            background_note = None
+            if missing_processing_scheduled:
+                background_note = "Background XBRL fetch has been scheduled. Data will be extracted once available."
+
             # Save assistant message
             repo.save_message(conversation_id, "llm", answer)
 
@@ -711,7 +750,8 @@ async def llm_target_companies(request: LLMQueryRequest):
                     "reason": "No extraction records found for requested companies/period"
                 }),
                 output_data=json.dumps({
-                    "message": answer
+                    "message": answer,
+                    "background_note": background_note
                 })
             )
 
@@ -730,11 +770,15 @@ async def llm_target_companies(request: LLMQueryRequest):
                 token_usage=tokens_used
             )
 
-            return {
+            response = {
                 "chat_id": chat_id,
                 "answer": answer,
-                "tokens_used": tokens_used
+                "tokens_used": tokens_used,
             }
+            if background_note:
+                response["background_note"] = background_note
+
+            return response
 
         # Step 3: Generate answer using LLM
         print("Step 3: Generating answer with 2nd LLM")
@@ -802,6 +846,8 @@ Provide a clear, concise answer to the query. If data is missing for some compan
             "tokens_used": tokens_used
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("Error:", str(e))
         raise HTTPException(status_code=500, detail=str(e))

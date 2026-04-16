@@ -384,8 +384,9 @@ async def process_missing_companies(
     
     This endpoint will:
     1. Fetch XBRL URLs using the existing batch_xbrl_finder endpoint
-    2. Return results for each company
-    3. Remove successfully processed companies from the missing_companies.csv
+    2. Store raw XBRL content and extract it into the database
+    3. Return results for each company
+    4. Remove successfully processed companies from the missing_companies.csv
     """
     try:
         from api.service.missing_company_service import MissingCompanyService

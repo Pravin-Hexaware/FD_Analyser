@@ -11,6 +11,7 @@ import type { CompanyData } from "../data/companies";
 import { AppShell } from "../components/AppShell";
 import { toast } from "react-hot-toast";
 import { apiClient } from "../../api/apiClient";
+import { fetchMissingCompaniesStatus, fetchMissingCompanies, addMissingCompaniesToBSE } from "../services/api";
 import { useExtraction } from "../../context/ExtractionContext";
 
 // interface IngestionLog {
@@ -71,14 +72,9 @@ export default function AdminPage() {
   useEffect(() => {
     const loadMissingCompanies = async () => {
       try {
-        const response = await fetch("http://localhost:8001/api/missing-companies/status");
-        if (response.ok) {
-          const data = await response.json();
-          console.log("Loaded missing companies with status:", data);
-          setMissingCompanies(data);
-        } else {
-          console.error("Failed to load missing companies, status:", response.status);
-        }
+        const data = await fetchMissingCompaniesStatus();
+        console.log("Loaded missing companies with status:", data);
+        setMissingCompanies(data);
       } catch (error) {
         console.error("Failed to load missing companies:", error);
       }
@@ -138,45 +134,33 @@ export default function AdminPage() {
 
     setProcessingMissing(true);
     try {
-      const response = await fetch("http://localhost:8001/api/missing-companies/add-to-bse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scrip_codes: Array.from(selectedMissingCompanies),
-        }),
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        
-        // Refresh main companies list from database
-        try {
-          const dbCompanies = await apiClient.getAllCompanies();
-          if (dbCompanies && dbCompanies.length > 0) {
-            setCompanies(dbCompanies as any);
-          }
-        } catch (error) {
-          console.error("Failed to reload companies list:", error);
+      const result = await addMissingCompaniesToBSE(Array.from(selectedMissingCompanies));
+      
+      // Refresh main companies list from database
+      try {
+        const dbCompanies = await apiClient.getAllCompanies();
+        if (dbCompanies && dbCompanies.length > 0) {
+          setCompanies(dbCompanies as any);
         }
-        
-        // Refresh missing companies list
-        const refreshResponse = await fetch("http://localhost:8001/api/missing-companies");
-        if (refreshResponse.ok) {
-          const updated = await refreshResponse.json();
-          setMissingCompanies(updated);
-        }
-        
-        setSelectedMissingCompanies(new Set());
-        
-        if (result.added_count > 0) {
-          toast.success(`Added ${result.added_count} companies to BSE Filings! You can now process them using the XBRL extraction.`);
-        }
-        if (result.errors && result.errors.length > 0) {
-          toast.error(`Some errors: ${result.errors.join(', ')}`);
-        }
-      } else {
-        const error = await response.json();
-        toast.error(error.detail || "Failed to add companies to BSE Filings");
+      } catch (error) {
+        console.error("Failed to reload companies list:", error);
+      }
+      
+      // Refresh missing companies list
+      try {
+        const updated = await fetchMissingCompanies();
+        setMissingCompanies(updated);
+      } catch (error) {
+        console.error("Failed to refresh missing companies:", error);
+      }
+      
+      setSelectedMissingCompanies(new Set());
+      
+      if (result.added_count > 0) {
+        toast.success(`Added ${result.added_count} companies to BSE Filings! You can now process them using the XBRL extraction.`);
+      }
+      if (result.errors && result.errors.length > 0) {
+        toast.error(`Some errors: ${result.errors.join(', ')}`);
       }
     } catch (error) {
       console.error("Error adding to BSE Filings:", error);

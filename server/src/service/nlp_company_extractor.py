@@ -114,10 +114,15 @@ class CompanyExtractor:
         potential_names = self._extract_potential_company_names(query)
         
         results = []
+        seen_symbols = set()
         for name in potential_names:
             match = self._find_best_match(name, threshold=0.6)
             
             if match:
+                symbol = match["security_id"]
+                if symbol in seen_symbols:
+                    continue
+                seen_symbols.add(symbol)
                 results.append({
                     "company": name,
                     "matched": True,
@@ -145,16 +150,59 @@ class CompanyExtractor:
         3. Use BSE list as a dictionary to find exact/partial matches
         4. Extract proper nouns (all caps or Title Case sequences)
         """
-        potential_names = set()
-        
+        potential_names: List[str] = []
+        seen_candidates = set()
+
+        def add_candidate(candidate: str) -> None:
+            normalized = self._normalize_text(candidate)
+            if normalized and normalized not in seen_candidates:
+                potential_names.append(candidate)
+                seen_candidates.add(normalized)
+
+        # Strategy 0: Extract direct compare/between company pairs first
+        compare_patterns = [
+            r'compare\s+(?:how|what|whether|the)?\s*([^\.\?\!]*?)\s+(?:and|vs|versus)\s+([^\.\?\!]*?)(?:\'s|’s)?(?:\s+(?:latest|recent|last|annual|quarterly|results|financial|performance|trends|year|period|outlook|based|in|with|for|on|using|across|over|within|about|regarding|concerning|during|amid|amidst|after|before|when|while|have|has|had)\b|[\.\?\!]|$)',
+            r'between\s+([^\.\?\!]*?)\s+and\s+([^\.\?\!]*?)(?:\'s|’s)?(?:\s+(?:latest|recent|last|annual|quarterly|results|financial|performance|trends|year|period|outlook|based|in|with|for|on|using|across|over|within|about|regarding|concerning|during|amid|amidst|after|before|when|while|have|has|had)\b|[\.\?\!]|$)',
+        ]
+        for pattern in compare_patterns:
+            for match in re.finditer(pattern, query, re.IGNORECASE):
+                first = self._clean_company_candidate(match.group(1) or "")
+                second = self._clean_company_candidate(match.group(2) or "")
+                if first:
+                    add_candidate(first)
+                if second:
+                    add_candidate(second)
+
         # Strategy 1: Extract all capitalized sequences (likely proper nouns)
         # This pattern finds sequences of title-case words or all-caps words
         capitalized_pattern = r'\b[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*\b'
         for match in re.finditer(capitalized_pattern, query):
             word_seq = match.group(0).strip()
-            # Filter out common non-company words
-            if not self._is_common_word(word_seq) and len(word_seq) > 1:
-                potential_names.add(word_seq)
+            if len(word_seq) <= 1:
+                continue
+
+            cleaned = self._clean_company_candidate(word_seq)
+            if cleaned and cleaned != word_seq:
+                if self._is_company_phrase_in_validation(cleaned) or self._is_valid_symbol(cleaned):
+                    add_candidate(cleaned)
+                    continue
+
+            words = word_seq.split()
+            if len(words) == 1:
+                # Allow single-word candidates only if it's a validated company name or symbol.
+                if word_seq.isupper() and 2 <= len(word_seq) <= 10:
+                    if not self._is_common_word(word_seq):
+                        if any(company["security_id"].upper() == word_seq for company in self._companies):
+                            add_candidate(word_seq)
+                elif self._is_company_phrase_in_validation(word_seq):
+                    add_candidate(word_seq)
+            else:
+                if self._is_company_phrase_in_validation(word_seq):
+                    add_candidate(word_seq)
+                else:
+                    explicit = self._extract_explicit_company_name(word_seq)
+                    if explicit and self._is_company_phrase_in_validation(explicit):
+                        add_candidate(explicit)
         
         # Strategy 2: Extract words following specific prepositions
         # Pattern: "for/of/at/from/company X", "X limited/ltd"
@@ -165,39 +213,266 @@ class CompanyExtractor:
         for pattern in contextual_patterns:
             for match in re.finditer(pattern, query, re.IGNORECASE):
                 name = match.group(1).strip()
-                if not self._is_common_word(name) and len(name) > 1:
-                    potential_names.add(name)
+                if not self._is_common_word(name) and len(name) > 1 and self._is_company_phrase_in_validation(name):
+                    add_candidate(name)
         
         # Strategy 3: Look for BSE company names directly in the query
         # Check if any company name (or part of it) exists in the query
+        prefix_counts: Dict[str, int] = {}
+        for company in self._companies:
+            issuer_name = self._normalize_text(company.get("issuer_name", ""))
+            parts = issuer_name.split()
+            if len(parts) >= 2:
+                prefix = " ".join(parts[:2])
+                prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+
         for company in self._companies:
             for field in ["issuer_name", "security_name", "security_id"]:
                 company_name = company.get(field, "").strip()
                 if not company_name:
                     continue
+                if len(company_name.split()) == 1:
+                    # Avoid matching single-word issuer/symbol values directly here,
+                    # as they can be generic tokens like energy or bank.
+                    continue
                 # Check for exact or partial match (case-insensitive)
                 pattern = r'\b' + re.escape(company_name) + r'\b'
                 if re.search(pattern, query, re.IGNORECASE):
-                    potential_names.add(company_name)
+                    add_candidate(company_name)
                 
-                # Also check for shorter versions (e.g., "TCS" for "Tata Consultancy Services")
+                # Also check for shorter versions only when the first two words appear together.
+                # Only add if the prefix is unique, otherwise it may match multiple companies.
                 parts = company_name.split()
-                if len(parts) > 1 and len(parts[0]) >= 2:
+                if len(parts) > 1:
                     short_form = parts[0]
-                    if re.search(r'\b' + re.escape(short_form) + r'\b', query, re.IGNORECASE):
-                        potential_names.add(company_name)
-        
+                    second_word = parts[1]
+                    if len(short_form) >= 3 and len(second_word) >= 3:
+                        prefix = self._normalize_text(f"{short_form} {second_word}")
+                        if prefix_counts.get(prefix, 0) == 1 and re.search(
+                            r'\b' + re.escape(short_form) + r'\s+' + re.escape(second_word) + r'\b',
+                            query,
+                            re.IGNORECASE,
+                        ):
+                            add_candidate(company_name)
+
+        # Strategy 3b: Avoid broad first-word extraction from company names.
+        # We rely on explicit company names, symbols, or validated phrase matches.
+
+        # Strategy 3c: Avoid false positives from known query terms by validating against company list
+        validated_names = []
+        validated_set = set()
+        for name in potential_names:
+            if len(name.split()) == 1 and not self._is_company_phrase_in_validation(name) and not self._is_valid_symbol(name):
+                continue
+            normalized_name = self._normalize_text(name)
+            if normalized_name and normalized_name not in validated_set:
+                validated_names.append(name)
+                validated_set.add(normalized_name)
+        potential_names = validated_names
+
         # Strategy 4: Extract known company symbols (all caps, 2-10 chars)
         symbol_pattern = r'\b([A-Z]{2,10})\b'
         for match in re.finditer(symbol_pattern, query):
             symbol = match.group(1)
+            if self._is_common_word(symbol):
+                continue
+            if not self._is_valid_symbol(symbol):
+                continue
             # Check if this symbol exists in BSE list
             for company in self._companies:
                 if company["security_id"].upper() == symbol:
-                    potential_names.add(company["issuer_name"])
+                    add_candidate(company["issuer_name"])
                     break
         
-        return list(potential_names)
+        # Deduplicate candidate names in a case-insensitive way
+        filtered_candidates = []
+        for name in potential_names:
+            if any(
+                name != other and self._is_subphrase(name, other)
+                for other in potential_names
+            ):
+                continue
+            filtered_candidates.append(name)
+
+        return filtered_candidates
+
+    def _is_company_phrase_in_validation(self, phrase: str) -> bool:
+        normalized_phrase = self._normalize_text(phrase)
+        if not normalized_phrase:
+            return False
+
+        tokens = normalized_phrase.split()
+        if len(tokens) == 1:
+            if self._is_valid_symbol(normalized_phrase):
+                return True
+            for company in self._companies:
+                for field in ["issuer_name", "security_name", "security_id"]:
+                    value = company.get(field, "")
+                    if not value:
+                        continue
+                    normalized_value = self._normalize_text(value)
+                    if not normalized_value:
+                        continue
+                    if normalized_phrase == normalized_value:
+                        return True
+            return False
+
+        for company in self._companies:
+            for field in ["issuer_name", "security_name", "security_id"]:
+                value = company.get(field, "")
+                if not value:
+                    continue
+                normalized_value = self._normalize_text(value)
+                if not normalized_value:
+                    continue
+                if normalized_phrase == normalized_value:
+                    return True
+                if re.search(r'\b' + re.escape(normalized_phrase) + r'\b', normalized_value):
+                    return True
+        return False
+
+    def _is_valid_symbol(self, token: str) -> bool:
+        normalized = token.strip().upper()
+        if not normalized:
+            return False
+        return any(company["security_id"].upper() == normalized for company in self._companies)
+
+    def _is_subphrase(self, shorter: str, longer: str) -> bool:
+        shorter_tokens = shorter.lower().split()
+        longer_tokens = longer.lower().split()
+        if len(shorter_tokens) >= len(longer_tokens):
+            return False
+        for idx in range(len(longer_tokens) - len(shorter_tokens) + 1):
+            if longer_tokens[idx:idx + len(shorter_tokens)] == shorter_tokens:
+                return True
+        return False
+
+    def _extract_explicit_company_name(self, text: str) -> Optional[str]:
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return None
+
+        # Check explicit symbol matches first.
+        for company in self._companies:
+            symbol = company.get("security_id", "").strip()
+            if symbol and re.search(r'\b' + re.escape(symbol) + r'\b', text, re.IGNORECASE):
+                return symbol
+
+        # Check explicit issuer/security names in the candidate.
+        for company in self._companies:
+            for field in ["issuer_name", "security_name"]:
+                value = company.get(field, "").strip()
+                if value and re.search(r'\b' + re.escape(value) + r'\b', text, re.IGNORECASE):
+                    return value
+
+        # Scan trailing segments for valid company phrases or symbols.
+        segments = re.split(
+            r'\b(?:for|of|on|using|through|across|over|within|based on|with|about|regarding|concerning|considering|amid|amidst|after|before|during)\b|[,;:\\n]',
+            text,
+            flags=re.IGNORECASE,
+        )
+        for segment in reversed(segments):
+            candidate = segment.strip(" '\".?!,;:-")
+            if not candidate:
+                continue
+            if self._is_valid_symbol(candidate) or self._is_company_phrase_in_validation(candidate):
+                return candidate
+
+        # Try suffixes of the segment to recover a company phrase.
+        words = re.findall(r"[A-Za-z0-9&]+", normalized_text)
+        for start in range(len(words)):
+            suffix = " ".join(words[start:])
+            if self._is_company_phrase_in_validation(suffix):
+                return suffix
+
+        return None
+
+    def _clean_company_candidate(self, candidate: str) -> str:
+        candidate = candidate.strip(" '\".?!,;:-")
+        if not candidate:
+            return ""
+
+        candidate = re.sub(r'^(?:how|what|whether|the|their)\s+', "", candidate, flags=re.IGNORECASE)
+
+        parts = re.split(
+            r"\b(?:like|such as|including|especially|among|with|along with|via)\b",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        candidate = parts[-1].strip()
+
+        candidate = re.sub(
+            r'^(?:the\s+)?(?:results|performance|financials|figures|numbers|reported|disclosures|data)(?:\s+of)?\s+',
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        candidate = re.sub(
+            r'[,;:].*$',
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+
+        explicit = self._extract_explicit_company_name(candidate)
+        if explicit:
+            return explicit.strip(" '\".?!,;:-")
+
+        candidate = re.sub(
+            r'\b(?:for|of|about|using|through|across|over|within|based on|with)\s+([A-Za-z0-9&\.\- ]+)$',
+            r'\1',
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        candidate = re.sub(
+            r'\b(?:on|for|about|regarding|concerning|in|during|over|with|based on|considering|amid|amidst|after|before|using|across|within|have|has|had|their|reported|figures|numbers|disclosures|periods?)\b.*$',
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        candidate = candidate.strip(" '\".?!,;:-")
+        return candidate
+
+    def _find_best_match(self, query_name: str, threshold: float = 0.6) -> Optional[Dict[str, str]]:
+        """Find best matching company from BSE list using fuzzy matching."""
+        normalized_query = self._normalize_text(query_name)
+        
+        if not normalized_query:
+            return None
+        
+        best_match = None
+        best_score = threshold
+        
+        for company in self._companies:
+            issuer_normalized = self._normalize_text(company["issuer_name"])
+            security_normalized = self._normalize_text(company["security_name"])
+            code_normalized = self._normalize_text(company["security_id"])
+            
+            # Calculate similarity scores
+            issuer_score = self._similarity_ratio(normalized_query, issuer_normalized)
+            security_score = self._similarity_ratio(normalized_query, security_normalized)
+            code_score = self._similarity_ratio(normalized_query, code_normalized)
+
+            if normalized_query == issuer_normalized.split()[0] or normalized_query == security_normalized.split()[0]:
+                issuer_score = max(issuer_score, 0.95)
+                security_score = max(security_score, 0.95)
+            
+            # Also check for substring matches (higher weight)
+            if normalized_query in issuer_normalized or issuer_normalized in normalized_query:
+                issuer_score = min(issuer_score + 0.15, 1.0)
+            if normalized_query in security_normalized or security_normalized in normalized_query:
+                security_score = min(security_score + 0.15, 1.0)
+            if normalized_query in code_normalized or code_normalized in normalized_query:
+                code_score = min(code_score + 0.15, 1.0)
+            
+            # Take the best score among all fields
+            max_score = max(issuer_score, security_score, code_score)
+            
+            if max_score > best_score:
+                best_score = max_score
+                best_match = company
+        
+        return best_match
     
     @staticmethod
     def _is_common_word(word: str) -> bool:
@@ -208,6 +483,12 @@ class CompanyExtractor:
             'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'can',
             'could', 'should', 'may', 'might', 'must', 'shall', 'as', 'if', 'than',
             'that', 'this', 'these', 'those', 'what', 'which', 'who', 'why', 'how',
+            'it', 'based', 'considering', 'likely', 'better', 'next', 'coming',
+            'outlook', 'headwinds', 'industry', 'pressures', 'uncertainty', 'volatility',
+            'demand', 'growth', 'macro', 'macroeconomic', 'positioned', 'manage',
+            'managing', 'compare', 'comparison', 'benchmark', 'results', 'performance',
+            'global', 'risk', 'risks', 'budget', 'spending', 'recent', 'latest',
+            'trend', 'trends', 'annual', 'quarterly',
             'we', 'you', 'he', 'she', 'it', 'they', 'i', 'me', 'him', 'her', 'us',
             'them', 'my', 'your', 'his', 'her', 'its', 'our', 'their', 'all', 'each',
             'every', 'both', 'either', 'neither', 'some', 'any', 'no', 'none', 'not',
@@ -239,7 +520,7 @@ class CompanyExtractor:
         frequency = 'unspecified'
         if any(word in query_lower for word in ['quarterly', 'quarter', 'q1', 'q2', 'q3', 'q4', 'qtr']):
             frequency = 'quarterly'
-        elif any(word in query_lower for word in ['annual', 'yearly', 'fy', 'financial year', 'year']):
+        elif re.search(r'\b(?:financial year|fy|annual|yearly|past year|last year|full year|year ended|year-on-year|yoy)\b', query_lower):
             frequency = 'annual'
         elif any(word in query_lower for word in ['both quarterly and annual', 'quarterly and annual']):
             frequency = 'both'
@@ -254,11 +535,27 @@ class CompanyExtractor:
             statement_type = 'income_statement'
         elif any(word in query_lower for word in ['ratio', 'ratios', 'roa', 'roe', 'margin', 'turnover']):
             statement_type = 'ratios'
+        elif any(word in query_lower for word in ['risk', 'resilience', 'resilient', 'vulnerable', 'vulnerability', 'downturn', 'withstand', 'headwind', 'headwinds', 'pressure', 'weakness', 'shocks', 'downgrade', 'uncertain', 'uncertainty']):
+            statement_type = 'risk'
         
         # Detect time horizon
         time_horizon = 'unspecified'
-        if any(word in query_lower for word in ['latest', 'most recent', 'recent']):
+        if 'last four quarters' in query_lower or 'last 4 quarters' in query_lower or 'four quarters' in query_lower:
+            time_horizon = '4quarters'
+        elif re.search(r"\b(?:last|latest|most recent|previous|past|prior)\s+(?:two|2)\s+(?:financial\s+years?|years?|fiscal\s+years?)\b", query_lower):
+            time_horizon = '2years'
+        elif re.search(r"\b(?:last|latest|most recent|previous|past|prior)\s+(?:three|3)\s+(?:financial\s+years?|years?|fiscal\s+years?)\b", query_lower):
+            time_horizon = '3years'
+        elif re.search(r"\b(?:last|latest|most recent|previous|past|prior)\s+(?:five|5)\s+(?:financial\s+years?|years?|fiscal\s+years?)\b", query_lower):
+            time_horizon = '5years'
+        elif any(word in query_lower for word in ['latest', 'most recent', 'recent']):
             time_horizon = 'latest'
+        elif 'next 12 months' in query_lower or 'next year' in query_lower or 'coming year' in query_lower or 'coming 12 months' in query_lower or 'following year' in query_lower:
+            time_horizon = 'next_year'
+        elif 'next cycle' in query_lower or 'coming period' in query_lower or 'coming cycle' in query_lower or 'near term' in query_lower or 'near-term' in query_lower:
+            time_horizon = 'future'
+        elif 'medium term' in query_lower or 'medium-term' in query_lower:
+            time_horizon = 'medium_term'
         elif '5 year' in query_lower or '5year' in query_lower or '5-year' in query_lower:
             time_horizon = '5years'
         elif '3 year' in query_lower or '3year' in query_lower or '3-year' in query_lower:
@@ -271,6 +568,7 @@ class CompanyExtractor:
         # Detect period (specific time frame)
         period = 'unspecified'
         period_patterns = [
+            (r'last\s+four\s+quarters', 'last four quarters'),
             (r'fy(\d{4})[- ]?(\d{2,4})', 'fiscal year'),
             (r'q(\d)[- ]?(\d{4})', 'quarter'),
             (r'(?:latest|last|previous)\s+quarter', 'latest quarter'),
@@ -283,11 +581,17 @@ class CompanyExtractor:
                 break
         
         # Detect if peers are requested
-        get_peer = any(word in query_lower for word in [
-            'peer', 'peers', 'competitor', 'competitors', 'industry',
-            'benchmark', 'compared to', 'compare with', 'vs', 'versus',
-            'similar company', 'similar companies', 'like', 'comparable'
-        ])
+        get_peer = False
+        peer_phrases = [
+            'peer', 'peers', 'competitor', 'competitors',
+            'benchmark', 'benchmarking', 'comparable company', 'comparable companies',
+            'compare to peers', 'compare with peers', 'compare against peers',
+            'vs peers', 'versus peers'
+        ]
+        for phrase in peer_phrases:
+            if phrase in query_lower:
+                get_peer = True
+                break
         
         return {
             "statement_frequency": frequency,
@@ -330,18 +634,26 @@ def parse_query_and_get_companies_nlp(query: str) -> Tuple[Dict[str, Any], str]:
     
     # Build target_companies dictionary
     target_companies = {}
+    seen_symbols = set()
+    seen_scrip_codes = set()
     company_index = 1
-    
+
     for company_info in extracted_companies:
         if company_info["matched"]:
+            symbol = company_info["security_id"]
+            scrip_code = company_info["security_code"]
+            if symbol in seen_symbols or scrip_code in seen_scrip_codes:
+                continue
+            seen_symbols.add(symbol)
+            seen_scrip_codes.add(scrip_code)
             target_companies[str(company_index)] = {
                 "company": company_info["issuer_name"],
-                "symbol": company_info["security_id"],
-                "scrip_code": company_info["security_code"],
+                "symbol": symbol,
+                "scrip_code": scrip_code,
                 "industry": "unspecified",  # Industry not available from BSE list
             }
             company_index += 1
-    
+
     # If no companies found, return error
     if not target_companies:
         return {

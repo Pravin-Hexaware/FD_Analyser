@@ -169,6 +169,7 @@ class MissingCompanyService:
         log_file: Optional[Path] = None,
         report_type: str = 'std',
         raw_content: Optional[Any] = None,
+        industry: Optional[str] = None,
     ) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             'scrip_code': scrip_code,
@@ -210,15 +211,19 @@ class MissingCompanyService:
             'company_name': company_name,
             'url': xbrl_url,
             'period': publication_date,
+            'industry': industry,
         }, ensure_ascii=False))
+
+        normalized_company_name = company_name.strip().upper()
+        normalized_symbol = symbol.strip().upper() if symbol else None
 
         # Ensure company exists in database for joining later
         repo.upsert_company(
-            company_name=company_name,
-            symbol=symbol,
+            company_name=normalized_company_name,
+            symbol=normalized_symbol,
             scrip_code=scrip_code,
-            sector=None,
-            industry=None,
+            sector=industry.strip() if industry else None,
+            industry=industry.strip() if industry else None,
         )
 
         if not repo.xbrl_filing_exists(scrip_code, xbrl_url, report_type=report_type):
@@ -291,18 +296,36 @@ class MissingCompanyService:
                 'parsed_json_path': str(parsed_output_file),
             })
         if extraction_type == 'quarterly':
+            caps_company_name = company_name.strip().upper()
             repo.insert_quarterly_extraction(
                 scrip_code=scrip_code,
-                company_name=company_name,
+                company_name=caps_company_name,
                 xbrl_link=xbrl_url,
                 publication_date=publication_date or '',
                 report_type=report_type,
                 parsed_json=parsed_json_str,
             )
         else:
+            if not publication_date or len(publication_date) < 2 or publication_date[1].upper() != 'C':
+                result['error'] = (
+                    f"Skipped annual extraction because period does not meet required format: {publication_date}"
+                )
+                if log_file is not None:
+                    _append_missing_company_log(log_file, {
+                        'stage': 'skipped_annual_extraction',
+                        'scrip_code': scrip_code,
+                        'company_name': company_name,
+                        'xbrl_url': xbrl_url,
+                        'period': publication_date,
+                        'reason': 'period[1] != C',
+                    })
+                return result
+
+            cap_company_name = company_name.strip().upper()
+            #cap_symbol = symbol.strip().upper() if symbol else None
             repo.insert_annual_extraction(
                 scrip_code=scrip_code,
-                company_name=company_name,
+                company_name=cap_company_name,
                 xbrl_link=xbrl_url,
                 publication_date=publication_date or '',
                 report_type=report_type,
@@ -334,7 +357,7 @@ class MissingCompanyService:
                 browser, ctx = await create_browser_and_context(p)
                 attempts = 0
                 results = []
-                async for xbrl_url, xbrl_period, xbrl_type, raw_content in get_all_std_xbrl_urls(ctx, query):
+                async for xbrl_url, xbrl_period, xbrl_type, raw_content, industry in get_all_std_xbrl_urls(ctx, query):
                     if not xbrl_url or xbrl_type != 'std':
                         continue
 
@@ -350,6 +373,7 @@ class MissingCompanyService:
                         log_file=log_file,
                         report_type='std',
                         raw_content=raw_content,
+                        industry=industry,
                     ))
 
                 if not results:

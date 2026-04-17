@@ -558,7 +558,7 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
 
                             # Fetch all Std XBRL URLs
                             link_idx = 0
-                            async for url, period, xbrl_type, raw_content in get_all_std_xbrl_urls(ctx, scrip_code):
+                            async for url, period, xbrl_type, raw_content, _industry in get_all_std_xbrl_urls(ctx, scrip_code):
                                 key = (period, xbrl_type)
                                 existing_id = existing_map.get(key)
                                 if existing_id:

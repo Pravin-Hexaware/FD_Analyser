@@ -355,7 +355,9 @@ def _requires_historical_data(query: str) -> bool:
         return False
     historical_keywords = [
         "historical", "5y", "5 year", "trend", "cagr", "growth", "over time",
-        "past", "fy", "year", "last 2 years", "last 3 years", "last 5 years"
+        "past", "fy", "year", "last 2 years", "last 3 years", "last 5 years",
+        "latest 2 years", "latest two years", "latest 3 years", "latest 5 years",
+        "last two years", "last three years", "last five years"
     ]
     return any(keyword in q for keyword in historical_keywords)
 

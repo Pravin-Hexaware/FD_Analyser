@@ -1071,7 +1071,7 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
 
 async def get_all_std_xbrl_urls(ctx, company: str):
     """
-    Async generator that yields (url, period, xbrl_type) for each Std and Con XBRL link found for the company.
+    Async generator that yields (url, period, xbrl_type, raw_content, industry) for each Std and Con XBRL link found for the company.
     Yields as soon as each URL is resolved.
     """
     from typing import AsyncGenerator
@@ -1222,7 +1222,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                     continue
 
                 # detect header indices
-                idx_period = 3; idx_std = 5; idx_con = 6
+                idx_period = 3; idx_industry = 2; idx_std = 5; idx_con = 6
                 try:
                     header = grid.locator("thead tr").first
                     ths = header.locator("th")
@@ -1238,6 +1238,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                         return default
 
                     idx_period = _idx("period", idx_period)
+                    idx_industry = _idx("industry", idx_industry)
                     idx_std = _idx("std xbrl", idx_std)
                     idx_con = _idx("con xbrl", idx_con)
                 except Exception:
@@ -1250,6 +1251,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                     tds = tr.locator("td")
                     try:
                         per = (await tds.nth(idx_period).inner_text()).strip()
+                        ind = (await tds.nth(idx_industry).inner_text()).strip() if await tds.count() > idx_industry else ""
                         std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
                         con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
 
@@ -1274,7 +1276,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                                 xbrl_content = await fetch_xbrl_content(ctx, url)
                                 #if xbrl_content:
                                     #save_raw_content(company, "std", per, xbrl_content, url)
-                                yield url, per, "std", xbrl_content
+                                yield url, per, "std", xbrl_content, ind
                                 await asyncio.sleep(2)  # Delay to avoid rate limiting
 
                         # Yield Con XBRL
@@ -1292,7 +1294,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                                 xbrl_content = await fetch_xbrl_content(ctx, url)
                                 #if xbrl_content:
                                     #save_raw_content(company, "con", per, xbrl_content, url)
-                                yield url, per, "con", xbrl_content
+                                yield url, per, "con", xbrl_content, ind
                                 await asyncio.sleep(2)  # Delay to avoid rate limiting
 
                     except Exception:

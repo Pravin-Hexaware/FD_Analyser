@@ -1,7 +1,17 @@
 import { useState, useEffect, useRef } from "react";
 import { Plus, X, Search, Trash2 } from "lucide-react";
+import {
+  Box,
+  Paper,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Typography,
+} from "@mui/material";
 import { Button } from "../components/ui/button";
-import { Portal } from "../../components/Portal";
 import { AppShell } from "../components/AppShell";
 import { fetchCompanies, fetchCompanyFinancials, compareExtractionData, type CompanyInfo } from "../services/api";
 
@@ -136,7 +146,7 @@ export default function ComparisonPage() {
       const startYear = year - 1;
       return {
         label: `FY${startYear}-${year}`,
-        value: `${year}`,
+        value: `FY${startYear}-${year}`,
       };
     });
   };
@@ -172,6 +182,113 @@ export default function ComparisonPage() {
     setSearchQuery("");
     setShowDropdown(false);
   };
+
+  const normalizeToCrores = (value: number, levelOfRounding?: string): number => {
+    if (typeof value !== "number" || Number.isNaN(value) || !Number.isFinite(value)) {
+      return value;
+    }
+
+    const unit = String(levelOfRounding || "").trim().toLowerCase();
+    if (unit.includes("crore") || unit.includes("cr")) {
+      return value;
+    }
+    if (unit.includes("lakh") || unit.includes("lac")) {
+      return value / 10;
+    }
+    if (unit.includes("million") || unit.includes("mn")) {
+      return value / 10;
+    }
+    if (unit.includes("billion") || unit.includes("bn")) {
+      return value * 100;
+    }
+    if (unit.includes("thousand") || unit.includes("k")) {
+      return value / 100000;
+    }
+
+    return value;
+  };
+
+  const formatFinancialValue = (value: any, key: string, levelOfRounding?: string) => {
+    if (value === undefined || value === null) {
+      return "-";
+    }
+
+    if (typeof value === "number") {
+      const label = key.toLowerCase();
+      if (label.includes("percentage") || label.includes("percent")) {
+        return `${value.toFixed(2)}%`;
+      }
+      if (label.includes("eps") || label.includes("earnings")) {
+        return `₹${value.toFixed(2)}`;
+      }
+
+      const crores = normalizeToCrores(value, levelOfRounding);
+      return `₹${crores.toLocaleString("en-IN", { maximumFractionDigits: 2 })} Cr`;
+    }
+
+    return String(value);
+  };
+
+  const getLabel = (key: string) => {
+    return key
+      .replace(/_/g, " ")
+      .replace(/([A-Z])/g, " $1")
+      .trim()
+      .replace(/\s+/g, " ");
+  };
+
+  const metricGroups = [
+    {
+      label: "Profit & Loss",
+      color: "#eef2ff",
+      metrics: [
+        "period",
+        "sales",
+        "expenses",
+        "operating_profit",
+        "opm_percentage",
+        "other_income",
+        "cost_of_materials_consumed",
+        "employee_benefit_expense",
+        "other_expenses",
+        "interest",
+        "depreciation",
+        "profit_before_tax",
+        "current_tax",
+        "deferred_tax",
+        "tax",
+        "tax_percent",
+        "net_profit",
+        "eps_in_rs",
+      ],
+    },
+    {
+      label: "Balance Sheet",
+      color: "#ecfdf5",
+      metrics: [
+        "equity_capital",
+        "reserves",
+        "trade_payables_current",
+        "borrowings",
+        "other_liabilities",
+        "total_liabilities",
+        "total_equity",
+        "fixed_assets",
+        "cwip",
+        "investments",
+        "total_assets",
+      ],
+    },
+    {
+      label: "Cash Flow",
+      color: "#f0f9ff",
+      metrics: [
+        "cash_from_operating_activity",
+        "cash_from_investing_activity",
+        "cash_from_financing_activity",
+      ],
+    },
+  ];
 
   return (
     <AppShell
@@ -268,7 +385,6 @@ export default function ComparisonPage() {
 
             {/* Multi-select Dropdown with Sector Filter */}
             {showDropdown && selectedCompanies.length < 5 && (
-              <Portal>
                 <div 
                   ref={dropdownRef}
                   className="fixed bg-white border border-gray-200 rounded-xl shadow-2xl z-[10000]"
@@ -370,7 +486,6 @@ export default function ComparisonPage() {
                   </button>
                 </div>
                 </div>
-              </Portal>
             )}
 
             {/* Dropdown closed message */}
@@ -393,11 +508,12 @@ export default function ComparisonPage() {
           </div>
         </div>
         {selectedCompanies.length >= 2 && (
-          <div className="bg-white rounded-lg border border-gray-100 shadow-sm overflow-hidden">
-            {/* Frequency Toggle */}
-            <div className="flex items-center gap-2 p-4 border-b border-gray-100">
-              <span className="text-sm font-semibold text-gray-900">Financial Period:</span>
-              <div className="flex gap-2 ml-auto">
+          <div className="bg-white rounded-lg border border-gray-100 shadow-sm">
+            <div className="sticky top-0 z-30 bg-white shadow-sm">
+              {/* Frequency Toggle */}
+              <div className="flex items-center gap-2 p-4 border-b border-gray-100">
+                <span className="text-sm font-semibold text-gray-900">Financial Period:</span>
+                <div className="flex gap-2 ml-auto">
                 <button
                   onClick={() => {
                     setFrequency("annual");
@@ -468,181 +584,134 @@ export default function ComparisonPage() {
                 )}
               </div>
             </div>
+          </div>
 
             {/* Comparison Table Data */}
             {loading ? (
               <div className="p-8 text-center text-gray-400">Loading financial data...</div>
             ) : selectedCompanies.length >= 2 ? (
-              <div className="relative">
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-full text-xs">
-                    <thead className="bg-gray-50 shadow-sm">
-                      <tr className="border-b border-gray-200">
-                        <th className="sticky top-0 z-20 text-left px-4 py-3 font-semibold text-gray-900 bg-gray-50">Metric</th>
+              <Box sx={{ position: 'relative' }}>
+                <TableContainer
+                  component={Paper}
+                  sx={{
+                    borderRadius: 3,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    boxShadow: 1,
+                    overflowX: 'auto',
+                  }}
+                >
+                  <Table stickyHeader sx={{ minWidth: 960 }} size="small">
+                    <TableHead>
+                      <TableRow sx={{ backgroundColor: 'background.default' }}>
+                        <TableCell sx={{ fontWeight: 700, fontSize: '0.95rem' }}>Metric</TableCell>
                         {selectedCompanies.map((code, idx) => {
-                          const company = backendCompanies.find(c => c.scrip_code === code);
+                          const company = backendCompanies.find((c) => c.scrip_code === code);
                           return (
-                            <th key={code} className="sticky top-0 z-20 text-right px-4 py-3 font-semibold text-gray-900 whitespace-nowrap bg-gray-50">
-                              <div className="font-bold" style={{ color: COMPANY_COLORS[idx] }}>{company?.symbol}</div>
-                              <div className="text-xs font-normal text-gray-500">{company?.company_name}</div>
-                            </th>
+                            <TableCell
+                              key={code}
+                              align="right"
+                              sx={{
+                                fontWeight: 700,
+                                whiteSpace: 'nowrap',
+                                px: 3,
+                                py: 2,
+                              }}
+                            >
+                              <Typography
+                                variant="subtitle2"
+                                sx={{ fontWeight: 700, color: COMPANY_COLORS[idx], lineHeight: 1.1 }}
+                              >
+                                {company?.symbol}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {company?.company_name}
+                              </Typography>
+                            </TableCell>
                           );
                         })}
-                      </tr>
-                    </thead>
-                  <tbody>
-                    {(() => {
-                      // Use selectedCompanies directly instead of selectedData
-                      if (selectedCompanies.length === 0) {
-                        return null;
-                      }
-                      
-                      // Get first company's data
-                      const firstCompanyCode = selectedCompanies[0];
-                      const firstCompanyData = comparisonData[firstCompanyCode];
-                      
-                      if (!firstCompanyData || !firstCompanyData.financials || firstCompanyData.financials.length === 0) {
-                        return null;
-                      }
-                      
-                      const firstData = firstCompanyData.financials[0];
-                      const allKeys = Object.keys(firstData || {});
-                      
-                      // Define columns for each frequency based on actual database schema
-                      const quarterlyMetrics = [
-                        'period', 'sales', 'expenses', 'operating_profit', 'opm_percentage', 'other_income',
-                        'cost_of_materials_consumed', 'employee_benefit_expense', 'other_expenses',
-                        'interest', 'depreciation', 'profit_before_tax', 'current_tax', 'deferred_tax', 'tax', 'tax_percent', 'net_profit', 'eps_in_rs'
-                      ];
-                      
-                      const annualMetrics = [
-                        'period', 'sales', 'expenses', 'operating_profit', 'opm_percentage', 'other_income',
-                        'interest', 'depreciation', 'profit_before_tax', 'tax_percent', 'net_profit', 'eps_in_rs',
-                        // Balance Sheet
-                        'equity_capital', 'reserves', 'trade_payables_current', 'borrowings',
-                        'other_liabilities', 'total_liabilities', 'total_equity', 'fixed_assets',
-                        'cwip', 'investments', 'total_assets',
-                        // Cash Flow
-                        'cash_from_operating_activity', 'cash_from_investing_activity', 'cash_from_financing_activity'
-                      ];
-                      
-                      // Select metrics based on frequency
-                      const metricsToDisplay = frequency === 'annual' ? annualMetrics : quarterlyMetrics;
-                      // Filter to only show metrics that exist in the current data
-                      const displayMetrics = metricsToDisplay.filter(key => allKeys.includes(key));
-                      
-                      // Helper function to format values
-                      const formatValue = (value: any, key: string, _currency: string = "INR", levelOfRounding: string = "") => {
-                        if (value === undefined || value === null || value === 0) return "-";
-                        
-                        if (typeof value === 'number') {
-                          // Percentage columns - identified by explicit keyword
-                          if (key.includes('percentage') || key.includes('percent')) {
-                            return `${value.toFixed(2)}%`;
-                          }
-                          
-                          // EPS - show in Rupees (per share)
-                          if (key.includes('eps')) {
-                            return `₹${value.toFixed(2)}`;
-                          }
-                          
-                          // Currency columns - format based on level_of_rounding from DB
-                          // P&L columns
-                          if (key.includes('sales') || key.includes('operating_profit') || key.includes('other_income') || 
-                              key.includes('cost_of_materials') || key.includes('employee_benefit') || key.includes('other_expenses') || 
-                              key.includes('interest') || key.includes('depreciation') || key.includes('profit_before_tax') || 
-                              key.includes('current_tax') || key.includes('deferred_tax') || key.includes('net_profit') || 
-                              // Balance sheet columns
-                              key.includes('equity_capital') || key.includes('reserves') || key.includes('trade_payables') || 
-                              key.includes('borrowing') || key.includes('other_liabilities') || key.includes('total_liabilities') || 
-                              key.includes('total_equity') || key.includes('fixed_assets') || key.includes('cwip') || 
-                              key.includes('investment') || key.includes('total_assets') ||
-                              // Cash flow columns
-                              key.includes('cash_from')) {
-                            // Use level_of_rounding from DB as-is (values already in that unit)
-                            return `₹${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${levelOfRounding}`;
-                          }
-                          
-                          // Expenses and similar columns
-                          if (key.includes('expense') || key.includes('tax')) {
-                            return `₹${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${levelOfRounding}`;
-                          }
-                          
-                          // Default: return number with 2 decimal places
-                          return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {(() => {
+                        if (selectedCompanies.length === 0) {
+                          return null;
                         }
-                        
-                        return String(value);
-                      };
 
-                      // Helper to find best value (highest for most metrics, lowest for debt ratios)
-                      const getBestValue = (key: string, values: any[]): { value: any; index: number } | null => {
-                        const numValues = values
-                          .map((v, idx) => ({ value: typeof v === 'number' ? v : null, index: idx }))
-                          .filter(v => v.value !== null && v.value !== 0);
-                        
-                        if (numValues.length === 0) return null;
-                        
-                        // For debt/liability metrics, lower is better
-                        if (key.includes('borrowing') || key.includes('debt') || key.includes('liabilities')) {
-                          return numValues.reduce((min, curr) => ((curr.value ?? 0) < (min.value ?? 0) ? curr : min));
+                        const firstCompanyCode = selectedCompanies[0];
+                        const firstCompanyData = comparisonData[firstCompanyCode];
+                        if (!firstCompanyData?.financials?.length) {
+                          return null;
                         }
-                        
-                        // For all other metrics, higher is better
-                        return numValues.reduce((max, curr) => ((curr.value ?? 0) > (max.value ?? 0) ? curr : max));
-                      };
-                      
-                      
-                      // Helper to convert column name to readable label
-                      const getLabel = (key: string) => {
-                        return key.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
-                      };
-                      
-                      return displayMetrics.map((key) => {
-                        // Get values for this metric from all selected companies for highlighting
-                        const metricValues = selectedCompanies.map((code) => {
-                          const responseData = comparisonData[code];
-                          const financialsList = responseData?.financials;
-                          const data = Array.isArray(financialsList) ? financialsList[0] : financialsList;
-                          return data?.[key];
-                        });
-                        
-                        // Find best value for highlighting
-                        const best = getBestValue(key, metricValues);
-                        
-                        return (
-                          <tr key={key} className="border-b border-gray-100 hover:bg-gray-50">
-                            <td className="px-4 py-3 font-medium text-gray-900 text-left">{getLabel(key)}</td>
-                            {selectedCompanies.map((code, idx) => {
-                              const responseData = comparisonData[code];
-                              const financialsList = responseData?.financials;
-                              const data = Array.isArray(financialsList) ? financialsList[0] : financialsList;
-                              const value = data?.[key];
-                              // Get each company's own level_of_rounding
-                              const companyLevelOfRounding = data?.level_of_rounding || '';
-                              const isBestValue = best && idx === best.index && value !== 0 && value !== null && value !== undefined;
-                              
-                              return (
-                                <td 
-                                  key={code} 
-                                  className={`text-right px-4 py-3 font-medium ${
-                                    isBestValue 
-                                      ? 'bg-green-100 text-green-900 font-bold' 
-                                      : 'text-gray-700'
-                                  }`}
-                                >
-                                  {formatValue(value, key, 'INR', companyLevelOfRounding)}
-                                </td>
-                              );
-                            })}
-                          </tr>
+
+                        const firstData = firstCompanyData.financials[0];
+                        const allKeys = Object.keys(firstData || {});
+
+                        const orderedMetrics = metricGroups.flatMap((group) =>
+                          group.metrics.filter((key) => allKeys.includes(key))
                         );
-                      });
-                    })()}
-                  </tbody>
-                </table>
-                </div>
-              </div>
+
+                        return orderedMetrics.map((key) => {
+                          const metricValues = selectedCompanies.map((code) => {
+                            const responseData = comparisonData[code];
+                            const financialsList = responseData?.financials;
+                            const data = Array.isArray(financialsList) ? financialsList[0] : financialsList;
+                            return data?.[key];
+                          });
+
+                          const best = metricValues
+                            .map((v, idx) => ({ value: typeof v === 'number' ? v : null, index: idx }))
+                            .filter((item) => item.value !== null && item.value !== 0)
+                            .reduce((bestSoFar, current) => {
+                              if (!bestSoFar) return current;
+                              if (key.includes('borrowing') || key.includes('debt') || key.includes('liabilities')) {
+                                return (current.value ?? 0) < (bestSoFar.value ?? 0) ? current : bestSoFar;
+                              }
+                              return (current.value ?? 0) > (bestSoFar.value ?? 0) ? current : bestSoFar;
+                            }, null as { value: any; index: number } | null);
+
+                          return (
+                            <TableRow key={key}>
+                              <TableCell sx={{ px: 3, py: 2, fontWeight: 600, color: 'text.primary' }}>
+                                {getLabel(key)}
+                              </TableCell>
+                              {selectedCompanies.map((code, idx) => {
+                                const responseData = comparisonData[code];
+                                const financialsList = responseData?.financials;
+                                const data = Array.isArray(financialsList) ? financialsList[0] : financialsList;
+                                const value = data?.[key];
+                                const companyLevelOfRounding = data?.level_of_rounding || '';
+                                const isBestValue = best && idx === best.index && value !== 0 && value !== null && value !== undefined;
+
+                                return (
+                                  <TableCell
+                                    key={code}
+                                    align="right"
+                                    sx={{
+                                      px: 3,
+                                      py: 2,
+                                      fontWeight: isBestValue ? 700 : 500,
+                                      color: isBestValue ? 'success.main' : 'text.secondary',
+                                      backgroundColor: isBestValue ? 'success.lighter' : 'inherit',
+                                    }}
+                                  >
+                                    {formatFinancialValue(value, key, companyLevelOfRounding)}
+                                  </TableCell>
+                                );
+                              })}
+                            </TableRow>
+                          );
+                        });
+                      })()}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+                <Box sx={{ px: 3, py: 2, backgroundColor: 'background.paper' }}>
+                  <Typography variant="caption" color="text.secondary">
+                    All monetary values are shown in Indian rupees crores (₹ Cr). Percentages and EPS are shown in standard units.
+                  </Typography>
+                </Box>
+              </Box>
             ) : (
               <div className="p-8 text-center text-gray-400">Select at least 2 companies to compare</div>
             )}

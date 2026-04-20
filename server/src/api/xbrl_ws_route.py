@@ -558,7 +558,18 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
 
                             # Fetch all Std XBRL URLs
                             link_idx = 0
-                            async for url, period, xbrl_type, raw_content in get_all_std_xbrl_urls(ctx, scrip_code):
+                            async for url, period, xbrl_type, raw_content, _industry in get_all_std_xbrl_urls(ctx, scrip_code):
+                                if _industry and _industry.strip():
+                                    industry = _industry.strip()
+                                    # Update company industry from the BSE page if the page provides it.
+                                    repo.upsert_company(
+                                        company_name=name,
+                                        symbol=symbol,
+                                        scrip_code=scrip_code,
+                                        sector=industry,
+                                        industry=industry,
+                                    )
+
                                 key = (period, xbrl_type)
                                 existing_id = existing_map.get(key)
                                 if existing_id:

@@ -263,6 +263,70 @@ class ExtractionCompareRequest(BaseModel):
     period: Optional[str] = "latest year"
 
 
+def _resolve_compare_period(period: str, frequency: str, available_periods: list[str]) -> Optional[str]:
+    if not period:
+        return None
+
+    normalized = period.strip().lower()
+
+    if frequency == "quarterly":
+        if normalized in {"latest quarter", "latest"}:
+            return None
+
+        quarter_map = {
+            "march": "mq",
+            "mar": "mq",
+            "mq": "mq",
+            "q1": "mq",
+            "june": "jq",
+            "jun": "jq",
+            "jq": "jq",
+            "q2": "jq",
+            "september": "sq",
+            "sep": "sq",
+            "sept": "sq",
+            "sq": "sq",
+            "q3": "sq",
+            "december": "dq",
+            "dec": "dq",
+            "dq": "dq",
+            "q4": "dq",
+        }
+
+        quarter_prefix = quarter_map.get(normalized)
+        if quarter_prefix:
+            matches = [p for p in available_periods if p and p.upper().startswith(quarter_prefix.upper())]
+            return matches[0] if matches else None
+
+        for p in available_periods:
+            if p and p.lower() == normalized:
+                return p
+
+        return None
+
+    if frequency == "annual":
+        if normalized in {"latest year", "latest"}:
+            return None
+
+        if normalized.startswith("fy"):
+            upper = normalized.upper()
+            matches = [p for p in available_periods if p and p.upper() == upper]
+            return matches[0] if matches else upper
+
+        try:
+            year = int(normalized)
+            matches = [p for p in available_periods if p and p.endswith(f"-{year}")]
+            return matches[0] if matches else None
+        except ValueError:
+            pass
+
+        for p in available_periods:
+            if p and p.lower() == normalized:
+                return p
+
+        return None
+
+
 def _flatten_extraction_metrics(extracted: Any, publication_date: Optional[str] = None) -> dict:
     if hasattr(extracted, "dict") and callable(getattr(extracted, "dict")):
         extracted = extracted.dict()
@@ -384,18 +448,20 @@ async def compare_extraction(request: ExtractionCompareRequest):
 
             # Step 2: Select appropriate extraction record based on period
             selected_record = None
-            if request.period in ["latest year", "latest quarter"]:
+            if request.period in ["latest year", "latest quarter", "latest"]:
                 # Use the first (most recent) record
                 if extraction_records:
                     selected_record = extraction_records[0]
             else:
-                # Look for specific period
-                for record in extraction_records:
-                    if record.get("publication_date") == request.period:
-                        selected_record = record
-                        break
+                selected_period = _resolve_compare_period(request.period or "", frequency, available_periods[scrip_code])
+                if selected_period:
+                    for record in extraction_records:
+                        if record.get("publication_date") == selected_period:
+                            selected_record = record
+                            break
                 if not selected_record and extraction_records:
                     selected_record = extraction_records[0]
+                print(f"[EXTRACTION_COMPARE] requested period={request.period}, resolved_period={selected_period}")
 
             # Step 3: If we have a record, use company_name + publication_date to find raw_content in xbrl_filing_table
             if selected_record:

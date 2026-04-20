@@ -146,7 +146,7 @@ export default function ComparisonPage() {
       const startYear = year - 1;
       return {
         label: `FY${startYear}-${year}`,
-        value: `${year}`,
+        value: `FY${startYear}-${year}`,
       };
     });
   };

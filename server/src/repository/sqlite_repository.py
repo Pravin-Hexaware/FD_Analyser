@@ -185,6 +185,41 @@ class SqliteRepository:
             """
         )
         
+        # News feed storage table
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scrip_code TEXT NOT NULL,
+                company_name TEXT NOT NULL,
+                news_title TEXT NOT NULL,
+                news_link TEXT,
+                news_summary TEXT,
+                published_date TEXT,
+                source TEXT,
+                keywords TEXT,
+                fetched_at TEXT DEFAULT (datetime('now')),
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(scrip_code, news_title, published_date)
+            );
+            """
+        )
+        
+        # Create index for faster lookups
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_company_news_scrip_code 
+            ON company_news(scrip_code);
+            """
+        )
+        
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_company_news_fetched_at 
+            ON company_news(fetched_at);
+            """
+        )
+        
         self._conn.commit()
 
         # Ensure parsed_json column in quarterly_extractions
@@ -1054,6 +1089,104 @@ class SqliteRepository:
                 'timestamp': row[5]
             })
         return result
+    
+    # News management methods
+    def save_company_news(
+        self,
+        scrip_code: str,
+        company_name: str,
+        articles: list
+    ) -> None:
+        """Save fetched company news articles to the database."""
+        cur = self._conn.cursor()
+        
+        for article in articles:
+            try:
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO company_news 
+                    (scrip_code, company_name, news_title, news_link, news_summary, 
+                     published_date, source, keywords)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scrip_code,
+                        company_name,
+                        article.get("title", ""),
+                        article.get("link", ""),
+                        article.get("summary", ""),
+                        article.get("published", ""),
+                        article.get("source", ""),
+                        json.dumps(article.get("keywords", []))
+                    )
+                )
+            except sqlite3.IntegrityError:
+                # Article already exists, skip
+                pass
+        
+        self._conn.commit()
+    
+    def get_company_news(
+        self,
+        scrip_code: str,
+        days_back: int = 30,
+        limit: int = 10
+    ) -> list:
+        """Retrieve recent news articles for a company."""
+        cur = self._conn.cursor()
+        
+        # Calculate date threshold
+        from datetime import datetime, timedelta
+        threshold_date = (datetime.now() - timedelta(days=days_back)).isoformat()
+        
+        cur.execute(
+            """
+            SELECT id, company_name, news_title, news_link, news_summary, 
+                   published_date, source, keywords, fetched_at
+            FROM company_news
+            WHERE scrip_code = ? AND fetched_at >= ?
+            ORDER BY fetched_at DESC, published_date DESC
+            LIMIT ?
+            """,
+            (scrip_code, threshold_date, limit)
+        )
+        
+        rows = cur.fetchall()
+        result = []
+        
+        for row in rows:
+            result.append({
+                'id': row[0],
+                'company_name': row[1],
+                'title': row[2],
+                'link': row[3],
+                'summary': row[4],
+                'published': row[5],
+                'source': row[6],
+                'keywords': json.loads(row[7]) if row[7] else [],
+                'fetched_at': row[8]
+            })
+        
+        return result
+    
+    def clear_old_news(self, days_old: int = 90) -> int:
+        """Delete news articles older than specified days."""
+        cur = self._conn.cursor()
+        
+        from datetime import datetime, timedelta
+        threshold_date = (datetime.now() - timedelta(days=days_old)).isoformat()
+        
+        cur.execute(
+            """
+            DELETE FROM company_news
+            WHERE fetched_at < ?
+            """,
+            (threshold_date,)
+        )
+        
+        self._conn.commit()
+        return cur.rowcount
+
 
     def get_chat_history(self) -> list:
         """Get all chat history sorted by most recent first."""

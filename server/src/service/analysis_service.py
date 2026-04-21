@@ -618,8 +618,8 @@ def _format_period_from_publication_date(publication_date: Optional[str]) -> str
     return pub_str  # Return original if no pattern matched
 
 
-def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> tuple[str, dict[str, int]]:
-    """Use LLM to generate an answer based on the query and fetched data.
+def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str, news_context: Optional[str] = None) -> tuple[str, dict[str, int]]:
+    """Use LLM to generate an answer based on the query and fetched data with optional news context.
 
     Returns a tuple of (answer_text, token_usage).
     """
@@ -646,6 +646,9 @@ def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: 
 You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
 
 Generate a complete, exhaustive financial analysis report in Markdown format WITHOUT ANY TRUNCATION OR LENGTH RESTRICTIONS. The report should comprehensively analyze ALL available financial data, metrics, parameters, and textual information provided in the input - not just a subset.
+
+## CRITICAL: INCORPORATE RECENT NEWS AND MARKET CONTEXT
+If recent news and market developments are provided in the analysis, PROMINENTLY FEATURE them in the Executive Summary and Strategic Implications sections. Explain how recent news (such as acquisitions, regulatory changes, leadership changes, market developments) correlates with the financial performance observed in the data. This provides crucial context for understanding company trajectory and risks.
 
 ## CRITICAL: TEXTUAL INFORMATION AND NOTES
 The provided data includes TEXTUAL INFORMATION sections with financial notes, auditor remarks, management commentary, qualification statements, and other narrative disclosures. These are ESSENTIAL to include in your analysis as they provide critical context for understanding:
@@ -802,7 +805,17 @@ CRITICAL SECTION - Include ALL:
 12. Do NOT artificially limit the report length - provide complete, exhaustive analysis
     """
 
-    user_prompt = f"Query: {query}\n\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
+    # Build user prompt with financial data and optional news context
+    user_prompt_parts = [
+        f"Query: {query}",
+        f"\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
+    ]
+    
+    # Add news context if available
+    if news_context:
+        user_prompt_parts.append(f"\n\n## RECENT NEWS AND MARKET CONTEXT\n{news_context}\n\nIncorporate this recent news and market developments into your analysis to provide current market context and explain any recent operational or strategic changes.")
+    
+    user_prompt = "\n".join(user_prompt_parts)
 
     response = _invoke_llm(system_prompt, user_prompt, max_tokens=8000)
 

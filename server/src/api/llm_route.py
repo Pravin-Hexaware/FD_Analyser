@@ -12,11 +12,10 @@ import csv
 from pathlib import Path
 
 from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data
+from service.news_service import NewsService
 from repository.sqlite_repository import SqliteRepository
 
 router = APIRouter()
-
-
 
 def _missing_tracker_csv_path() -> Path:
     src_dir = Path(__file__).resolve().parents[1]   # points to src/
@@ -752,6 +751,103 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             return response
 
         # Step 3: Generate answer using LLM (with data fetched and company names resolved via NLP)
+        print("Step 3: Fetching news context for companies")
+        
+        # Fetch news for ALL validated companies (not just those with data in all_data)
+        news_context_parts = []
+        news_fetch_log = {}
+        
+        # Get list of all validated companies from validation_results
+        all_companies_to_fetch_news = list(validation_results.keys())
+        
+        # Also add peer companies if they were requested
+        if get_peer:
+            for company_name, company_info in target_companies.items():
+                actual_company_name = company_info.get("company", company_name)
+                if actual_company_name in all_data:
+                    peers = company_info.get("peers", {})
+                    for p_key, peer in peers.items():
+                        peer_name = peer.get("company", p_key)
+                        if peer_name not in all_companies_to_fetch_news:
+                            all_companies_to_fetch_news.append(peer_name)
+        
+        print(f"Fetching news for {len(all_companies_to_fetch_news)} companies: {all_companies_to_fetch_news}")
+        
+        for company_name in all_companies_to_fetch_news:
+            try:
+                validation_info = validation_results.get(company_name, {})
+                scrip_code = validation_info.get("resolved_scrip_code")
+                
+                print(f"Processing company: {company_name}, scrip_code: {scrip_code}")
+                
+                if scrip_code:
+                    # Try to fetch news from database first
+                    existing_news = repo.get_company_news(scrip_code, days_back=30, limit=5)
+                    
+                    if not existing_news:
+                        # Fetch fresh news
+                        print(f"Fetching fresh news for {company_name} ({scrip_code})")
+                        news_data = NewsService.get_company_news(company_name, max_results=5, days_back=30)
+                        
+                        # Save to database if we got articles
+                        if news_data.get("articles"):
+                            repo.save_company_news(scrip_code, company_name, news_data["articles"])
+                            existing_news = news_data["articles"]
+                        
+                        news_fetch_log[company_name] = {
+                            "scrip_code": scrip_code,
+                            "articles_fetched": len(news_data.get("articles", [])),
+                            "source": "google_news_rss",
+                            "error": news_data.get("error")
+                        }
+                    else:
+                        news_fetch_log[company_name] = {
+                            "scrip_code": scrip_code,
+                            "articles_fetched": len(existing_news),
+                            "source": "database_cache"
+                        }
+                    
+                    # Format news for LLM
+                    if existing_news:
+                        company_news_str = f"\n### {company_name}\n"
+                        for article in existing_news:
+                            company_news_str += f"- **{article.get('title', 'N/A')}** ({article.get('published', 'N/A')})\n"
+                            if article.get('summary'):
+                                summary = article['summary'][:150] + "..." if len(article.get('summary', '')) > 150 else article.get('summary', '')
+                                company_news_str += f"  {summary}\n"
+                        news_context_parts.append(company_news_str)
+                    else:
+                        # Add note if no news found
+                        print(f"No news found for {company_name}")
+                else:
+                    print(f"No scrip_code for {company_name}, skipping news fetch")
+            
+            except Exception as e:
+                print(f"[WARN] Failed to fetch news for {company_name}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                news_fetch_log[company_name] = {
+                    "error": str(e)
+                }
+        
+        # Combine all news context
+        news_context = "\n".join(news_context_parts) if news_context_parts else None
+        
+        print(f"News context compiled: {news_context is not None}")
+        if news_context:
+            print(f"News context length: {len(news_context)}")
+        
+        # Log Step 2.5 - News fetching
+        repo.save_detailed_log(
+            chat_id=chat_id,
+            step_name="News Fetch",
+            input_data=json.dumps({
+                "companies": all_companies_to_fetch_news,
+                "include_peers": get_peer
+            }),
+            output_data=json.dumps(news_fetch_log)
+        )
+
         print("Step 3: Generating answer with LLM")
 
         # Prepare the EXACT data being sent to LLM
@@ -767,7 +863,8 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         # Store data passed to LLM for logging
         data_passed_to_llm = all_data
 
-        answer, tokens_used = generate_answer_from_data(request.query, all_data, statement_type, frequency)
+        print(f"Calling generate_answer_from_data with news_context: {news_context is not None}")
+        answer, tokens_used = generate_answer_from_data(request.query, all_data, statement_type, frequency, news_context=news_context)
         print("2nd LLM answer:", answer)
         print("LLM token usage:", tokens_used)
 
@@ -901,6 +998,7 @@ async def get_detailed_logs(chat_id: str):
         if not logs:
             raise HTTPException(status_code=404, detail="No detailed logs found for this chat")
         
+        
         return {
             "chat_id": chat_id,
             "logs": logs,
@@ -911,3 +1009,146 @@ async def get_detailed_logs(chat_id: str):
     except Exception as e:
         print("Error:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class CompanyNewsRequest(BaseModel):
+    company_name: str
+    max_results: int = 10
+    days_back: int = 30
+
+
+@router.post("/llm/company-news", response_model=Dict[str, Any])
+async def get_company_news_endpoint(request: CompanyNewsRequest):
+    """Fetch recent news articles for a specific company."""
+    try:
+        repo = SqliteRepository()
+        
+        # Try to resolve company to get scrip_code
+        validation_info = _resolve_company_validation(request.company_name)
+        scrip_code = validation_info.get("resolved_scrip_code") if validation_info.get("valid") else None
+        
+        news_data = NewsService.get_company_news(
+            request.company_name,
+            max_results=request.max_results,
+            days_back=request.days_back
+        )
+        
+        # Save to database if we got articles and have scrip_code
+        if scrip_code and news_data.get("articles"):
+            repo.save_company_news(scrip_code, request.company_name, news_data["articles"])
+        
+        repo.close()
+        
+        return {
+            "company_name": request.company_name,
+            "scrip_code": scrip_code,
+            "articles": news_data.get("articles", []),
+            "count": news_data.get("count", 0),
+            "source": news_data.get("source"),
+            "last_updated": news_data.get("last_updated"),
+            "date_range": news_data.get("date_range"),
+            "error": news_data.get("error")
+        }
+    
+    except Exception as e:
+        print("Error fetching company news:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/llm/company-news-batch", response_model=Dict[str, Any])
+async def get_company_news_batch(companies: List[str] = None):
+    """Fetch recent news for multiple companies."""
+    try:
+        if not companies:
+            raise HTTPException(status_code=400, detail="No companies provided")
+        
+        repo = SqliteRepository()
+        results = {}
+        
+        for company_name in companies:
+            try:
+                # Resolve company
+                validation_info = _resolve_company_validation(company_name)
+                scrip_code = validation_info.get("resolved_scrip_code") if validation_info.get("valid") else None
+                
+                # Fetch news
+                news_data = NewsService.get_company_news(company_name, max_results=5, days_back=30)
+                
+                # Save to database
+                if scrip_code and news_data.get("articles"):
+                    repo.save_company_news(scrip_code, company_name, news_data["articles"])
+                
+                results[company_name] = {
+                    "scrip_code": scrip_code,
+                    "articles_count": len(news_data.get("articles", [])),
+                    "articles": news_data.get("articles", []),
+                    "source": news_data.get("source"),
+                    "valid": validation_info.get("valid")
+                }
+            
+            except Exception as e:
+                results[company_name] = {
+                    "error": str(e)
+                }
+        
+        repo.close()
+        
+        return {
+            "companies_requested": len(companies),
+            "companies_processed": len(results),
+            "results": results,
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    except Exception as e:
+        print("Error fetching batch news:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/llm/company-news/{scrip_code}")
+async def get_cached_company_news(scrip_code: str, limit: int = 10, days_back: int = 30):
+    """Get cached news articles for a company by scrip code."""
+    try:
+        repo = SqliteRepository()
+        
+        articles = repo.get_company_news(scrip_code, days_back=days_back, limit=limit)
+        
+        repo.close()
+        
+        return {
+            "scrip_code": scrip_code,
+            "articles": articles,
+            "count": len(articles),
+            "cache_timestamp": datetime.now().isoformat()
+        }
+    
+    except Exception as e:
+        print("Error retrieving cached news:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/llm/test-news/{company_name}")
+async def test_news_fetch(company_name: str):
+    """Test endpoint to verify news fetching works."""
+    try:
+        print(f"\n=== Testing News Fetch for {company_name} ===")
+        
+        # Test direct news service
+        news_data = NewsService.get_company_news(company_name, max_results=3, days_back=30)
+        
+        return {
+            "company_name": company_name,
+            "test_status": "success",
+            "articles_found": len(news_data.get("articles", [])),
+            "articles": news_data.get("articles", []),
+            "source": news_data.get("source"),
+            "error": news_data.get("error"),
+            "last_updated": news_data.get("last_updated")
+        }
+    
+    except Exception as e:
+        print(f"Error in test_news_fetch: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+

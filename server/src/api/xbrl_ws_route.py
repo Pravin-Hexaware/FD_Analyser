@@ -25,6 +25,52 @@ from service.xml_extraction_service import (
 router = APIRouter()
 
 
+def _calculate_5year_fiscal_range():
+    """
+    Calculate the fiscal year range for the past 5 years.
+    Returns (start_year, end_year) where fiscal years range from start_year to end_year.
+    
+    Example: if today is April 2026, current FY is 2026-2027, so we collect from 2021-2026.
+    """
+    now = datetime.utcnow()
+    current_year = now.year
+    
+    # If month >= 3, current fiscal year is current_year-{current_year+1}
+    # If month < 3, current fiscal year is {current_year-1}-{current_year}
+    if now.month >= 3:
+        current_fy_end = current_year + 1
+    else:
+        current_fy_end = current_year
+    
+    start_fy = current_fy_end - 5
+    return start_fy, current_fy_end
+
+
+def _is_within_5year_range(period: str) -> bool:
+    """
+    Check if a period (like 'DQ2025-2026') is within the past 5 years.
+    Extracts the fiscal year end from the period and compares.
+    """
+    if not period:
+        return False
+    
+    # Extract fiscal year end from period like "DQ2025-2026" -> 2026
+    import re
+    match = re.search(r'(\d{4})-(\d{4})', str(period))
+    if not match:
+        return False
+    
+    try:
+        fy_start = int(match.group(1))
+        fy_end = int(match.group(2))
+        start_fy, end_fy = _calculate_5year_fiscal_range()
+        
+        # Period is valid if its end year is within range
+        return start_fy <= fy_end <= end_fy
+    except (ValueError, IndexError):
+        return False
+
+
 @router.websocket("/ws/xbrl-fetch-latest")
 async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
     """WebSocket endpoint that reads companies from CSV, fetches XBRL URLs, and stores them in SQLite."""
@@ -549,19 +595,58 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                 "symbol": symbol,
                             })
 
-                            # Prepare existing period/type lookup once to prevent repeated DB scans
+                            # Prepare existing period/url lookup once to prevent repeated DB scans
+                            # Using (publication_date, xbrl_link) key allows O(1) lookup instead of DB queries
                             existing_filings = repo.get_xbrl_filings(scrip_code)
                             existing_map = {
-                                (f.get('publication_date'), f.get('report_type')): f.get('id')
+                                (f.get('publication_date'), f.get('xbrl_link')): f.get('id')
                                 for f in existing_filings
                             }
 
-                            # Fetch all Std XBRL URLs
+                            # Fetch all Std XBRL URLs (only std, not con)
                             link_idx = 0
+                            consecutive_out_of_range = 0
                             async for url, period, xbrl_type, raw_content, _industry in get_all_std_xbrl_urls(ctx, scrip_code):
+                                # FILTER 1: Only collect "std" XBRL, skip "con"
+                                if xbrl_type.lower() != "std":
+                                    continue
+                                
+                                # FILTER 2: Only collect data from past 5 years + EARLY EXIT OPTIMIZATION
+                                # If 2 consecutive records are outside range, records are ordered chronologically,
+                                # so all remaining records will be outside range. Break early to save bandwidth.
+                                if not _is_within_5year_range(period):
+                                    consecutive_out_of_range += 1
+                                    await websocket.send_json({
+                                        "idx": idx,
+                                        "link_idx": link_idx,
+                                        "scrip_code": scrip_code,
+                                        "symbol": symbol,
+                                        "report_type": xbrl_type,
+                                        "period": period,
+                                        "url": url,
+                                        "status": "skipped_outside_5year_range",
+                                        "reason": f"Period {period} is outside past 5 years range (consecutive: {consecutive_out_of_range})",
+                                    })
+                                    link_idx += 1
+                                    
+                                    # Early exit: if 2 consecutive out-of-range, assume all remaining are old
+                                    if consecutive_out_of_range >= 2:
+                                        await websocket.send_json({
+                                            "idx": idx,
+                                            "scrip_code": scrip_code,
+                                            "symbol": symbol,
+                                            "status": "halting_collection",
+                                            "reason": "2 consecutive records outside 5-year range. All remaining records assumed to be older. Halting collection.",
+                                        })
+                                        break
+                                    continue
+                                
+                                # Reset counter when we find a record within range
+                                consecutive_out_of_range = 0
+                                
+                                # Update company industry from BSE page if available
                                 if _industry and _industry.strip():
                                     industry = _industry.strip()
-                                    # Update company industry from the BSE page if the page provides it.
                                     repo.upsert_company(
                                         company_name=name,
                                         symbol=symbol,
@@ -570,12 +655,26 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                         industry=industry,
                                     )
 
-                                key = (period, xbrl_type)
-                                existing_id = existing_map.get(key)
-                                if existing_id:
-                                    stored = True
-                                    filing_id = existing_id
-                                else:
+                                # FILTER 3: Check for duplicate (scrip_code, period, url) combination
+                                # Only skip if ALL THREE are identical: scrip_code + period + url
+                                # Use cached map for O(1) lookup instead of database query
+                                if (period, url) in existing_map:
+                                    await websocket.send_json({
+                                        "idx": idx,
+                                        "link_idx": link_idx,
+                                        "scrip_code": scrip_code,
+                                        "symbol": symbol,
+                                        "report_type": xbrl_type,
+                                        "period": period,
+                                        "url": url,
+                                        "status": "skipped_duplicate",
+                                        "reason": f"Duplicate: same period ({period}) and URL for {scrip_code}",
+                                    })
+                                    link_idx += 1
+                                    continue
+
+                                # Insert the filing
+                                try:
                                     filing_id = repo.insert_xbrl_filing(
                                         scrip_code=scrip_code,
                                         symbol=symbol,
@@ -585,7 +684,20 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                         raw_content=raw_content,
                                     )
                                     stored = True
-                                    existing_map[key] = filing_id
+                                except Exception as insert_error:
+                                    await websocket.send_json({
+                                        "idx": idx,
+                                        "link_idx": link_idx,
+                                        "scrip_code": scrip_code,
+                                        "symbol": symbol,
+                                        "report_type": xbrl_type,
+                                        "period": period,
+                                        "url": url,
+                                        "status": "error_inserting",
+                                        "error": str(insert_error),
+                                    })
+                                    link_idx += 1
+                                    continue
 
                                 await websocket.send_json({
                                     "idx": idx,

@@ -318,14 +318,27 @@ class SqliteRepository:
         )
         return cur.fetchone() is not None
 
-    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None) -> bool:
+    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None, publication_date: Optional[str] = None) -> bool:
+        """
+        Check if an XBRL filing exists.
+        If publication_date is provided, checks the full (scrip_code, xbrl_link, publication_date) tuple.
+        Otherwise, checks just (scrip_code, xbrl_link).
+        """
         cur = self._conn.cursor()
-        if report_type is None:
+        if publication_date is not None:
+            # Check full tuple: scrip_code + xbrl_link + publication_date
+            cur.execute(
+                "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? AND publication_date = ? LIMIT 1",
+                (scrip_code, xbrl_link, publication_date),
+            )
+        elif report_type is None:
+            # Check just scrip_code + xbrl_link
             cur.execute(
                 "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
                 (scrip_code, xbrl_link),
             )
         else:
+            # Check scrip_code + xbrl_link + report_type
             cur.execute(
                 "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? AND report_type = ? LIMIT 1",
                 (scrip_code, xbrl_link, report_type),

@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { ChatMessage } from "../components/ChatMessage";
 import { Sidebar } from "../../components/Sidebar";
+import { useSidebarContext } from "../../context/SidebarContext";
 import type { ChatMessage as ChatMessageType } from "../data/chatbot";
 import { processChatQuery } from "../data/chatbot";
 import { companies } from "../data/companies";
@@ -44,6 +45,7 @@ function TypingIndicator() {
 
 export default function ChatbotPage() {
   const location = useLocation();
+  const { isCollapsed } = useSidebarContext();
   const [messages, setMessages] = useState<ChatMessageType[]>([
     {
       id: "welcome",
@@ -203,8 +205,8 @@ export default function ChatbotPage() {
       <Sidebar
         navItems={navItems}
         activePath={location.pathname}
-        sidebarHeading="Recent Chats"
-        headingAction={
+        sidebarHeading={isCollapsed ? undefined : "Recent Chats"}
+        headingAction={isCollapsed ? null : (
           <button
             onClick={handleNewChat}
             className="size-8 rounded-lg flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
@@ -212,8 +214,8 @@ export default function ChatbotPage() {
           >
             <Plus className="size-4" />
           </button>
-        }
-        sidebarContent={sidebarContent}
+        )}
+        sidebarContent={!isCollapsed && sidebarContent}
         footer={sidebarFooter}
       />
 

@@ -353,6 +353,13 @@ class SqliteRepository:
         )
         return cur.fetchone() is not None
 
+    def get_all_companies(self) -> list[dict]:
+        """Get all companies from company_table."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT company_name, symbol, scrip_code, sector, industry FROM company_table")
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
     def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None) -> bool:
         cur = self._conn.cursor()
         if report_type is None:

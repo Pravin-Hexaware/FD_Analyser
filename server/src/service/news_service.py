@@ -90,13 +90,24 @@ class NewsService:
         
         articles = []
         
-        # Try Google News RSS first
+        # Try Google News RSS first (activity keywords narrow results)
         try:
             google_articles = NewsService._fetch_google_news(company_name, max_results)
             articles.extend(google_articles)
             print(f"[INFO] Successfully fetched {len(google_articles)} articles for {company_name}")
         except Exception as e:
             print(f"[WARN] Failed to fetch Google News for {company_name}: {str(e)}")
+
+        # Broad fallback: quoted company name only (many companies match nothing with the strict OR query)
+        if not articles:
+            try:
+                fallback = NewsService._fetch_google_news(
+                    company_name, max_results, simple_query=True
+                )
+                articles.extend(fallback)
+                print(f"[INFO] Fallback RSS fetched {len(fallback)} articles for {company_name}")
+            except Exception as e:
+                print(f"[WARN] Fallback Google News failed for {company_name}: {str(e)}")
         
         # Remove duplicates by title
         seen_titles = set()
@@ -120,14 +131,19 @@ class NewsService:
         }
     
     @staticmethod
-    def _fetch_google_news(company_name: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    def _fetch_google_news(
+        company_name: str,
+        max_results: int = 10,
+        simple_query: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Fetch news from Google News RSS feed.
         
         Args:
             company_name: Name of the company
             max_results: Maximum articles to return
-            
+            simple_query: If True, search only the quoted company name (broader matches).
+
         Returns:
             List of article dictionaries with title, link, published, and summary
         """
@@ -136,9 +152,11 @@ class NewsService:
         if not FEEDPARSER_AVAILABLE:
             return articles
         
-        # Build dork-style query with activity keywords
-        keywords = " OR ".join(NewsService.ACTIVITY_KEYWORDS)
-        query = f'"{company_name}" ({keywords})'
+        if simple_query:
+            query = f'"{company_name}"'
+        else:
+            keywords = " OR ".join(NewsService.ACTIVITY_KEYWORDS)
+            query = f'"{company_name}" ({keywords})'
         
         encoded_query = urllib.parse.quote(query)
         
@@ -159,9 +177,17 @@ class NewsService:
             print(f"[DEBUG] Found {len(feed.entries)} entries in feed for {company_name}")
             
             for idx, entry in enumerate(feed.entries[:max_results]):
+                raw_url = None
+                for link in entry.get("links", []) or []:
+                    if link.get("rel") == "alternate" and link.get("href"):
+                        raw_url = link["href"]
+                        break
+                if not raw_url:
+                    raw_url = entry.get("link", "")
+
                 article = {
                     "title": entry.get("title", ""),
-                    "link": entry.get("link", ""),
+                    "link": raw_url or "",
                     "published": entry.get("published", ""),
                     "summary": entry.get("summary", ""),
                     "source": "Google News",

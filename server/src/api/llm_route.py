@@ -11,7 +11,7 @@ import re
 import csv
 from pathlib import Path
 
-from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data
+from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data, _get_today_news_summary
 from service.news_service import NewsService
 from repository.sqlite_repository import SqliteRepository
 
@@ -775,50 +775,49 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         
         for company_name in all_companies_to_fetch_news:
             try:
-                validation_info = validation_results.get(company_name, {})
-                scrip_code = validation_info.get("resolved_scrip_code")
+                validation_info = validation_results.get(company_name)
+                if validation_info is None:
+                    # Resolve peer-only companies that were not part of the original target set.
+                    resolved_symbol = None
+                    normalized_key = company_name.strip()
+                    if re.fullmatch(r"[A-Za-z]{2,10}", normalized_key):
+                        resolved_symbol = normalized_key
+                    validation_info = _resolve_company_validation(company_name, resolved_symbol)
+                    validation_results[company_name] = validation_info
+
+                scrip_code = validation_info.get("resolved_scrip_code") if validation_info.get("valid") else None
+                news_company_name = validation_info.get("resolved_issuer_name") or company_name
                 
-                print(f"Processing company: {company_name}, scrip_code: {scrip_code}")
+                print(f"Processing company: {company_name}, resolved_name: {news_company_name}, scrip_code: {scrip_code}")
                 
                 if scrip_code:
-                    # Try to fetch news from database first
-                    existing_news = repo.get_company_news(scrip_code, days_back=30, limit=5)
+                    # ONLY fetch from markdown summary (markdown/{company}/{YYYYMMDD}/summary.md)
+                    # Do NOT fetch from RSS or database
+                    markdown_news = _get_today_news_summary(news_company_name)
                     
-                    if not existing_news:
-                        # Fetch fresh news
-                        print(f"Fetching fresh news for {company_name} ({scrip_code})")
-                        news_data = NewsService.get_company_news(company_name, max_results=5, days_back=30)
-                        
-                        # Save to database if we got articles
-                        if news_data.get("articles"):
-                            repo.save_company_news(scrip_code, company_name, news_data["articles"])
-                            existing_news = news_data["articles"]
-                        
-                        news_fetch_log[company_name] = {
-                            "scrip_code": scrip_code,
-                            "articles_fetched": len(news_data.get("articles", [])),
-                            "source": "google_news_rss",
-                            "error": news_data.get("error")
-                        }
-                    else:
-                        news_fetch_log[company_name] = {
-                            "scrip_code": scrip_code,
-                            "articles_fetched": len(existing_news),
-                            "source": "database_cache"
-                        }
-                    
-                    # Format news for LLM
-                    if existing_news:
-                        company_news_str = f"\n### {company_name}\n"
-                        for article in existing_news:
-                            company_news_str += f"- **{article.get('title', 'N/A')}** ({article.get('published', 'N/A')})\n"
-                            if article.get('summary'):
-                                summary = article['summary'][:150] + "..." if len(article.get('summary', '')) > 150 else article.get('summary', '')
-                                company_news_str += f"  {summary}\n"
+                    if markdown_news:
+                        # Include today's markdown summary
+                        print(f"Found markdown summary for {company_name}")
+                        company_news_str = f"\n### {company_name} - Today's News Summary\n"
+                        company_news_str += markdown_news
+                        company_news_str += "\n"
                         news_context_parts.append(company_news_str)
+                        news_fetch_log[company_name] = {
+                            "scrip_code": scrip_code,
+                            "source": "markdown_daily_summary",
+                            "date": datetime.now().strftime("%Y%m%d"),
+                            "status": "found"
+                        }
                     else:
-                        # Add note if no news found
-                        print(f"No news found for {company_name}")
+                        # No markdown summary for today - do not fetch from other sources
+                        print(f"No markdown summary found for {company_name} on {datetime.now().strftime('%Y%m%d')}")
+                        news_fetch_log[company_name] = {
+                            "scrip_code": scrip_code,
+                            "source": "markdown_daily_summary",
+                            "date": datetime.now().strftime("%Y%m%d"),
+                            "status": "not_found"
+                        }
+
                 else:
                     print(f"No scrip_code for {company_name}, skipping news fetch")
             

@@ -116,7 +116,11 @@ class CompanyExtractor:
         results = []
         seen_symbols = set()
         for name in potential_names:
-            match = self._find_best_match(name, threshold=0.6)
+            # For simple queries (single word), use lower threshold for fuzzy matching
+            is_simple_query = len(name.split()) == 1
+            threshold = 0.5 if is_simple_query else 0.6
+            
+            match = self._find_best_match(name, threshold=threshold)
             
             if match:
                 symbol = match["security_id"]
@@ -158,6 +162,20 @@ class CompanyExtractor:
             if normalized and normalized not in seen_candidates:
                 potential_names.append(candidate)
                 seen_candidates.add(normalized)
+
+        # Strategy 5 (First): Extract company names from report/earnings queries
+        # Pattern: "report for swiggy", "earnings for [company]", "generate financial analysis for X"
+        report_patterns = [
+            r'(?:report|earnings|financial|results|analysis|performance|review)\s+(?:for|of|on)\s+([A-Za-z\s&]+?)(?:\s+for|\s+in|[\.\?\!]|$)',
+            r'(?:generate|create|show|provide|get|fetch)\s+(?:report|analysis|earnings|financial)\s+(?:for|of|on)\s+([A-Za-z\s&]+?)(?:$|[\.\?\!])',
+        ]
+        for pattern in report_patterns:
+            for match in re.finditer(pattern, query, re.IGNORECASE):
+                company_name = match.group(1).strip()
+                if company_name and len(company_name) > 1:
+                    cleaned = self._clean_company_candidate(company_name)
+                    if cleaned:
+                        add_candidate(cleaned)
 
         # Strategy 0: Extract direct compare/between company pairs first
         compare_patterns = [

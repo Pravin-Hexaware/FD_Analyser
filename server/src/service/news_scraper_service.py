@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 from urllib.parse import urlparse
  
+
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 import trafilatura
 import urllib3
 from googlenewsdecoder import gnewsdecoder
- 
+
 from service.analysis_service import _get_llm
 from service.news_service import NewsService
 from langchain_core.messages import HumanMessage
@@ -246,7 +247,7 @@ class NewsScraperService:
                 )
  
                 file_path = _article_markdown_path(
-                    company_date_folder, article_idx, title, publisher_url
+                    separates_folder, article_idx, title, publisher_url
                 )
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(markdown_content)

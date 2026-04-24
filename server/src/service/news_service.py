@@ -7,6 +7,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import re
+from urllib.parse import urlparse
 
 try:
     import feedparser
@@ -19,6 +20,16 @@ except ImportError:
 
 class NewsService:
     """Service to fetch and manage company news."""
+    
+    # Trusted news sources only
+    TRUSTED_SOURCES = {
+        "reuters.com",
+        "bloomberg.com",
+        "moneycontrol.com",
+        "livemint.com",
+        "business-standard.com",
+        "economictimes.indiatimes.com"
+    }
     
     # Keywords to identify company activities and changes
     ACTIVITY_KEYWORDS = [
@@ -57,6 +68,33 @@ class NewsService:
     
     MAX_RETRIES = 2
     TIMEOUT = 10
+    
+    @staticmethod
+    def _is_trusted_source(url: str) -> bool:
+        """
+        Check if a URL belongs to a trusted news source.
+        
+        Args:
+            url: The URL to check
+            
+        Returns:
+            True if the URL is from a trusted source, False otherwise
+        """
+        if not url:
+            return False
+        
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.lower().replace("www.", "")
+            
+            # Check if domain matches any trusted source
+            for trusted in NewsService.TRUSTED_SOURCES:
+                if domain == trusted or domain.endswith("." + trusted):
+                    return True
+            return False
+        except Exception as e:
+            print(f"[WARN] Error checking trusted source for URL {url}: {str(e)}")
+            return False
     
     @staticmethod
     def get_company_news(
@@ -109,14 +147,35 @@ class NewsService:
             except Exception as e:
                 print(f"[WARN] Fallback Google News failed for {company_name}: {str(e)}")
         
-        # Remove duplicates by title
+        # Remove duplicates by title and filter by trusted sources
+        # Note: We need to check if URLs are Google News redirects or actual publisher URLs
         seen_titles = set()
         unique_articles = []
+        
         for article in articles:
             title = article.get("title", "").lower()
-            if title and title not in seen_titles:
-                seen_titles.add(title)
-                unique_articles.append(article)
+            link = article.get("link", "")
+            
+            # Skip if title is duplicate
+            if title and title in seen_titles:
+                continue
+            
+            # Check if it's a Google News redirect URL
+            if "news.google.com" in link:
+                print(f"[DEBUG] Detected Google News redirect URL, will validate during scraping: {link}")
+                # Add the article - validation will happen during scraping when URL is resolved
+                if title:
+                    seen_titles.add(title)
+                    unique_articles.append(article)
+            else:
+                # Direct URL from non-Google source - validate trusted source here
+                if NewsService._is_trusted_source(link):
+                    if title:
+                        seen_titles.add(title)
+                        unique_articles.append(article)
+                    print(f"[DEBUG] Added article from trusted source: {link}")
+                else:
+                    print(f"[DEBUG] Filtering out article from untrusted source: {link}")
         
         # Limit to max_results
         unique_articles = unique_articles[:max_results]
@@ -127,7 +186,8 @@ class NewsService:
             "source": "google_news_rss",
             "company_name": company_name,
             "last_updated": datetime.now().isoformat(),
-            "date_range": f"Last {days_back} days"
+            "date_range": f"Last {days_back} days",
+            "trusted_sources_only": True
         }
     
     @staticmethod
@@ -176,7 +236,11 @@ class NewsService:
             
             print(f"[DEBUG] Found {len(feed.entries)} entries in feed for {company_name}")
             
-            for idx, entry in enumerate(feed.entries[:max_results]):
+            # Fetch more articles than max_results to account for filtering by trusted sources
+            # We'll aim for 3x the max_results to ensure we have enough trusted sources
+            fetch_limit = min(max_results * 3, len(feed.entries))
+            
+            for idx, entry in enumerate(feed.entries[:fetch_limit]):
                 raw_url = None
                 for link in entry.get("links", []) or []:
                     if link.get("rel") == "alternate" and link.get("href"):
@@ -184,6 +248,9 @@ class NewsService:
                         break
                 if not raw_url:
                     raw_url = entry.get("link", "")
+                
+                # Don't filter by trusted sources here - we'll do it after resolving the actual publisher URL
+                # Google News RSS returns redirect URLs, so we need to resolve them first
 
                 article = {
                     "title": entry.get("title", ""),

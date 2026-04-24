@@ -353,12 +353,6 @@ class SqliteRepository:
         )
         return cur.fetchone() is not None
 
-    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None, publication_date: Optional[str] = None) -> bool:
-        """
-        Check if an XBRL filing exists.
-        If publication_date is provided, checks the full (scrip_code, xbrl_link, publication_date) tuple.
-        Otherwise, checks just (scrip_code, xbrl_link).
-        """
     def get_all_companies(self) -> list[dict]:
         """Get all companies from company_table."""
         cur = self._conn.cursor()
@@ -366,7 +360,7 @@ class SqliteRepository:
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
-    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None) -> bool:
+    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None,publication_date: Optional[str] = None) -> bool:
         cur = self._conn.cursor()
         if publication_date is not None:
             # Check full tuple: scrip_code + xbrl_link + publication_date

@@ -204,7 +204,7 @@ class SqliteRepository:
             );
             """
         )
-        
+
         # Create index for faster lookups
         cur.execute(
             """
@@ -212,14 +212,14 @@ class SqliteRepository:
             ON company_news(scrip_code);
             """
         )
-        
+
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_company_news_fetched_at 
             ON company_news(fetched_at);
             """
         )
-        
+
         self._conn.commit()
 
         # Ensure parsed_json column in quarterly_extractions
@@ -360,14 +360,22 @@ class SqliteRepository:
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
-    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None) -> bool:
+    def xbrl_filing_exists(self, scrip_code: str, xbrl_link: str, report_type: Optional[str] = None,publication_date: Optional[str] = None) -> bool:
         cur = self._conn.cursor()
-        if report_type is None:
+        if publication_date is not None:
+            # Check full tuple: scrip_code + xbrl_link + publication_date
+            cur.execute(
+                "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? AND publication_date = ? LIMIT 1",
+                (scrip_code, xbrl_link, publication_date),
+            )
+        elif report_type is None:
+            # Check just scrip_code + xbrl_link
             cur.execute(
                 "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? LIMIT 1",
                 (scrip_code, xbrl_link),
             )
         else:
+            # Check scrip_code + xbrl_link + report_type
             cur.execute(
                 "SELECT 1 FROM xbrl_filing_table WHERE scrip_code = ? AND xbrl_link = ? AND report_type = ? LIMIT 1",
                 (scrip_code, xbrl_link, report_type),
@@ -1096,7 +1104,7 @@ class SqliteRepository:
                 'timestamp': row[5]
             })
         return result
-    
+
     # News management methods
     def save_company_news(
         self,
@@ -1106,7 +1114,7 @@ class SqliteRepository:
     ) -> None:
         """Save fetched company news articles to the database."""
         cur = self._conn.cursor()
-        
+
         for article in articles:
             try:
                 cur.execute(
@@ -1130,9 +1138,9 @@ class SqliteRepository:
             except sqlite3.IntegrityError:
                 # Article already exists, skip
                 pass
-        
+
         self._conn.commit()
-    
+
     def get_company_news(
         self,
         scrip_code: str,
@@ -1141,11 +1149,11 @@ class SqliteRepository:
     ) -> list:
         """Retrieve recent news articles for a company."""
         cur = self._conn.cursor()
-        
+
         # Calculate date threshold
         from datetime import datetime, timedelta
         threshold_date = (datetime.now() - timedelta(days=days_back)).isoformat()
-        
+
         cur.execute(
             """
             SELECT id, company_name, news_title, news_link, news_summary, 
@@ -1157,10 +1165,10 @@ class SqliteRepository:
             """,
             (scrip_code, threshold_date, limit)
         )
-        
+
         rows = cur.fetchall()
         result = []
-        
+
         for row in rows:
             result.append({
                 'id': row[0],
@@ -1173,16 +1181,16 @@ class SqliteRepository:
                 'keywords': json.loads(row[7]) if row[7] else [],
                 'fetched_at': row[8]
             })
-        
+
         return result
-    
+
     def clear_old_news(self, days_old: int = 90) -> int:
         """Delete news articles older than specified days."""
         cur = self._conn.cursor()
-        
+
         from datetime import datetime, timedelta
         threshold_date = (datetime.now() - timedelta(days=days_old)).isoformat()
-        
+
         cur.execute(
             """
             DELETE FROM company_news
@@ -1190,7 +1198,7 @@ class SqliteRepository:
             """,
             (threshold_date,)
         )
-        
+
         self._conn.commit()
         return cur.rowcount
 

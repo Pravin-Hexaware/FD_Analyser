@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -13,6 +15,12 @@ from service.nlp_company_extractor import parse_query_and_get_companies_nlp
 _LLM: Any = None
 
 HARDCODED_PEERS: Dict[str, List[str]] = {
+    "reliance": ["ioc", "ongc"],
+    "ioc": ["reliance", "bpcl"],
+    "ongc": ["coalindia", "ioc"],
+    "bpcl": ["reliance", "ongc"],
+    "coalindia": ["ongc", "reliance"],
+    "techm": ["lti", "hcltech"],
     "tcs": ["infy", "wipro"],
     "infy": ["tcs", "wipro"],
     "wipro": ["infy","hcltech"],
@@ -21,23 +29,66 @@ HARDCODED_PEERS: Dict[str, List[str]] = {
      "ofss": ["tcs","hcltech"],
     "hext":["coforge","ltim"],
     "coforge":["hext","ltim"],
+    "ultracemco":["lt","vbl"],
+    "lt": ["ultracemco", "vbl"],
+    "vbl": ["ultracemco", "lt"],
+    "idea": ["tatacomm", "bhartiartl"],
+    "tatacomm": ["idea", "bhartiartl"],
+    "bhartiartl": ["idea", "tatacomm"],
+    "HINDUNILVR":["godrejcp","dabur"],
+    "godrejcp":["HINDUNILVR","dabur"],
+    "dabur":["HINDUNILVR","godrejcp"],
+    "lici":["sbilife","hdfclife"],
+    "sbilife":["lici","icicpruli"],
+    "hdfclife":["lici","icicpruli"],
+    "icicpruli":["hdfclife","sbilife"],
+    "sunpharma": ["DIVISLAB", "drreddy"],
+    "cipla": ["sunpharma", "drreddy"],
+    "drreddy": ["sunpharma", "cipla"],
+    "divislab": ["sunpharma", "cipla"],
+    "maruti":["m&m","tvsmotor"],
+    "eichermot":["bajaj-auto","tvsmotor"],
+    "m&m": ["maruti", "tvsmotor"],
+    "tvsmotor": ["maruti", "eichermot"],
+    "itc":["vstind"],
+    "vstind": ["itc"],
+    "ntpc":["adanipower","powergrid"],
+    "powergrid": ["ntpc","adanipower"],
+    "adanipower": ["ntpc","powergrid"],
+    "adaniports": ["jswinfra","gppl"],
+    "jswinfra": ["adaniports","gppl"],
+    "gppl": ["adaniports","jswinfra"],
+    "bel":["hal","bdl"],
+    "datapattns":["bdl","bel"],
+    "hal": ["bel","bdl"],
+    "bdl": ["bel","hal"],
+    "bajajfinsv":["bfinvest","bajajhldng"],
+    "bfinvest": ["bajajfinsv","bajajhldng"],
+    "bajajhldng": ["bajajfinsv","bfinvest"],
+    "jswsteel":["tatasteel","jindalstel"],
+    "tatasteel": ["jswsteel","jindalstel"],
+    "jindalstel": ["jswsteel","tatasteel"],
+    "vedl":["coalindia","nmdc"],
+    "nmdc": ["coalindia","vedl"],
     "axisbank": ["hdfcbank", "icicibank"],
     "hdfcbank": ["axisbank", "sbin"],
     "icicibank": [ "kotakbank", "sbin"],
     "kotakbank": [ "hdfcbank", "icicibank"],
-    "sbin": ["axisbank", "hdfcbank"],
-    "reliance": ["adaniports", "indusindbank"],
-    "adaniports": ["reliance", "itc"],
-    "indusindbank": ["lt", "itc"],
+    "sbin": ["axisbank", "hdfcbank"]
 }
 
 
 def _get_hardcoded_peers(symbol: str) -> Optional[List[str]]:
     normalized = symbol.strip().lower() if symbol else ""
-    return HARDCODED_PEERS.get(normalized)
+    peers = HARDCODED_PEERS.get(normalized)
+    if peers:
+        return [peer.upper() for peer in peers]
+    return None
 
 
-def _get_company_info_by_symbol(repo: SqliteRepository, symbol: Optional[str]) -> Dict[str, Any]:
+
+def _get_company_info_by_symbol(repo: SqliteRepository, symbol: str) -> Dict[str, Any]:
+    """Get company info from database by symbol."""
     if not symbol:
         return {"symbol": "", "scrip_code": None, "company": "", "industry": None}
 
@@ -56,9 +107,86 @@ def _get_company_info_by_symbol(repo: SqliteRepository, symbol: Optional[str]) -
         "company": row[2],
         "industry": row[3],
     }
+def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
+    """Fetch today's news summary for a company from markdown folder.
+    
+    Searches for: markdown/{company_name}/{YYYYMMDD}/summary.md
+    where {YYYYMMDD} is today's date.
+    Folder names follow pattern: UPPERCASE_WITH_UNDERSCORES
+    
+    Args:
+        company_name: Company name (e.g., "Tata Consultancy Services Ltd.", "Infosys Ltd")
+        
+    Returns:
+        Content of summary.md if exists, None otherwise
+    """
+    if not company_name:
+        return None
+    
+    try:
+        # Get today's date in YYYYMMDD format
+        today = datetime.now().strftime("%Y%m%d")
+        
+        # Construct path to markdown folder (from server/src)
+        src_dir = Path(__file__).resolve().parents[1]  # points to src/
+        markdown_base = src_dir / "markdown"
+        
+        # Convert company name to match folder naming: UPPERCASE_WITH_UNDERSCORES
+        # e.g., "Tata Consultancy Services Ltd." -> "TATA_CONSULTANCY_SERVICES_LTD"
+        safe_company_name = (
+            company_name.strip()
+            .upper()  # Convert to uppercase FIRST
+            .replace(" ", "_")  # Replace spaces with underscores
+            .replace(".", "")  # Remove periods
+            .replace("&", "AND")  # Replace & with AND
+        )
+        
+        # Path: markdown/{safe_company_name}/{today}/summary.md
+        news_path = markdown_base / safe_company_name / today / "summary.md"
+        
+        print(f"[DEBUG] Looking for markdown summary at: {news_path}")
+        
+        if news_path.exists() and news_path.is_file():
+            with open(news_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                print(f"[DEBUG] Found markdown summary for {company_name}")
+                return content
+        else:
+            print(f"[DEBUG] No markdown summary found at: {news_path}")
+    except Exception as e:
+        # Silently return None if file not found or error reading
+        print(f"[DEBUG] Error reading markdown summary for {company_name}: {str(e)}")
+        pass
+    
+    return None
 
 
 def _get_company_info_by_name(repo: SqliteRepository, company_name: Optional[str]) -> Dict[str, Any]:
+    if not company_name:
+        return {"symbol": "", "scrip_code": None, "company": "", "industry": None}
+
+    normalized_name = company_name.strip().lower()
+    cur = repo._conn.cursor()
+    cur.execute(
+        "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(company_name) = ? LIMIT 1",
+        (normalized_name,),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.execute(
+            "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(company_name) LIKE ? LIMIT 1",
+            (f"%{normalized_name}%",),
+        )
+        row = cur.fetchone()
+    if not row:
+        return {"symbol": "", "scrip_code": None, "company": company_name, "industry": None}
+    return {
+        "symbol": row[0],
+        "scrip_code": row[1],
+        "company": row[2],
+        "industry": row[3],
+    }
+
     if not company_name:
         return {"symbol": "", "scrip_code": None, "company": "", "industry": None}
 
@@ -380,6 +508,19 @@ def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> T
             log_messages.append(f"LOG: Processing peer extraction for request {request_key}, symbol={symbol}, company_name={company_name}")
             peers_result[request_key] = []
 
+            normalized_symbol = symbol.strip().lower() if symbol else ""
+            hardcoded_peer_symbols = _get_hardcoded_peers(normalized_symbol)
+            if hardcoded_peer_symbols:
+                log_messages.append(f"LOG: Hardcoded peer symbols found for input symbol '{symbol}': {hardcoded_peer_symbols}")
+                peer_list = []
+                for peer_symbol in hardcoded_peer_symbols:
+                    peer_info = _get_company_info_by_symbol(repo, peer_symbol)
+                    peer_info["peer_source"] = "hardcoded"
+                    peer_list.append(peer_info)
+                peers_result[request_key] = peer_list
+                log_messages.append(f"LOG: Returning hardcoded peers for request {request_key}: {[p['symbol'] for p in peer_list]}")
+                continue
+
             company_info = _get_company_info_by_symbol(repo, symbol) if symbol else {"scrip_code": None}
             if not company_info.get("scrip_code"):
                 log_messages.append(f"LOG: Symbol lookup failed for '{symbol}', trying company name lookup for '{company_name}'")
@@ -400,93 +541,9 @@ def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> T
                 peers_result[request_key] = hardcoded_peers
                 continue
 
-            log_messages.append(f"LOG: Step 2 - Getting latest annual extraction for scrip_code {target_scrip_code}")
-            target_annual = repo.get_latest_annual_data(target_scrip_code)
-            if not target_annual:
-                log_messages.append(f"LOG: No annual extraction found for scrip_code {target_scrip_code}")
-                continue
-
-            target_sales_raw = _extract_sales_from_json(target_annual.get("parsed_json"))
-            if target_sales_raw is None:
-                log_messages.append(f"LOG: No sales value found for target company {target_symbol} in parsed JSON")
-                continue
-
-            target_sales_normalized = float(target_sales_raw)
-            log_messages.append(
-                f"LOG: Found sales data for {target_symbol} - normalized sales: {target_sales_normalized}"
-            )
-
-            min_sales_normalized = target_sales_normalized * 0.8
-            max_sales_normalized = target_sales_normalized * 1.2
-
-            log_messages.append(
-                f"LOG: Calculated sales range for {target_symbol}: {min_sales_normalized} to {max_sales_normalized} rupees"
-            )
-
-            log_messages.append(f"LOG: Step 3 - Finding all companies in sector {target_sector}")
-            cur = repo._conn.cursor()
-            cur.execute(
-                "SELECT symbol, scrip_code, company_name FROM company_table WHERE sector = ?",
-                (target_sector,),
-            )
-            sector_companies = cur.fetchall()
-            log_messages.append(f"LOG: Found {len(sector_companies)} companies in sector {target_sector}")
-
-            peer_candidates = []
-            for company_row in sector_companies:
-                company_symbol = company_row[0]
-                company_scrip = company_row[1]
-                company_name = company_row[2]
-
-                if company_symbol == target_symbol or company_scrip == target_scrip_code:
-                    log_messages.append(f"LOG: Skipping target company {company_symbol} ({company_scrip})")
-                    continue
-
-                company_annual = repo.get_latest_annual_data(company_scrip)
-                if not company_annual:
-                    log_messages.append(
-                        f"LOG: No annual extraction found for peer candidate {company_symbol} ({company_scrip})"
-                    )
-                    continue
-
-                company_sales_raw = _extract_sales_from_json(company_annual.get("parsed_json"))
-                if company_sales_raw is None:
-                    log_messages.append(
-                        f"LOG: No sales value found for peer candidate {company_symbol} ({company_scrip})"
-                    )
-                    continue
-
-                company_sales_normalized = float(company_sales_raw)
-                log_messages.append(
-                    f"LOG: Checking peer candidate {company_symbol}: normalized sales = {company_sales_normalized}"
-                )
-
-                if min_sales_normalized <= company_sales_normalized <= max_sales_normalized:
-                    peer_info = {
-                        "company": company_name,
-                        "symbol": company_symbol,
-                        "scrip_code": company_scrip,
-                        "industry": target_sector,
-                        "sales": company_sales_raw,
-                        "normalized_sales": company_sales_normalized,
-                    }
-                    peer_candidates.append(peer_info)
-                    log_messages.append(f"LOG: ✓ Added peer: {company_symbol}")
-                else:
-                    log_messages.append(f"LOG: ✗ Rejected peer: {company_symbol}")
-
-            if len(peer_candidates) > 5:
-                log_messages.append(f"LOG: Step 4 - Limiting to top 5 peers by sales proximity")
-                peer_candidates.sort(
-                    key=lambda x: abs(x["normalized_sales"] - target_sales_normalized)
-                )
-                peers_result[request_key] = peer_candidates[:5]
-            else:
-                peers_result[request_key] = peer_candidates
-
-            log_messages.append(
-                f"LOG: Completed peer extraction for {request_key}: found {len(peers_result[request_key])} peers"
-            )
+            # No sector-based peer finding; only use hardcoded peers
+            log_messages.append(f"LOG: No hardcoded peers found for {target_symbol}, skipping peer extraction")
+            continue
 
         except Exception as e:
             log_messages.append(f"LOG: Error getting peers for request {request_key}: {str(e)}")
@@ -645,10 +702,35 @@ def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: 
     system_prompt = f"""
 You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
 
-Generate a complete, exhaustive financial analysis report in Markdown format WITHOUT ANY TRUNCATION OR LENGTH RESTRICTIONS. The report should comprehensively analyze ALL available financial data, metrics, parameters, and textual information provided in the input - not just a subset.
+Generate a complete, exhaustive financial analysis report in Markdown format WITHOUT ANY TRUNCATION OR LENGTH RESTRICTIONS. The report should comprehensively analyze ALL available financial data, metrics, parameters, textual information, AND RECENT NEWS PROVIDED in the input - not just a subset.
 
-## CRITICAL: INCORPORATE RECENT NEWS AND MARKET CONTEXT
-If recent news and market developments are provided in the analysis, PROMINENTLY FEATURE them in the Executive Summary and Strategic Implications sections. Explain how recent news (such as acquisitions, regulatory changes, leadership changes, market developments) correlates with the financial performance observed in the data. This provides crucial context for understanding company trajectory and risks.
+## CRITICAL: NEWS FEEDS ARE PRIMARY ANALYTICAL INPUT
+You MUST use the provided recent news and market developments as a PRIMARY ANALYTICAL TOOL, not supplementary context. The news feeds are essential for:
+
+1. **Understanding Financial Performance Drivers**: Correlate financial metrics with recent company events. For example:
+   - If news mentions new contracts/partnerships → expect revenue growth
+   - If news mentions cost-cutting initiatives → expect margin improvements
+   - If news mentions acquisitions → expect changes in asset base and profitability
+   - If news mentions regulatory issues → assess financial impact and risk
+
+2. **Identifying Trends and Inflection Points**: Use news to explain acceleration/deceleration in financial metrics across periods
+
+3. **Risk Assessment**: News about lawsuits, investigations, regulatory probes, leadership changes, or market disruptions directly impact financial risk profile
+
+4. **Forward-Looking Insights**: News about strategic initiatives, R&D investments, market expansion, and technology adoption inform growth trajectory
+
+5. **Valuation Context**: Recent developments provide context for P/E multiples, market positioning, and competitive advantage sustainability
+
+### MANDATORY News Integration Requirements:
+- **Executive Summary**: Lead with key news developments and their financial implications
+- **Company Overview**: Use news to explain business model changes and strategic pivots
+- **Strategic Context**: Analyze how recent news shapes competitive positioning
+- **Performance Analysis**: For each metric trend, explain whether news provides supporting context
+- **Risk Assessment**: Prominently feature risks identified in recent news
+- **Strategic Implications**: Ground recommendations in recent developments and their impact
+- **Forward Outlook**: Use news to project future financial trajectory
+
+PROMINENTLY FEATURE news-based insights throughout the report. Explain explicit causal relationships between recent developments and observed financial performance. Do not relegates news to a separate section—integrate it deeply into every analytical dimension.
 
 ## CRITICAL: TEXTUAL INFORMATION AND NOTES
 The provided data includes TEXTUAL INFORMATION sections with financial notes, auditor remarks, management commentary, qualification statements, and other narrative disclosures. These are ESSENTIAL to include in your analysis as they provide critical context for understanding:
@@ -813,7 +895,9 @@ CRITICAL SECTION - Include ALL:
     
     # Add news context if available
     if news_context:
-        user_prompt_parts.append(f"\n\n## RECENT NEWS AND MARKET CONTEXT\n{news_context}\n\nIncorporate this recent news and market developments into your analysis to provide current market context and explain any recent operational or strategic changes.")
+        user_prompt_parts.append(f"\n\n## RECENT NEWS AND MARKET DEVELOPMENTS (PRIMARY ANALYTICAL INPUT)\n\nUse this recent news to contextualize and explain financial metrics. These developments ARE the key drivers behind the observed financial performance:\n\n{news_context}\n\n**INSTRUCTIONS**: \n1. For each major news item, identify its expected financial impact\n2. Correlate news timing with financial metric changes\n3. Assess how news affects risk profile, growth trajectory, and valuation\n4. Explain whether financial results align with news-driven expectations\n5. Use news to project future financial performance and identify leading indicators\n6. Integrate news insights throughout the analysis, not in a separate section")
+    else:
+        user_prompt_parts.append("\n\nNOTE: No recent news data available for this analysis. Proceed with financial data analysis only.")
     
     user_prompt = "\n".join(user_prompt_parts)
 

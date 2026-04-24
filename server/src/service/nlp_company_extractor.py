@@ -54,7 +54,21 @@ class CompanyExtractor:
         # Clean up whitespace
         normalized = re.sub(r"\s+", " ", normalized).strip()
         return normalized
-    
+
+    @staticmethod
+    def _is_generic_candidate(candidate: str) -> bool:
+        normalized = re.sub(r"\s+", " ", candidate.strip().lower())
+        words = normalized.split()
+        generic_terms = {
+            'peer', 'peers', 'competitor', 'competitors', 'company', 'companies',
+            'it', 'its', 'their', 'them', 'they', 'we', 'us', 'our', 'you', 'your',
+            'report', 'reports', 'analysis', 'analyses', 'results', 'financials',
+            'performance', 'compare', 'comparison', 'benchmark', 'benchmarks',
+            'latest', 'recent', 'previous', 'current', 'last', 'quarter', 'year',
+            'earnings', 'income', 'revenue', 'profit', 'loss', 'cash', 'flow',
+        }
+        if any(word in generic_terms for word in words):
+            return True
     @staticmethod
     def _similarity_ratio(str1: str, str2: str) -> float:
         """Calculate similarity ratio between two strings (0.0 to 1.0)."""
@@ -116,6 +130,9 @@ class CompanyExtractor:
         results = []
         seen_symbols = set()
         for name in potential_names:
+            if self._is_generic_candidate(name):
+                continue
+
             # For simple queries (single word), use lower threshold for fuzzy matching
             is_simple_query = len(name.split()) == 1
             threshold = 0.5 if is_simple_query else 0.6
@@ -431,6 +448,9 @@ class CompanyExtractor:
             candidate,
             flags=re.IGNORECASE,
         )
+
+        if self._is_generic_candidate(candidate):
+            return ""
 
         explicit = self._extract_explicit_company_name(candidate)
         if explicit:

@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
 import asyncio
+import re
 from api.service.company_service import CompanyService
 from api.models.company_model import Company
 from api.Xbrl_annual_extractor import extract_annual, ExtractAnnualRequest, calculate_metrics_fourd
@@ -264,6 +265,14 @@ class ExtractionCompareRequest(BaseModel):
 
 
 def _resolve_compare_period(period: str, frequency: str, available_periods: list[str]) -> Optional[str]:
+    def _parse_year_range(period_text: str) -> Optional[tuple[int, int]]:
+        if not period_text:
+            return None
+        match = re.search(r"(\d{4})\s*[-_/]\s*(\d{4})", period_text)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+        return None
+
     if not period:
         return None
 
@@ -308,10 +317,20 @@ def _resolve_compare_period(period: str, frequency: str, available_periods: list
         if normalized in {"latest year", "latest"}:
             return None
 
-        if normalized.startswith("fy"):
-            upper = normalized.upper()
-            matches = [p for p in available_periods if p and p.upper() == upper]
-            return matches[0] if matches else upper
+        period_upper = normalized.upper().replace(" ", "")
+
+        if period_upper.startswith("FY") or period_upper.startswith("MC") or period_upper.startswith("DC"):
+            exact_matches = [p for p in available_periods if p and p.upper().replace(" ", "") == period_upper]
+            if exact_matches:
+                return exact_matches[0]
+
+            requested_range = _parse_year_range(period_upper)
+            if requested_range:
+                for p in available_periods:
+                    parsed = _parse_year_range(str(p).upper())
+                    if parsed == requested_range:
+                        return p
+            return None
 
         try:
             year = int(normalized)

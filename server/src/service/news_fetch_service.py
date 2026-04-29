@@ -24,7 +24,7 @@ async def fetch_and_save_news_for_company(company_name: str, scrip_code: str, we
         })
 
         # Fetch article URLs using NewsService
-        news_data = NewsService.get_company_news(company_name, max_results=10)
+        news_data = NewsService.get_company_news(company_name, max_results=50)
         articles = news_data.get("articles", [])
 
         if not articles:

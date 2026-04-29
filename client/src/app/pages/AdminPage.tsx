@@ -14,15 +14,6 @@ import { apiClient } from "../../api/apiClient";
 import { fetchMissingCompaniesStatus, fetchMissingCompanies, addMissingCompaniesToBSE } from "../services/api";
 import { useExtraction } from "../../context/ExtractionContext";
 
-// interface IngestionLog {
-//   id: string;
-//   company: string;
-//   status: "success" | "error" | "processing" | "pending";
-//   timestamp: Date;
-//   recordsProcessed: number;
-//   message?: string;
-// }
-
 const STATUS_CONFIG = {
   success: { icon: CheckCircle, color: "text-emerald-600", bg: "bg-emerald-50 border-emerald-200", badge: "bg-emerald-100 text-emerald-700" },
   error: { icon: XCircle, color: "text-red-600", bg: "bg-red-50 border-red-200", badge: "bg-red-100 text-red-700" },
@@ -31,7 +22,7 @@ const STATUS_CONFIG = {
 };
 
 export default function AdminPage() {
-  const { isCollecting, isExtractingData, liveLog, logs, startXbrlExtraction, startDataExtraction, stopExtraction, clearLiveLog, clearLogs, setOnCompanyExtracted } = useExtraction();
+  const { isCollecting, isExtractingData, isCollectingNews, liveLog, logs, startXbrlExtraction, startDataExtraction, startNewsCollection, stopExtraction, clearLiveLog, clearLogs, setOnCompanyExtracted } = useExtraction();
   const [showAddForm, setShowAddForm] = useState(false);
   const [companies, setCompanies] = useState<CompanyData[]>([]);
   const [expandedSource, setExpandedSource] = useState<string | null>(null);
@@ -397,7 +388,7 @@ export default function AdminPage() {
               <Button
                 size="sm"
                 onClick={startDataExtraction}
-                disabled={isExtractingData || isCollecting}
+                disabled={isExtractingData || isCollecting || isCollectingNews}
                 className="bg-teal-600 hover:bg-teal-700 text-white text-xs"
               >
                 <Upload className={`size-3.5 mr-1.5 ${isExtractingData ? "animate-bounce" : ""}`} />
@@ -406,13 +397,22 @@ export default function AdminPage() {
               <Button
                 size="sm"
                 onClick={startXbrlExtraction}
-                disabled={isCollecting}
+                disabled={isCollecting || isExtractingData || isCollectingNews}
                 className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs"
               >
                 <Play className={`size-3.5 mr-1.5 ${isCollecting ? "animate-pulse" : ""}`} />
                 {isCollecting ? "Fetching..." : "Fetch Filings"}
               </Button>
-              {(isCollecting || isExtractingData) && (
+              <Button
+                size="sm"
+                onClick={startNewsCollection}
+                disabled={isCollecting || isExtractingData || isCollectingNews}
+                className="bg-amber-600 hover:bg-amber-700 text-white text-xs"
+              >
+                <Zap className={`size-3.5 mr-1.5 ${isCollectingNews ? "animate-pulse" : ""}`} />
+                {isCollectingNews ? "Collecting..." : "Collect News"}
+              </Button>
+              {(isCollecting || isExtractingData || isCollectingNews) && (
                 <Button
                   size="sm"
                   onClick={stopExtraction}
@@ -430,7 +430,7 @@ export default function AdminPage() {
             <div className="p-5">
               <div className="flex items-center justify-between gap-2 mb-3">
                 <div className="flex items-center gap-2">
-                  <div className={`size-2 rounded-full ${isCollecting || isExtractingData ? "bg-blue-500 animate-pulse" : "bg-gray-300"}`} />
+                  <div className={`size-2 rounded-full ${isCollecting || isExtractingData || isCollectingNews ? "bg-blue-500 animate-pulse" : "bg-gray-300"}`} />
                   <span className="text-sm font-medium text-gray-700">Live Output</span>
                 </div>
                 <button

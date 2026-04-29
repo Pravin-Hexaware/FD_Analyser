@@ -30,20 +30,47 @@ def _get_page_html(url: str) -> str:
     """Fetch HTML from URL with proper headers and SSL fallback."""
     parsed = urlparse(url)
     origin = f"{parsed.scheme}://{parsed.netloc}/"
+    
+    # Enhanced headers to handle paywalled sites like Reuters
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.91 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,en-GB;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
-        "Accept-Encoding": "gzip, deflate",
-        "Referer": origin
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "Referer": origin,
     }
+    
+    # Add domain-specific headers for sites that block scrapers
+    domain = parsed.netloc.lower()
+    if "reuters.com" in domain:
+        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        headers["Cache-Control"] = "no-cache"
+    elif "bloomberg.com" in domain:
+        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    
     try:
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         response.raise_for_status()
         return response.text
+    except requests.exceptions.HTTPError as e:
+        # Try with SSL verification disabled for blocked sites
+        if e.response.status_code in [401, 403, 503]:
+            try:
+                response = requests.get(url, headers=headers, timeout=30, verify=False, allow_redirects=True)
+                response.raise_for_status()
+                return response.text
+            except Exception:
+                pass
+        raise
     except requests.exceptions.SSLError:
-        response = requests.get(url, headers=headers, timeout=30, verify=False)
+        response = requests.get(url, headers=headers, timeout=30, verify=False, allow_redirects=True)
         response.raise_for_status()
         return response.text
  
@@ -184,7 +211,7 @@ def _fetch_and_markdown_one_article(
     
     # Validate the publisher URL is from a trusted source
     if not NewsService._is_trusted_source(publisher_url):
-        raise ValueError(f"Publisher URL is not from a trusted source: {publisher_url}")
+        raise ValueError(f"Publisher URL {publisher_url} is not from a trusted news source")
     
     body = _scrape_url_to_markdown(publisher_url, title, company_name)
     return publisher_url, body
@@ -215,20 +242,24 @@ class NewsScraperService:
         today = datetime.now().strftime("%Y%m%d")
         base_dir = Path(__file__).resolve().parents[1]  # server/src
         markdown_dir = base_dir / "markdown"
-        company_date_folder = markdown_dir / f"{safe_filename(company_name)}_{today}"
+        company_date_folder = markdown_dir / f"{safe_filename(company_name).upper()}"
         company_date_folder.mkdir(parents=True, exist_ok=True)
  
         markdown_files = []
         all_content = ""
- 
+        
+        # Limit to 10 successfully scraped articles (trusted sources only)
+        max_successful_articles = 10
+        successful_count = 0
+
         for article_idx, article in enumerate(articles, start=1):
             title = article.get("title", "Untitled")
             url = article.get("url", "")
- 
+
             try:
                 if not url or not url.strip():
                     raise ValueError("Empty article URL from RSS")
- 
+
                 await websocket.send_json({
                     "idx": idx,
                     "company_name": company_name,
@@ -236,7 +267,7 @@ class NewsScraperService:
                     "title": title,
                     "status": "scraping"
                 })
- 
+
                 # Google News RSS links must be decoded to the publisher URL before HTTP fetch.
                 publisher_url, markdown_content = await asyncio.to_thread(
                     _fetch_and_markdown_one_article,
@@ -245,16 +276,17 @@ class NewsScraperService:
                     url.strip(),
                     1,
                 )
- 
+
                 file_path = _article_markdown_path(
-                    separates_folder, article_idx, title, publisher_url
+                    company_date_folder, article_idx, title, publisher_url
                 )
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(markdown_content)
- 
+
                 markdown_files.append(file_path)
                 all_content += markdown_content + "\n\n" + "=" * 80 + "\n\n"
- 
+                successful_count += 1
+
                 await websocket.send_json({
                     "idx": idx,
                     "company_name": company_name,
@@ -263,16 +295,33 @@ class NewsScraperService:
                     "saved_path": str(file_path.name),
                     "status": "saved"
                 })
- 
-                await asyncio.sleep(1)  # Rate limiting (decoder + politeness)
+
+                # Stop after 10 successful scrapes (trusted source articles)
+                if successful_count >= max_successful_articles:
+                    await websocket.send_json({
+                        "idx": idx,
+                        "company_name": company_name,
+                        "status": "reached_limit",
+                        "message": f"Reached limit of {max_successful_articles} trusted source articles"
+                    })
+                    break
  
             except Exception as e:
+                error_msg = str(e)
+                # Provide more helpful error messages for common issues
+                if "401" in error_msg or "403" in error_msg:
+                    error_msg = f"Access denied (401/403) - site may require subscription: {url}"
+                elif "503" in error_msg:
+                    error_msg = "Service temporarily unavailable - will retry on next run"
+                elif "timeout" in error_msg.lower():
+                    error_msg = "Request timed out - will try next article"
+                
                 await websocket.send_json({
                     "idx": idx,
                     "company_name": company_name,
                     "article_idx": article_idx,
                     "rss_url": url,
-                    "error": str(e),
+                    "error": error_msg,
                     "status": "scrape_failed"
                 })
  

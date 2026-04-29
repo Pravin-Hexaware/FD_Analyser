@@ -4,10 +4,12 @@ import type { ReactNode } from "react";
 interface ExtractionContextType {
   isCollecting: boolean;
   isExtractingData: boolean;
+  isCollectingNews: boolean;
   liveLog: string[];
   logs: any[];
   startXbrlExtraction: () => Promise<void>;
   startDataExtraction: () => Promise<void>;
+  startNewsCollection: () => Promise<void>;
   stopExtraction: () => void;
   addLiveLog: (text: string) => void;
   addLog: (log: any) => void;
@@ -23,6 +25,7 @@ const ExtractionContext = createContext<ExtractionContextType | undefined>(undef
 export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [isCollecting, setIsCollecting] = useState(false);
   const [isExtractingData, setIsExtractingData] = useState(false);
+  const [isCollectingNews, setIsCollectingNews] = useState(false);
   const [liveLog, setLiveLog] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem("adminLiveLog");
@@ -281,6 +284,100 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
     }
   }, [connectWebSocket, addLiveLog, clearLiveLog, logs.length, addLog, isExtractingData]);
 
+  const startNewsCollection = useCallback(async () => {
+    setIsCollectingNews(true);
+    clearLiveLog();
+    addLiveLog("Initializing news collection pipeline...");
+
+    try {
+      const ws = new WebSocket("ws://localhost:8001/api/ws/news-fetch-all");
+      wsRef.current = ws;
+
+      // Set connection timeout
+      const timeout = setTimeout(() => {
+        ws.close();
+        setIsCollectingNews(false);
+        addLiveLog("✗ Connection timeout - Is backend server running on port 8001?");
+      }, 5000);
+
+      ws.onopen = () => {
+        clearTimeout(timeout);
+        addLiveLog("✓ Connected to news collection service");
+      };
+
+      ws.onerror = () => {
+        clearTimeout(timeout);
+        const errorMsg = "Backend server not responding on ws://localhost:8001";
+        addLiveLog(`✗ Connection error: ${errorMsg}`);
+        setIsCollectingNews(false);
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.status === "starting") {
+          addLiveLog("News collection pipeline started...");
+        } else if (data.status === "no_companies") {
+          addLiveLog("⊘ No companies found in database");
+        } else if (data.status === "fetched_companies") {
+          addLiveLog(`✓ Found ${data.count} companies to process`);
+        } else if (data.status === "processing_company") {
+          addLiveLog(`→ Processing [${data.idx}/${data.total}] ${data.company_name} (${data.scrip_code})`);
+        } else if (data.status === "fetching_articles") {
+          addLiveLog(`  → Fetching news articles for ${data.company_name}...`);
+        } else if (data.status === "starting_scrape") {
+          addLiveLog(`  → Scraping ${data.article_count} articles...`);
+        } else if (data.status === "scraping") {
+          addLiveLog(`    → Scraping article ${data.article_idx}: ${data.title?.substring(0, 50)}...`);
+        } else if (data.status === "saved") {
+          addLiveLog(`    ✓ Saved: ${data.saved_path}`);
+        } else if (data.status === "scrape_failed") {
+          addLiveLog(`    ✗ Failed: ${data.error}`);
+        } else if (data.status === "summarizing") {
+          addLiveLog(`  → Generating summary for ${data.company_name}...`);
+        } else if (data.status === "summarized") {
+          addLiveLog(`  ✓ News summary created for ${data.company_name}`);
+        } else if (data.status === "completed") {
+          addLiveLog(`✓ Completed news collection for ${data.company_name}`);
+        } else if (data.status === "no_articles_found") {
+          addLiveLog(`⊘ No articles found for ${data.company_name}`);
+        } else if (data.status === "complete") {
+          addLiveLog("✓ News collection complete!");
+          setIsCollectingNews(false);
+
+          const newLog = {
+            id: String(logs.length + 1),
+            company: "All Companies (News Collection)",
+            status: "success",
+            timestamp: new Date(),
+            recordsProcessed: data.total || 0,
+            message: "News articles fetched and summarized",
+          };
+          addLog(newLog);
+          ws.close();
+          wsRef.current = null;
+        } else if (data.error) {
+          addLiveLog(`✗ Error: ${data.error}`);
+        }
+      };
+
+      ws.onerror = () => {
+        setIsCollectingNews(false);
+        addLiveLog("✗ WebSocket connection error");
+      };
+
+      ws.onclose = () => {
+        if (isCollectingNews) {
+          addLiveLog("⟳ Connection closed (collection may still be running on server)");
+        }
+      };
+    } catch (error) {
+      setIsCollectingNews(false);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      addLiveLog(`✗ Failed to connect: ${errorMsg}`);
+    }
+  }, [addLiveLog, clearLiveLog, logs.length, addLog, isCollectingNews]);
+
   const stopExtraction = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close();
@@ -288,6 +385,7 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
       addLiveLog("✓ Extraction stopped by user");
       setIsCollecting(false);
       setIsExtractingData(false);
+      setIsCollectingNews(false);
     }
   }, [addLiveLog]);
 
@@ -296,10 +394,12 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
       value={{
         isCollecting,
         isExtractingData,
+        isCollectingNews,
         liveLog,
         logs,
         startXbrlExtraction,
         startDataExtraction,
+        startNewsCollection,
         stopExtraction,
         addLiveLog,
         addLog,

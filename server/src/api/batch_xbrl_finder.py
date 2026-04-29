@@ -73,8 +73,10 @@ class BatchGetXBRLResponse(BaseModel):
     results: List[BatchItemResult]
 
 # -------------------- Constants & Config --------------------
-BSE_URL = "https://www.bseindia.com/corporates/Comp_Resultsnew.aspx"
-BSE_HOME = "https://www.bseindia.com/"
+#BSE_URL = "https://www.bseindia.com/corporates/Comp_Resultsnew.aspx"
+BSE_URL ="https://beta.bseindia.com/corporates/Comp_Resultsnew.aspx"
+BSE_HOME="https://beta.bseindia.com/"
+#BSE_HOME = "https://www.bseindia.com/"
 SMART_API_PART = "/BseIndiaAPI/api/PeerSmartSearch/"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

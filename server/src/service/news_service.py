@@ -28,7 +28,9 @@ class NewsService:
         "moneycontrol.com",
         "livemint.com",
         "business-standard.com",
-        "economictimes.indiatimes.com"
+        "economictimes.indiatimes.com",
+        "businesstoday.in",
+        "economictimes.com"
     }
     
     # Keywords to identify company activities and changes
@@ -99,7 +101,7 @@ class NewsService:
     @staticmethod
     def get_company_news(
         company_name: str,
-        max_results: int = 10,
+        max_results: int = 50,
         days_back: int = 30
     ) -> Dict[str, Any]:
         """

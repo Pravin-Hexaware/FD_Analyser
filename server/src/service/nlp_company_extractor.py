@@ -66,6 +66,7 @@ class CompanyExtractor:
             'performance', 'compare', 'comparison', 'benchmark', 'benchmarks',
             'latest', 'recent', 'previous', 'current', 'last', 'quarter', 'year',
             'earnings', 'income', 'revenue', 'profit', 'loss', 'cash', 'flow',
+            'available', 'data', 'question', 'comparative', 'comparitive', 'analysis',
         }
         if any(word in generic_terms for word in words):
             return True
@@ -242,7 +243,7 @@ class CompanyExtractor:
         # Strategy 2: Extract words following specific prepositions
         # Pattern: "for/of/at/from/company X", "X limited/ltd"
         contextual_patterns = [
-            r'(?:for|of|at|from|company|between)\s+([A-Za-z\s&]+?)(?:\s+(?:limited|ltd|inc|and)|\s+(?:is|was|has|have)|$)',
+            r'(?:for|of|at|from|company|between)\s+([A-Za-z\s&]+?)(?:\s+(?:limited|ltd|inc|and|over|for|on|about|with|during|through|via|from|in|by)|$)',
             r'([A-Za-z\s&]+?)\s+(?:limited|ltd|inc|incorporated)',
         ]
         for pattern in contextual_patterns:
@@ -250,7 +251,16 @@ class CompanyExtractor:
                 name = match.group(1).strip()
                 if not self._is_common_word(name) and len(name) > 1 and self._is_company_phrase_in_validation(name):
                     add_candidate(name)
-        
+
+        # Safe token fallback: capture company abbreviations and short names such as HCL or Hexaware.
+        token_pattern = r'\b([A-Za-z]{3,10})\b'
+        for match in re.finditer(token_pattern, query):
+            token = match.group(1).strip()
+            if self._is_common_word(token):
+                continue
+            if self._is_company_phrase_in_validation(token):
+                add_candidate(token)
+
         # Strategy 3: Look for BSE company names directly in the query
         # Check if any company name (or part of it) exists in the query
         prefix_counts: Dict[str, int] = {}
@@ -340,6 +350,10 @@ class CompanyExtractor:
         if len(tokens) == 1:
             if self._is_valid_symbol(normalized_phrase):
                 return True
+            if len(normalized_phrase) < 3:
+                return False
+
+            match_count = 0
             for company in self._companies:
                 for field in ["issuer_name", "security_name", "security_id"]:
                     value = company.get(field, "")
@@ -348,9 +362,10 @@ class CompanyExtractor:
                     normalized_value = self._normalize_text(value)
                     if not normalized_value:
                         continue
-                    if normalized_phrase == normalized_value:
-                        return True
-            return False
+                    if re.search(r'\b' + re.escape(normalized_phrase) + r'\b', normalized_value):
+                        match_count += 1
+                        break
+            return match_count > 0
 
         for company in self._companies:
             for field in ["issuer_name", "security_name", "security_id"]:
@@ -495,14 +510,28 @@ class CompanyExtractor:
                 issuer_score = max(issuer_score, 0.95)
                 security_score = max(security_score, 0.95)
             
-            # Also check for substring matches (higher weight)
+            # Prefer whole-word matches over weak substring-only hits.
+            if re.search(r'\b' + re.escape(normalized_query) + r'\b', issuer_normalized):
+                issuer_score = min(issuer_score + 0.25, 1.0)
+            if re.search(r'\b' + re.escape(normalized_query) + r'\b', security_normalized):
+                security_score = min(security_score + 0.25, 1.0)
+            if re.search(r'\b' + re.escape(normalized_query) + r'\b', code_normalized):
+                code_score = min(code_score + 0.25, 1.0)
+
             if normalized_query in issuer_normalized or issuer_normalized in normalized_query:
-                issuer_score = min(issuer_score + 0.15, 1.0)
+                issuer_score = min(issuer_score + 0.10, 1.0)
             if normalized_query in security_normalized or security_normalized in normalized_query:
-                security_score = min(security_score + 0.15, 1.0)
+                security_score = min(security_score + 0.10, 1.0)
             if normalized_query in code_normalized or code_normalized in normalized_query:
-                code_score = min(code_score + 0.15, 1.0)
-            
+                code_score = min(code_score + 0.10, 1.0)
+
+            if normalized_query in code_normalized and not re.search(r'\b' + re.escape(normalized_query) + r'\b', code_normalized):
+                code_score = max(code_score - 0.15, 0.0)
+            if normalized_query in issuer_normalized and not re.search(r'\b' + re.escape(normalized_query) + r'\b', issuer_normalized):
+                issuer_score = max(issuer_score - 0.15, 0.0)
+            if normalized_query in security_normalized and not re.search(r'\b' + re.escape(normalized_query) + r'\b', security_normalized):
+                security_score = max(security_score - 0.15, 0.0)
+
             # Take the best score among all fields
             max_score = max(issuer_score, security_score, code_score)
             
@@ -537,6 +566,7 @@ class CompanyExtractor:
             'previous', 'current', 'new', 'old', 'last', 'next', 'year', 'month',
             'quarter', 'day', 'period', 'time', 'date', 'fiscal', 'annual',
             'quarterly', 'monthly', 'weekly', 'daily', 'revenue', 'profit', 'loss',
+            'available', 'question', 'comparative', 'comparitive',
             'earnings', 'income', 'expense', 'cost', 'cash', 'flow', 'balance',
             'sheet', 'asset', 'liability', 'equity', 'ratio', 'metric', 'performance'
         }

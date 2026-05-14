@@ -6,7 +6,8 @@ Key traits:
 - Numeric input (500510) -> inject exact scrip (no Smart Search mismatch).
 - Name input -> server-side SmartSearch (CORS-free) first, then UI SmartSearch with retries.
 - Robust extraction (direct href, popup, window.open hook, network sniff, same-tab navigation).
-- Cycles multiple Broadcast Periods (Beyond 1 year -> 1 year -> 6m -> 3m -> 1m) until found.
+- Playwright navigation mirrors sample.py (comp_resultsnew search, filters, 20s post-submit wait).
+- Broad date window uses BSE "Beyond last 1 year" on-page; `/api/ws/xbrl-fetch-all-std` still filters to past 5 FY in `xbrl_ws_route`.
 - Never returns Comp_Resultsnew.aspx; returns None + error if no link after all attempts.
 
 Endpoints:
@@ -25,7 +26,7 @@ import requests
 import urllib3
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, validator
-from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError, APIResponse
+from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -73,11 +74,9 @@ class BatchGetXBRLResponse(BaseModel):
     results: List[BatchItemResult]
 
 # -------------------- Constants & Config --------------------
-#BSE_URL = "https://www.bseindia.com/corporates/Comp_Resultsnew.aspx"
-BSE_URL ="https://beta.bseindia.com/corporates/Comp_Resultsnew.aspx"
-BSE_HOME="https://beta.bseindia.com/"
-#BSE_HOME = "https://www.bseindia.com/"
-SMART_API_PART = "/BseIndiaAPI/api/PeerSmartSearch/"
+# BSE corporate results (post-redesign); old Comp_Resultsnew.aspx flow is obsolete.
+BSE_URL = "https://www.bseindia.com/corporates/comp_resultsnew"
+BSE_HOME = "https://www.bseindia.com/"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -93,7 +92,7 @@ POPUP_TIMEOUT = 4_000               # popup wait
 POST_CLICK_SETTLE_MS = 600          # small delay after click to let window.open fire
 MAX_ATTEMPTS_PER_COMPANY = 10        # full cycles
 COOLDOWN_BETWEEN_ATTEMPTS_MS = 1500 # small pause to placate WAF
-BROADCAST_PERIODS = ["7", "6", "5", "4", "3"]  # 7: Beyond 1 year, 6: 1y, 5: 6m, 4: 3m, 3: 1m
+BROADCAST_PERIODS = ["7", "6", "5", "4", "3"]  # legacy ASP.NET values; sample.py flow uses ddl "Beyond last 1 year" only
 
 # -------------------- Small helpers --------------------
 def looks_like_scrip(text: str) -> bool:
@@ -102,6 +101,53 @@ def looks_like_scrip(text: str) -> bool:
 
 def strip_lower(s: str) -> str:
     return (s or "").strip().lower()
+
+
+def _is_bse_corporate_results_portal_url(url: str) -> bool:
+    """True if URL is the BSE corporate results listing (old or new path), not an XBRL document."""
+    low = strip_lower(url or "")
+    if not low:
+        return False
+    if "xbrlfiles" in low:
+        return False
+    if low.endswith("comp_resultsnew.aspx"):
+        return True
+    return "/corporates/comp_resultsnew" in low
+
+
+def _first_bse_scrip_in_text(text: str) -> Optional[str]:
+    """Extract a 4–6 digit BSE scrip from a cell/label (no surrounding digits)."""
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", text)
+    m = re.search(r"(?<!\d)(\d{4,6})(?!\d)", compact)
+    return m.group(1) if m else None
+
+
+def _row_belongs_to_scrip(code_cell: str, name_cell: str, expected: Optional[str]) -> bool:
+    """If we know the target scrip, prefer rows that contain it (code column can be mis-indexed)."""
+    if not expected or not re.fullmatch(r"\d{4,6}", expected.strip()):
+        return True
+    exp = expected.strip()
+    combined = re.sub(r"\s+", "", f"{code_cell} {name_cell}")
+    if exp in combined:
+        return True
+    for blob in (code_cell, name_cell):
+        got = _first_bse_scrip_in_text(blob or "")
+        if got == exp:
+            return True
+    return False
+
+
+async def _grid_data_rows_locator(grid):
+    """
+    BSE asp:GridView often renders <table><tr> without <tbody>. sample.py uses table.locator('tr').
+    Prefer tbody tr when present; otherwise all tr that have at least one td (skip thead-only rows).
+    """
+    tb = grid.locator("tbody tr")
+    if await tb.count() > 0:
+        return tb
+    return grid.locator("tr:has(td)")
 
 def save_raw_content(scrip_code: str, xbrl_type: str, period: str, raw_content: str, url: str) -> Optional[str]:
     """
@@ -186,62 +232,32 @@ async def fetch_xbrl_content(ctx, url: str) -> Optional[str]:
 
 # -------------------- Browser/context helpers --------------------
 async def create_browser_and_context(p):
-    browser = await p.chromium.launch(
+    """Minimal browser setup aligned with sample.py (viewport + UA only)."""
+    launch_kw = dict(
         headless=True,
         args=[
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
             "--no-sandbox",
-            "--disable-gpu",
-            "--disable-infobars",
-            "--window-size=1360,900",
-            "--lang=en-US,en;q=0.9",
         ],
     )
+    # BSE autocomplete often fails in bundled Chromium; real Chrome improves headless parity with sample.py.
+    try:
+        browser = await p.chromium.launch(channel="chrome", **launch_kw)
+    except Exception:
+        browser = await p.chromium.launch(**launch_kw)
     ctx = await browser.new_context(
-        accept_downloads=False,
+        viewport={"width": 1280, "height": 800},
         user_agent=USER_AGENT,
-        viewport={"width": 1360, "height": 900},
-        locale="en-US",
-        timezone_id="Asia/Kolkata",
-        java_script_enabled=True,
         ignore_https_errors=True,
-        extra_http_headers={
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-CH-UA": '"Chromium";v="121", "Not(A:Brand";v="24", "Google Chrome";v="121"',
-            "Sec-CH-UA-Mobile": "?0",
-            "Sec-CH-UA-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Referer": BSE_HOME,
-        },
     )
-    await ctx.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    """)
     return browser, ctx
 
 async def prepare_page(ctx):
+    """
+    One page per company attempt. No SmartSearch route interception — sample.py relies on
+    the browser's normal XHR/autocomplete; fulfilling PeerSmartSearch here can desync UI vs suggestions.
+    """
     page = await ctx.new_page()
 
-    # Block heavy assets only; allow scripts/styles for delayed JS logic
-    async def _router(route, req):
-        try:
-            if req.resource_type in ["image", "font", "stylesheet"]:
-                return await route.abort()
-        except Exception:
-            pass
-        return await route.continue_()
-
-    await page.route("**/*", _router)
-
-    # window.open hook to record target URL even if popup is blocked
     await page.add_init_script("""
         (function(){
           try {
@@ -255,35 +271,6 @@ async def prepare_page(ctx):
         })();
     """)
 
-    # CORS-safe SmartSearch proxy via APIRequestContext
-    async def smartsearch_proxy(route, request):
-        if SMART_API_PART in request.url:
-            try:
-                resp: APIResponse = await ctx.request.get(
-                    request.url,
-                    headers={
-                        "Accept": "application/json, text/plain, */*",
-                        "Origin": "https://www.bseindia.com",
-                        "Referer": BSE_URL,
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Sec-Fetch-Site": "same-site",
-                        "Sec-Fetch-Mode": "cors",
-                        "Sec-Fetch-Dest": "empty",
-                    },
-                    timeout=XHR_TIMEOUT
-                )
-                body = await resp.body()
-                status = resp.status
-                await route.fulfill(status=status, body=body, headers={"content-type": "application/json"})
-                return
-            except Exception:
-                # let it pass through (may CORS-fail, but we tried)
-                pass
-        await route.continue_()
-
-    await page.route("**/BseIndiaAPI/api/PeerSmartSearch/**", smartsearch_proxy)
-
-    # Network sniffer: record any request to /XBRLFILES/
     def _record_request(req):
         try:
             if "XBRLFILES" in req.url.upper():
@@ -299,23 +286,34 @@ async def prepare_page(ctx):
     return page
 
 async def navigate_and_prepare(page):
-    async def goto_with_status(url: str) -> int:
-        resp = await page.goto(url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
-        return resp.status if resp else 0
-
+    """
+    Same sequence as sample.py: open comp_resultsnew, networkidle, small mouse gesture, cookies.
+    """
     status = 0
     try:
-        status = await goto_with_status(BSE_URL)
+        resp = await page.goto(BSE_URL, timeout=NAV_TIMEOUT)
+        status = resp.status if resp else 0
     except Exception:
         pass
 
     if status == 403:
         try:
-            await goto_with_status(BSE_HOME)
+            await page.goto(BSE_HOME, timeout=NAV_TIMEOUT)
             await page.wait_for_timeout(1200)
-            await goto_with_status(BSE_URL)
+            await page.goto(BSE_URL, timeout=NAV_TIMEOUT)
         except Exception:
             pass
+
+    try:
+        await page.wait_for_load_state("networkidle", timeout=60_000)
+    except Exception:
+        pass
+
+    try:
+        await page.mouse.move(300, 300)
+        await page.mouse.click(300, 300)
+    except Exception:
+        pass
 
     # Dismiss popups (best effort)
     for sel in [
@@ -335,6 +333,150 @@ async def navigate_and_prepare(page):
         except Exception:
             continue
 
+
+async def apply_results_filters_new(page) -> None:
+    """
+    Matches sample.py: Result Period ALL, Industry ALL, Broadcast Beyond last 1 year (best-effort).
+    """
+    await page.wait_for_selector("#ContentPlaceHolder1_periioddd", timeout=10_000)
+    await page.select_option("#ContentPlaceHolder1_periioddd", label="ALL")
+    await page.wait_for_selector("#dllindustry", timeout=10_000)
+    await page.select_option("#dllindustry", label="ALL")
+    try:
+        await page.wait_for_selector("#ddlBrodCastPeriod", timeout=10_000)
+        await page.select_option("#ddlBrodCastPeriod", label="Beyond last 1 year")
+    except Exception:
+        pass
+
+
+async def fill_company_search_new(page, company: str) -> None:
+    """
+    Same UX as sample.py: #scripsearchtxtbx.last, char-by-char type(delay=150),
+    visible li.quotemenu, pick row where match_key in text else first.
+    For names, resolve PeerSmartSearch API to scrip when possible so typing matches BSE suggestions.
+    """
+    ctx = page.context
+    needle = (company or "").strip()
+    if not needle:
+        raise RuntimeError("Empty company / scrip")
+
+    if looks_like_scrip(needle):
+        type_string = needle.strip()
+        match_key = type_string
+    else:
+        resolved = await resolve_scrip_via_api(ctx, needle)
+        if resolved:
+            type_string = resolved.strip()
+            match_key = type_string
+        else:
+            type_string = needle.strip()
+            match_key = needle.strip()
+
+    await page.wait_for_selector("#scripsearchtxtbx", timeout=10_000)
+    input_box = page.locator("#scripsearchtxtbx").last
+    await input_box.click()
+
+    for ch in type_string:
+        await input_box.type(str(ch), delay=150)
+
+    try:
+        await page.wait_for_selector("li.quotemenu", state="visible", timeout=10_000)
+    except Exception:
+        pass
+
+    items = page.locator("li.quotemenu")
+    suggestions: List[str] = []
+    if await items.count() > 0:
+        suggestions = await items.all_inner_texts()
+
+    mk = match_key.lower()
+    selected = False
+    for i, text in enumerate(suggestions):
+        if mk in (text or "").lower():
+            await items.nth(i).click()
+            selected = True
+            break
+
+    if not selected:
+        await page.wait_for_timeout(2000)
+        items = page.locator("li.quotemenu")
+        if await items.count() > 0:
+            suggestions = await items.all_inner_texts()
+            for i, text in enumerate(suggestions):
+                if mk in (text or "").lower():
+                    await items.nth(i).click()
+                    selected = True
+                    break
+
+    if not selected:
+        if await items.count() > 0:
+            await items.nth(0).click()
+            selected = True
+        else:
+            # sample.py does not throw here; headless often never shows li.quotemenu. Seed the same
+            # hidden fields a real click would set so submit still filters to the intended scrip.
+            code_to_bind = type_string.strip()
+            if looks_like_scrip(needle) or looks_like_scrip(code_to_bind):
+                try:
+                    await page.evaluate(
+                        """([code]) => {
+                            code = String(code || '').trim();
+                            const inputs = Array.from(document.querySelectorAll('#scripsearchtxtbx'));
+                            const vis = inputs.length ? inputs[inputs.length - 1] : null;
+                            if (vis) {
+                                vis.value = code;
+                                vis.dispatchEvent(new Event('input', { bubbles: true }));
+                                vis.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                            const ids = [
+                                'ContentPlaceHolder1_hf_scripcode',
+                                'ContentPlaceHolder1_SmartSearch_hdnCode',
+                                'hf_scripcode'
+                            ];
+                            for (const id of ids) {
+                                const h = document.getElementById(id);
+                                if (h) {
+                                    h.value = code;
+                                    h.dispatchEvent(new Event('change', { bubbles: true }));
+                                }
+                            }
+                        }""",
+                        [code_to_bind],
+                    )
+                    await inject_scrip_code(page, code_to_bind, display_name=code_to_bind)
+                except Exception:
+                    pass
+            else:
+                try:
+                    await input_box.press("ArrowDown")
+                    await input_box.press("Enter")
+                except Exception:
+                    pass
+
+    await page.wait_for_timeout(400)
+    if looks_like_scrip(needle):
+        try:
+            await page.wait_for_function(
+                """(code) => {
+                    const want = String(code).trim();
+                    const ids = [
+                      'ContentPlaceHolder1_hf_scripcode',
+                      'ContentPlaceHolder1_SmartSearch_hdnCode',
+                      'hf_scripcode'
+                    ];
+                    for (const id of ids) {
+                      const el = document.getElementById(id);
+                      if (el && String(el.value || '').trim() === want) return true;
+                    }
+                    return false;
+                }""",
+                arg=needle.strip(),
+                timeout=3_000,
+            )
+        except PWTimeoutError:
+            pass
+
+
 # -------------------- Field helpers --------------------
 async def set_result_period(page):
     sel = "#ContentPlaceHolder1_periioddd"
@@ -342,15 +484,97 @@ async def set_result_period(page):
     await page.select_option(sel, value="3")  # 3 = Quarterly
 
 async def set_broadcast_period(page, value: str):
-    sel = "#ContentPlaceHolder1_broadcastdd"
-    await page.wait_for_selector(sel, timeout=GRID_TIMEOUT)
-    await page.select_option(sel, value=value)
+    """
+    Broadcast / date window. Redesigned page uses #ddlBrodCastPeriod (labels + legacy values);
+    fall back to old #ContentPlaceHolder1_broadcastdd if still present.
+    """
+    new_sel = "#ddlBrodCastPeriod"
+    legacy_sel = "#ContentPlaceHolder1_broadcastdd"
+    try:
+        await page.wait_for_selector(new_sel, timeout=8_000)
+        try:
+            await page.select_option(new_sel, value=value)
+            return
+        except Exception:
+            pass
+        # Common label fallbacks when value= does not match redesigned options
+        label_by_value = {
+            "7": "Beyond last 1 year",
+            "6": "Last 1 year",
+            "5": "Last 6 months",
+            "4": "Last 3 months",
+            "3": "Last 1 month",
+        }
+        lbl = label_by_value.get(value)
+        if lbl:
+            try:
+                await page.select_option(new_sel, label=lbl)
+                return
+            except Exception:
+                for alt in (
+                    "Beyond last 1 year",
+                    "1 Year",
+                    "6 Months",
+                    "3 Months",
+                    "1 Month",
+                ):
+                    try:
+                        await page.select_option(new_sel, label=alt)
+                        return
+                    except Exception:
+                        continue
+    except PWTimeoutError:
+        pass
+    try:
+        await page.wait_for_selector(legacy_sel, timeout=5_000)
+        await page.select_option(legacy_sel, value=value)
+    except Exception:
+        pass
+
 
 async def submit_form(page):
-    btn_sel = '#ContentPlaceHolder1_btnSubmit'
-    await page.wait_for_selector(btn_sel, timeout=GRID_TIMEOUT)
-    async with page.expect_navigation(wait_until="domcontentloaded", timeout=CLICK_NAV_TIMEOUT):
-        await page.click(btn_sel)
+    """
+    Matches sample.py: focus submit, snapshot gvData HTML, JS click submit,
+    wait 20s for ASP.NET postback, then wait for grid change or presence, then networkidle.
+    """
+    await page.bring_to_front()
+
+    submit_button = page.locator("#ContentPlaceHolder1_btnSubmit")
+    await submit_button.wait_for(state="visible", timeout=10_000)
+    await submit_button.scroll_into_view_if_needed()
+    await submit_button.focus()
+
+    old_table_html = None
+    if await page.locator("#ContentPlaceHolder1_gvData").count() > 0:
+        try:
+            old_table_html = await page.locator("#ContentPlaceHolder1_gvData").first.inner_html()
+        except Exception:
+            old_table_html = None
+
+    await page.evaluate(
+        "() => { const b = document.querySelector('#ContentPlaceHolder1_btnSubmit'); if (b) b.click(); }"
+    )
+
+    await page.wait_for_timeout(20_000)
+    try:
+        if old_table_html is None:
+            await page.wait_for_selector("#ContentPlaceHolder1_gvData", timeout=30_000)
+        else:
+            await page.wait_for_function(
+                """([selector, oldHtml]) => {
+                    const el = document.querySelector(selector);
+                    return el && el.innerHTML !== oldHtml;
+                }""",
+                arg=["#ContentPlaceHolder1_gvData", old_table_html],
+                timeout=30_000,
+            )
+    except PWTimeoutError:
+        pass
+
+    try:
+        await page.wait_for_load_state("networkidle", timeout=60_000)
+    except Exception:
+        pass
 
 # -------------------- SmartSearch & Scrip handling --------------------
 async def inject_scrip_code(page, scrip_code: str, display_name: Optional[str] = None) -> None:
@@ -401,6 +625,17 @@ async def resolve_scrip_via_api(ctx, query: str) -> Optional[str]:
     except Exception:
         return None
     return None
+
+
+async def resolve_expected_bse_scrip(ctx, company: str) -> Optional[str]:
+    """Canonical numeric scrip for this run (CSV scrip or PeerSmartSearch for names)."""
+    s = (company or "").strip()
+    if not s:
+        return None
+    if looks_like_scrip(s):
+        return s
+    return await resolve_scrip_via_api(ctx, s)
+
 
 async def smartsearch_fill(page, text: str) -> None:
     # Find the input
@@ -505,7 +740,7 @@ async def resolve_absolute_url(page, href: str) -> str:
     return base + "/" + href
 
 # -------------------- Robust XBRL extraction --------------------
-async def pick_std_con_column_anchor(grid, prefer: str):
+async def pick_std_con_column_anchor(grid, prefer: str, first_data_row=None):
     """Return a locator of the desired anchor if Std/Con header is identifiable; else None."""
     prefer = strip_lower(prefer)
     try:
@@ -522,8 +757,11 @@ async def pick_std_con_column_anchor(grid, prefer: str):
                 break
         if target_col is None:
             return None
-        # First data row
-        first_row = grid.locator("tbody tr").nth(0)
+        if first_data_row is not None:
+            first_row = first_data_row
+        else:
+            data_rows = await _grid_data_rows_locator(grid)
+            first_row = data_rows.first
         return first_row.locator("td").nth(target_col).locator("a")
         
     except Exception:
@@ -590,24 +828,14 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
     return None
 
 
-async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], Optional[str]]:
+async def get_first_xbrl_url(
+    page,
+    prefer: str = "any",
+    expected_scrip: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     """
-    Exhaustive strategy (extended):
-      If prefer in {'quarterly','annual'}:
-        - Parse entire grid
-        - Classify Period by 2nd char: 'Q' (quarter) or 'C' (cumulative/annual)
-        - Pick latest by FY end (and quarter order for Q: J=Q1, S=Q2, D=Q3, M=Q4)
-        - Resolve Std XBRL (prefer), else Con XBRL
-      Else original flow:
-        1) If Std/Con header recognized (prefer), pick exact cell anchor.
-        2) Direct href anchors (.html/.xml/.zip or /XBRLFILES/).
-        3) Click anchor -> expect popup (normal) -> read url.
-        4) Post-click small wait -> read window.__openedWindows__.
-        5) Scan network for /XBRLFILES/ requests.
-        6) Same-tab navigation check -> wait_for_url(regex).
-        7) Re-scan direct anchors.
-
-    Returns (xbrl_url, period)
+    Locate an XBRL link in the results grid. When ``expected_scrip`` is set (4–6 digit BSE code),
+    only rows for that security are considered so we never return the first XBRL on a mixed/default grid.
     """
     import re
 
@@ -634,8 +862,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
     async def _resolve(url: Optional[str]) -> Optional[str]:
         if not url:
             return None
-        low = strip_lower(url)
-        if low.endswith("comp_resultsnew.aspx"):
+        if _is_bse_corporate_results_portal_url(url):
             return None
         if url.startswith("http"):
             return url
@@ -732,7 +959,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         'table:has-text("Std XBRL"), table:has-text("Con XBRL")',
     ]:
         try:
-            await page.wait_for_selector(sel, timeout=1500)
+            await page.wait_for_selector(sel, timeout=GRID_TIMEOUT)
             grid = page.locator(sel).first
             break
         except PWTimeoutError:
@@ -741,6 +968,23 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         if await page.locator('text=/No\\s+Record\\s+Found/i').count():
             return None, None
         raise RuntimeError("Could not locate results table.")
+
+    scoped_rows = None
+    link_scope = grid
+    if expected_scrip and re.fullmatch(r"\d{4,6}", expected_scrip.strip()):
+        ex = expected_scrip.strip()
+        data_rows = await _grid_data_rows_locator(grid)
+        sr = data_rows.filter(has_text=re.compile(rf"(?<!\d){re.escape(ex)}(?!\d)"))
+        if await sr.count() > 0:
+            scoped_rows = sr
+            link_scope = scoped_rows
+        else:
+            loose = data_rows.filter(has_text=ex)
+            if await loose.count() > 0:
+                scoped_rows = loose
+                link_scope = loose
+
+    first_data_row = scoped_rows.first if scoped_rows is not None else None
 
     # ---------- A) NEW BEHAVIOUR for prefer in {'quarterly','annual'} ----------
     prefer_mode = strip_lower(prefer)
@@ -771,9 +1015,9 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         except Exception:
             pass
 
-        # collect all rows
+        # collect all rows (GridView may omit tbody — match sample.py tr walk)
         rows_meta: List[dict] = []
-        body_rows = grid.locator("tbody tr")
+        body_rows = await _grid_data_rows_locator(grid)
         for r in range(await body_rows.count()):
             tr = body_rows.nth(r)
             tds = tr.locator("td")
@@ -786,6 +1030,9 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
                 std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
                 con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
             except Exception:
+                continue
+
+            if not _row_belongs_to_scrip(code, name, expected_scrip):
                 continue
 
             meta = _classify_period(per)
@@ -802,40 +1049,52 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
                 "con_anchor": con_a,
             })
 
-        if not rows_meta:
+        if rows_meta:
+            # filter by requested type and pick "latest"
+            if prefer_mode == "quarterly":
+                candidates = [r for r in rows_meta if r["type"] == "quarterly"]
+                latest = max(candidates, key=lambda r: (r["fy_end"], r["q_order"] or 0)) if candidates else None
+            else:  # annual
+                candidates = [r for r in rows_meta if r["type"] == "annual"]
+                latest = max(candidates, key=lambda r: (r["fy_end"], 99)) if candidates else None
+
+            if latest:
+                # resolve Std first; if missing, Con
+                url_final = await _resolve_from_anchor(latest["std_anchor"])
+                picked_anchor = latest["std_anchor"]
+                if not url_final:
+                    url_final = await _resolve_from_anchor(latest["con_anchor"])
+                    picked_anchor = latest["con_anchor"]
+
+                if url_final:
+                    period_text = latest["period"] or (await _extract_period_from_anchor(picked_anchor)) if picked_anchor else None
+                    return url_final, period_text
+
+        # Fall through to generic strategy if typed path found nothing
+
+    if expected_scrip and re.fullmatch(r"\d{4,6}", (expected_scrip or "").strip()):
+        ex = (expected_scrip or "").strip()
+        dr = await _grid_data_rows_locator(grid)
+        if await dr.count() > 0 and await dr.filter(has_text=ex).count() == 0:
             return None, None
 
-        # filter by requested type and pick "latest"
-        if prefer_mode == "quarterly":
-            candidates = [r for r in rows_meta if r["type"] == "quarterly"]
-            latest = max(candidates, key=lambda r: (r["fy_end"], r["q_order"] or 0)) if candidates else None
-        else:  # annual
-            candidates = [r for r in rows_meta if r["type"] == "annual"]
-            latest = max(candidates, key=lambda r: (r["fy_end"], 99)) if candidates else None
-
-        if not latest:
-            return None, None
-
-        # resolve Std first; if missing, Con
-        url_final = await _resolve_from_anchor(latest["std_anchor"])
-        picked_anchor = latest["std_anchor"]
-        if not url_final:
-            url_final = await _resolve_from_anchor(latest["con_anchor"])
-            picked_anchor = latest["con_anchor"]
-
-        if url_final:
-            # if we have the exact row, period is known; but keep anchor extractor fallback if needed
-            period_text = latest["period"] or (await _extract_period_from_anchor(picked_anchor)) if picked_anchor else None
-            return url_final, period_text
-
-        # If still nothing, fall through to original generic strategy.
-        # (This ensures we don't regress if the table acts weird.)
+    if (
+        expected_scrip
+        and re.fullmatch(r"\d{4,6}", (expected_scrip or "").strip())
+        and scoped_rows is None
+    ):
+        data_rows = await _grid_data_rows_locator(grid)
+        loose = data_rows.filter(has_text=expected_scrip.strip())
+        if await loose.count() > 0:
+            scoped_rows = loose
+            link_scope = loose
+            first_data_row = scoped_rows.first
 
     # ---------- B) ORIGINAL STRATEGY (std/con/any) ----------
     # 1) Prefer exact Std/Con column if requested
     candidate = None
     if prefer_mode in {"std", "con"}:
-        c_anchor = await pick_std_con_column_anchor(grid, prefer_mode)
+        c_anchor = await pick_std_con_column_anchor(grid, prefer_mode, first_data_row)
         if c_anchor is not None and await c_anchor.count():
             href0 = (await c_anchor.first.get_attribute("href")) or ""
             if href0 and not href0.lower().startswith("javascript:"):
@@ -851,7 +1110,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
         'a[href$=".html" i], '
         'a[href$=".zip" i]'
     )
-    direct = grid.locator(direct_sel).first
+    direct = link_scope.locator(direct_sel).first
     if await direct.count():
         href = (await direct.get_attribute("href")) or ""
         if href and not href.lower().startswith("javascript:"):
@@ -861,9 +1120,9 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
 
     # 3) Candidate anchor selection if not already chosen
     if candidate is None:
-        candidate = grid.locator('a[id*="lnkXML"]').first
+        candidate = link_scope.locator('a[id*="lnkXML"]').first
         if not await candidate.count():
-            candidate = grid.locator("a").filter(has_text=re.compile(r"\bXBRL\b", re.I)).first
+            candidate = link_scope.locator("a").filter(has_text=re.compile(r"\bXBRL\b", re.I)).first
         if not await candidate.count():
             return None, None
 
@@ -934,7 +1193,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
 
     # 8) Re-scan direct anchors after postback
     try:
-        direct2 = grid.locator(direct_sel).first
+        direct2 = link_scope.locator(direct_sel).first
         if await direct2.count():
             href2 = (await direct2.get_attribute("href")) or ""
             if href2 and not href2.lower().startswith("javascript:"):
@@ -950,7 +1209,7 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Tuple[Optional[str], 
 async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tuple[Optional[str], Optional[str], int, Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Returns (chosen_url, period, attempts_used, annual_url, annual_period, quarterly_url, quarterly_period).
-    Tries multiple broadcast periods and multiple attempts until found both annual and quarterly (or best fallback).
+    One BSE results load per attempt (sample.py-style submit); retries up to MAX_ATTEMPTS_PER_COMPANY.
     """
     attempts = 0
     start_t = time.perf_counter()
@@ -962,69 +1221,48 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
         try:
             await navigate_and_prepare(page)
 
-            # if numeric -> inject; else resolve scrip via API, else UI smart search
-            if looks_like_scrip(company):
-                await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
-                await inject_scrip_code(page, company)
-            else:
-                # try server-side API for deterministic scrip
-                scrip = await resolve_scrip_via_api(ctx, company)
-                if scrip:
-                    await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
-                    await inject_scrip_code(page, scrip, display_name=company)
-                else:
-                    # UI SmartSearch
-                    await smartsearch_fill(page, company)
+            expected_scrip = await resolve_expected_bse_scrip(ctx, company)
 
-            # Set result period
-            #await set_result_period(page)
+            await fill_company_search_new(page, company)
+            await apply_results_filters_new(page)
 
-            # try multiple broadcast periods (beyond 1y -> 1y -> 6m -> 3m -> 1m)
+            # Single submit + grid refresh (same as sample.py). Past multi-broadcast loop removed;
+            # "Beyond last 1 year" is set in apply_results_filters_new. Five-year filtering stays in xbrl_ws_route.
+
+            await submit_form(page)
+            await wait_grid_ready(page)
+
             annual_url = None
             quarterly_url = None
             annual_period = None
             quarterly_period = None
 
-            for bp in BROADCAST_PERIODS:
-                await set_broadcast_period(page, bp)
-                await submit_form(page)
-                await wait_grid_ready(page)
+            if prefer == "annual":
+                annual_url, annual_period = await get_first_xbrl_url(
+                    page, prefer="annual", expected_scrip=expected_scrip
+                )
 
-                if prefer == "annual":
-                    if annual_url is None:
-                        annual_url, annual_period = await get_first_xbrl_url(page, prefer="annual")
-                    if annual_url:
-                        break
+            elif prefer == "quarterly":
+                quarterly_url, quarterly_period = await get_first_xbrl_url(
+                    page, prefer="quarterly", expected_scrip=expected_scrip
+                )
 
-                elif prefer == "quarterly":
-                    if quarterly_url is None:
-                        quarterly_url, quarterly_period = await get_first_xbrl_url(page, prefer="quarterly")
-                    if quarterly_url:
-                        break
+            else:
+                annual_url, annual_period = await get_first_xbrl_url(
+                    page, prefer="annual", expected_scrip=expected_scrip
+                )
+                quarterly_url, quarterly_period = await get_first_xbrl_url(
+                    page, prefer="quarterly", expected_scrip=expected_scrip
+                )
+                if annual_url is None and quarterly_url is None:
+                    fallback_url, fallback_period = await get_first_xbrl_url(
+                        page, prefer=prefer, expected_scrip=expected_scrip
+                    )
+                    if fallback_url:
+                        annual_url = fallback_url
+                        annual_period = fallback_period
 
-                else:
-                    if annual_url is None:
-                        annual_url, annual_period = await get_first_xbrl_url(page, prefer="annual")
-                    if quarterly_url is None:
-                        quarterly_url, quarterly_period = await get_first_xbrl_url(page, prefer="quarterly")
-
-                    if annual_url and quarterly_url:
-                        break
-
-                    if (annual_url is None and quarterly_url is None):
-                        # Also attempt user-specified fallback once per broadcast period
-                        fallback_url, fallback_period = await get_first_xbrl_url(page, prefer=prefer)
-                        if fallback_url:
-                            # keep fallback candidate if no other found yet
-                            if annual_url is None and quarterly_url is None:
-                                annual_url = fallback_url
-                                annual_period = fallback_period
-
-                # Quick early-stop if both found for any mode
-                if prefer == "any" and annual_url and quarterly_url:
-                    break
-
-            # done searching in all broadcast periods
+            # done searching for this attempt
             url = None
             period = None
             if prefer == "annual":
@@ -1039,7 +1277,7 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
             if url:
                 low_curr = strip_lower(page.url)
                 low_url = strip_lower(url)
-                if low_url == low_curr or low_url.endswith("comp_resultsnew.aspx"):
+                if low_url == low_curr or _is_bse_corporate_results_portal_url(low_url):
                     url = None
                     period = None
 
@@ -1049,9 +1287,6 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 except Exception:
                     pass
                 return url, period, attempts, annual_url, annual_period, quarterly_url, quarterly_period
-
-            # no url; next attempt after cooldown
-            await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
 
             # no url; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
@@ -1068,20 +1303,18 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 pass
 
     # All attempts exhausted
-    return None, None, attempts, None, None
+    return None, None, attempts, None, None, None, None
 
 
 async def get_all_std_xbrl_urls(ctx, company: str):
     """
     Async generator that yields (url, period, xbrl_type, raw_content, industry) for each Std and Con XBRL link found for the company.
-    Yields as soon as each URL is resolved.
+    Yields as soon as each URL is resolved. One grid load per successful attempt (aligned with sample.py).
     """
-    from typing import AsyncGenerator
     async def _resolve(url: Optional[str]) -> Optional[str]:
         if not url:
             return None
-        low = strip_lower(url)
-        if low.endswith("comp_resultsnew.aspx"):
+        if _is_bse_corporate_results_portal_url(url):
             return None
         if url.startswith("http"):
             return url
@@ -1182,48 +1415,32 @@ async def get_all_std_xbrl_urls(ctx, company: str):
         try:
             await navigate_and_prepare(page)
 
-            # if numeric -> inject; else resolve scrip via API, else UI smart search
-            if looks_like_scrip(company):
-                await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
-                await inject_scrip_code(page, company)
-            else:
-                # try server-side API for deterministic scrip
-                scrip = await resolve_scrip_via_api(ctx, company)
-                if scrip:
-                    await page.wait_for_selector("#ContentPlaceHolder1_SmartSearch_smartSearch", timeout=GRID_TIMEOUT)
-                    await inject_scrip_code(page, scrip, display_name=company)
-                else:
-                    # UI SmartSearch
-                    await smartsearch_fill(page, company)
+            expected_scrip = await resolve_expected_bse_scrip(ctx, company)
 
-            # Set result period
-            #await set_result_period(page)
+            await fill_company_search_new(page, company)
+            await apply_results_filters_new(page)
 
-            # try multiple broadcast periods (beyond 1y -> 1y -> 6m -> 3m -> 1m)
+            await submit_form(page)
+            await wait_grid_ready(page)
+
             yielded_any = False
 
-            for bp in BROADCAST_PERIODS:
-                await set_broadcast_period(page, bp)
-                await submit_form(page)
-                await wait_grid_ready(page)
-
-                # Parse grid for all std and con links
-                grid = None
-                for sel in [
-                    '#ContentPlaceHolder1_gvData',
-                    'table:has(th:has-text("XBRL"))',
-                    'table:has-text("Std XBRL"), table:has-text("Con XBRL")',
-                ]:
-                    try:
-                        await page.wait_for_selector(sel, timeout=1500)
-                        grid = page.locator(sel).first
-                        break
-                    except PWTimeoutError:
-                        continue
-                if grid is None:
+            grid = None
+            for sel in [
+                '#ContentPlaceHolder1_gvData',
+                'table:has(th:has-text("XBRL"))',
+                'table:has-text("Std XBRL"), table:has-text("Con XBRL")',
+            ]:
+                try:
+                    await page.wait_for_selector(sel, timeout=GRID_TIMEOUT)
+                    grid = page.locator(sel).first
+                    break
+                except PWTimeoutError:
                     continue
-
+            if grid is not None:
                 # detect header indices
+                idx_code = 0
+                idx_name = 1
                 idx_period = 3; idx_industry = 2; idx_std = 5; idx_con = 6
                 try:
                     header = grid.locator("thead tr").first
@@ -1239,6 +1456,8 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                                 return v
                         return default
 
+                    idx_code = _idx("security code", idx_code)
+                    idx_name = _idx("security name", idx_name)
                     idx_period = _idx("period", idx_period)
                     idx_industry = _idx("industry", idx_industry)
                     idx_std = _idx("std xbrl", idx_std)
@@ -1246,12 +1465,21 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                 except Exception:
                     pass
 
-                # collect all rows
-                body_rows = grid.locator("tbody tr")
+                # collect all rows (GridView may omit <tbody>)
+                body_rows = await _grid_data_rows_locator(grid)
                 for r in range(await body_rows.count()):
                     tr = body_rows.nth(r)
                     tds = tr.locator("td")
                     try:
+                        code_cell = (await tds.nth(idx_code).inner_text()).strip() if await tds.count() > idx_code else ""
+                        name_cell = (
+                            (await tds.nth(idx_name).inner_text()).strip()
+                            if await tds.count() > idx_name
+                            else ""
+                        )
+                        if not _row_belongs_to_scrip(code_cell, name_cell, expected_scrip):
+                            continue
+
                         per = (await tds.nth(idx_period).inner_text()).strip()
                         ind = (await tds.nth(idx_industry).inner_text()).strip() if await tds.count() > idx_industry else ""
                         std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
@@ -1276,8 +1504,6 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                                 yielded_any = True
                                 # Fetch XBRL content and save to file
                                 xbrl_content = await fetch_xbrl_content(ctx, url)
-                                #if xbrl_content:
-                                    #save_raw_content(company, "std", per, xbrl_content, url)
                                 yield url, per, "std", xbrl_content, ind
                                 await asyncio.sleep(2)  # Delay to avoid rate limiting
 
@@ -1292,10 +1518,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                             if url and (per, "con") not in yielded:
                                 yielded.add((per, "con"))
                                 yielded_any = True
-                                # Fetch XBRL content and save to file
                                 xbrl_content = await fetch_xbrl_content(ctx, url)
-                                #if xbrl_content:
-                                    #save_raw_content(company, "con", per, xbrl_content, url)
                                 yield url, per, "con", xbrl_content, ind
                                 await asyncio.sleep(2)  # Delay to avoid rate limiting
 

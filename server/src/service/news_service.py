@@ -27,13 +27,32 @@ class NewsService:
         "bloomberg.com",
         "moneycontrol.com",
         "livemint.com",
-        "business-standard.com",
         "economictimes.indiatimes.com",
+        "timesofindia.indiatimes.com",
+        "msn.com",
+        "ndtvprofit.com",
+        "manufacturingtodayindia.com",
+        "fortuneindia.com",
+        "newindianexpress.com",
+        "economictimes.com",
         "businesstoday.in",
-        "economictimes.com"
+        "cnbctv18.com",
+        "zeebiz.com",
+        "marketsmojo.com",
+        "indianchemicalnews.com",
+        "scanx.trade",
+        "whalesbook.com",
+        "hdfcsky.com",
+        "devdiscourse.com",
+        "chinimandi.com",
+        "unilever.com",
+        "businessworld.in",
+        "thehindubusinessline.com",
+        "financialexpress.com",
+        "business-standard.com"
     }
     
-    # Keywords to identify company activities and changes
+    # Keywords to identify company activities and changes or market-moving events
     ACTIVITY_KEYWORDS = [
         "layoff",
         "hiring",
@@ -65,7 +84,35 @@ class NewsService:
         "deal",
         "investment",
         "sustainability",
-        "esg"
+        "esg",
+        "earnings",
+        "profit",
+        "revenue",
+        "growth",
+        "margin",
+        "stock",
+        "share",
+        "analyst",
+        "results",
+        "outlook",
+        "guidance",
+        "rating",
+        "downgrade",
+        "upgrade",
+        "target",
+        "price",
+        "market",
+        "forecast",
+        "cashflow",
+        "net income",
+        "opex",
+        "capex",
+        "sale",
+        "order",
+        "contract",
+        "acquisition",
+        "funding",
+        "joint venture"
     ]
     
     MAX_RETRIES = 2

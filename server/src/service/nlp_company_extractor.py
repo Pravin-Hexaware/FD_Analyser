@@ -128,6 +128,9 @@ class CompanyExtractor:
         # Extract potential company names using NLP techniques
         potential_names = self._extract_potential_company_names(query)
         
+        # Determine if this is a multi-company/comparison query
+        multi_company = any(word in query.lower() for word in [" and ", " vs ", " versus ", " between ", "compare "])
+
         results = []
         seen_symbols = set()
         for name in potential_names:
@@ -137,9 +140,9 @@ class CompanyExtractor:
             # For simple queries (single word), use lower threshold for fuzzy matching
             is_simple_query = len(name.split()) == 1
             threshold = 0.5 if is_simple_query else 0.6
-            
+
             match = self._find_best_match(name, threshold=threshold)
-            
+
             if match:
                 symbol = match["security_id"]
                 if symbol in seen_symbols:
@@ -160,7 +163,11 @@ class CompanyExtractor:
                     "security_code": None,
                     "security_id": None,
                 })
-        
+
+            # If not a multi-company query, only return the first valid match
+            if not multi_company and results:
+                break
+
         return results
     
     def _extract_potential_company_names(self, query: str) -> List[str]:

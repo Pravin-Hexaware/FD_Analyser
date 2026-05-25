@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from repository.sqlite_repository import SqliteRepository
 from utils.llm_testing import get_azure_chat_openai
 from service.nlp_company_extractor import parse_query_and_get_companies_nlp
+from service.news_service import NewsService
 
 _LLM: Any = None
 
@@ -122,6 +124,7 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
     """
     if not company_name:
         return None
+        
     
     try:
         # Get today's date in YYYYMMDD format
@@ -159,6 +162,99 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
         pass
     
     return None
+
+
+async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_code: Optional[str] = None) -> Optional[str]:
+    """
+    Fetch today's news summary from markdown folder.
+    If summary.md doesn't exist, fetch news, generate summary, and save it on-demand.
+    
+    Searches for: markdown/{company_name}/{YYYYMMDD}/summary.md
+    where {YYYYMMDD} is today's date.
+    
+    Args:
+        company_name: Company name
+        scrip_code: Optional BSE scrip code for reference
+        
+    Returns:
+        Content of summary.md if exists or newly generated, None otherwise
+    """
+    if not company_name:
+        return None
+    
+    try:
+        today = datetime.now().strftime("%Y%m%d")
+        src_dir = Path(__file__).resolve().parents[1]
+        markdown_base = src_dir / "markdown"
+        
+        safe_company_name = (
+            company_name.strip()
+            .upper()
+            .replace(" ", "_")
+            .replace(".", "")
+            .replace("&", "AND")
+        )
+        
+        news_path = markdown_base / safe_company_name / today / "summary.md"
+        
+        # If summary exists, return it
+        if news_path.exists() and news_path.is_file():
+            with open(news_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                print(f"[INFO] Found existing markdown summary for {company_name}")
+                return content
+        
+        print(f"[INFO] No existing summary for {company_name}, fetching news on-demand...")
+        
+        # Summary doesn't exist - fetch news and generate it
+        try:
+            # Fetch only 2 articles for on-demand chat to keep it fast
+            news_data = NewsService.get_company_news(company_name, max_results=2, days_back=7)
+            
+            # If no articles found in last 7 days, try for last 30 days
+            if not news_data.get("articles"):
+                print(f"[INFO] No articles found in last 7 days for {company_name}, trying last 30 days...")
+                news_data = NewsService.get_company_news(company_name, max_results=2, days_back=30)
+            
+            if not news_data.get("articles"):
+                print(f"[WARN] No news articles found for {company_name} even after trying 30 days")
+                return None
+            
+            print(f"[INFO] Fetched {len(news_data['articles'])} articles, scraping...")
+            
+            articles_with_urls = [{"title": a.get("title", ""), "url": a.get("link", "")} for a in news_data["articles"]]
+            
+            # Import here to avoid circular imports
+            from service.news_scraper_service import NewsScraperService
+            
+            # Mock websocket for scraper
+            class MockWebSocket:
+                async def send_json(self, data: dict):
+                    pass
+            
+            mock_ws = MockWebSocket()
+            summary_folder = await NewsScraperService.scrape_and_summarize_articles(
+                company_name,
+                articles_with_urls,
+                mock_ws,
+                1
+            )
+            
+            summary_file = summary_folder / "summary.md"
+            if summary_file.exists():
+                with open(summary_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    print(f"[INFO] Generated and cached summary for {company_name}")
+                    return content
+        
+        except Exception as e:
+            print(f"[WARN] Failed to fetch news on-demand for {company_name}: {str(e)}")
+        
+        return None
+        
+    except Exception as e:
+        print(f"[ERROR] Error in _get_or_fetch_today_news_summary: {str(e)}")
+        return None
 
 
 def _get_company_info_by_name(repo: SqliteRepository, company_name: Optional[str]) -> Dict[str, Any]:

@@ -11,7 +11,7 @@ import re
 import csv
 from pathlib import Path
 
-from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data, _get_today_news_summary
+from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data, _get_today_news_summary, _get_or_fetch_today_news_summary
 from service.news_service import NewsService
 from repository.sqlite_repository import SqliteRepository
 
@@ -332,6 +332,19 @@ def _determine_frequency(statement_frequency: str, statement_type: str, period: 
 
     if "annual" in st or "year" in st:
         return "annual"
+
+    # --- PATCH: treat time_horizon like '3years', '5years', etc. as annual ---
+    import re
+    # Try to extract time_horizon from the calling context (hack: look for '3years', '5years', etc. in globals)
+    import inspect
+    frame = inspect.currentframe().f_back
+    time_horizon = None
+    if frame and 'intent' in frame.f_locals:
+        intent = frame.f_locals['intent']
+        time_horizon = (intent.get('time_horizon') or '').lower()
+    if time_horizon:
+        if re.match(r"^(\d+)\s*years?$", time_horizon) or re.match(r"^(\d+)[- ]*year[s]?$", time_horizon):
+            return "annual"
 
     return "quarterly"
 
@@ -791,9 +804,9 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 print(f"Processing company: {company_name}, resolved_name: {news_company_name}, scrip_code: {scrip_code}")
                 
                 if scrip_code:
-                    # ONLY fetch from markdown summary (markdown/{company}/{YYYYMMDD}/summary.md)
-                    # Do NOT fetch from RSS or database
-                    markdown_news = _get_today_news_summary(news_company_name)
+                    # Fetch from markdown summary, or generate on-demand if missing
+                    # Will fetch news and generate summary.md if it doesn't exist
+                    markdown_news = await _get_or_fetch_today_news_summary(news_company_name, scrip_code)
                     
                     if markdown_news:
                         # Include today's markdown summary

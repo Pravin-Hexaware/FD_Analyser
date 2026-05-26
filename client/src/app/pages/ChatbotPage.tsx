@@ -36,7 +36,7 @@ export default function ChatbotPage() {
     {
       id: "welcome",
       role: "assistant",
-      content: "Hello! I'm **FinBot**, your AI-powered financial analysis assistant.\n\nI can help you with:\n• Company financials, KPIs & trends\n• Multi-company comparisons\n• AI-generated investment reports\n• XBRL data analysis\n\nTry asking: *\"Show financials for Reliance\"* or *\"Compare TCS and Infosys\"*",
+      content: "Hello! I'm **FinBot**, your AI-powered financial analysis assistant.\n\nI can help you with:\n• Company financials, KPIs & trends\n• Multi-company comparisons\n• AI-generated investment reports\n• Financial data analysis\n\nTry asking: *\"Show financials for Reliance\"* or *\"Compare TCS and Infosys\"*",
       timestamp: new Date(),
     }
   ]);

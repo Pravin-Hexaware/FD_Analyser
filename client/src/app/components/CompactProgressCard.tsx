@@ -121,10 +121,9 @@ export function CompactProgressCard({
             )}
             <div className="text-left">
               <div className="text-xs font-semibold text-gray-900">
-                {isLoading && !isResponseComplete ? "PROCESSING" : "COMPLETE"}
+                {isLoading && !isResponseComplete ? "Analysing" : "COMPLETED"}
               </div>
               <div className="text-xs text-gray-600 mt-0.5">
-                {completedStepsCount}/{stages.length} steps
               </div>
             </div>
           </div>
@@ -137,34 +136,37 @@ export function CompactProgressCard({
 
         {/* Content with Vertical Progress Line */}
         {isExpanded && (
-          <div className="px-4 pb-4 pt-2 border-t border-gray-100">
-            <div className="relative pl-6">
+          <div className="px-4 pb-3 pt-2 border-t border-gray-100 max-h-48 overflow-y-auto">
+            <div className="relative pl-4">
               {/* Background vertical line */}
-              <div className="absolute left-2 top-0 bottom-0 w-0.5 bg-gray-200" />
+              <div className="absolute left-1.5 top-0 bottom-0 w-0.5 bg-gray-200" />
 
               {/* Progress line (animated) */}
               <div
-                className="absolute left-2 top-0 w-0.5 bg-indigo-600 transition-all duration-500"
+                className="absolute left-1.5 top-0 w-0.5 bg-indigo-600 transition-all duration-500"
                 style={{
                   height: `${((completedStepsCount + (activeSubstepIndex / (stageSubsteps[stages[currentStepIndex]]?.length || 1))) / stages.length) * 100}%`
                 }}
               />
 
-              {/* Stages */}
-              <div className="space-y-4">
+              {/* Stages - Only show completed and current active */}
+              <div className="space-y-3">
                 {stages.map((stage, idx) => {
                   const isCompleted = idx < currentStepIndex;
                   const isActive = idx === currentStepIndex && isLoading && !isResponseComplete;
                   const isUpcoming = idx > currentStepIndex;
                   const substeps = stageSubsteps[stage] || [];
 
+                  // Only render completed or active stages, hide upcoming
+                  if (isUpcoming) return null;
+
                   return (
                     <div key={idx} className="relative">
                       {/* Stage connector */}
-                      <div className="flex gap-3">
-                        <div className="flex flex-col items-center -ml-6">
+                      <div className="flex gap-2">
+                        <div className="flex flex-col items-center -ml-5">
                           <div
-                            className={`size-5 rounded-full flex items-center justify-center border-4 transition-all ${
+                            className={`size-4 rounded-full flex items-center justify-center border-3 transition-all flex-shrink-0 ${
                               isCompleted
                                 ? "bg-indigo-600 border-indigo-100"
                                 : isActive
@@ -173,49 +175,48 @@ export function CompactProgressCard({
                             }`}
                           >
                             {isCompleted ? (
-                              <CheckCircle2 className="size-3 text-white" />
+                              <CheckCircle2 className="size-2.5 text-white" />
                             ) : isActive ? (
-                              <Loader2 className="size-3 text-indigo-600 animate-spin" />
+                              <Loader2 className="size-2.5 text-indigo-600 animate-spin" />
                             ) : (
-                              <Circle className="size-2 text-gray-300" />
+                              <Circle className="size-1.5 text-gray-300" />
                             )}
                           </div>
                         </div>
 
                         {/* Stage content */}
-                        <div className="flex-1 pb-2">
+                        <div className="flex-1 pb-1">
                           <h3
                             className={`text-xs font-semibold transition-colors ${
-                              isUpcoming ? "text-gray-400" : "text-gray-900"
+                              isCompleted || isActive
+                                ? "text-gray-900"
+                                : "text-gray-500"
                             }`}
-                          >
+                          > 
                             {stage}
                           </h3>
 
-                          {/* Substeps - only show for active or completed stages */}
-                          {(isActive || isCompleted) && substeps.length > 0 && (
-                            <div className="mt-2 space-y-1">
+                          {/* Substeps - only show for active stage, not completed */}
+                          {isActive && substeps.length > 0 && (
+                            <div className="mt-1.5 space-y-1">
                               {substeps.map((substep, subIdx) => {
-                                const isSubstepCompleted =
-                                  isCompleted ||
-                                  (isActive && subIdx < activeSubstepIndex);
-                                const isActiveSubstep =
-                                  isActive && subIdx === activeSubstepIndex;
+                                const isSubstepCompleted = subIdx < activeSubstepIndex;
+                                const isActiveSubstep = subIdx === activeSubstepIndex;
 
                                 return (
                                   <div
                                     key={subIdx}
-                                    className="flex items-center gap-2"
+                                    className="flex items-center gap-1.5"
                                   >
                                     <div
-                                      className={`size-1 rounded-full transition-colors ${
+                                      className={`size-1 rounded-full transition-colors flex-shrink-0 ${
                                         isSubstepCompleted || isActiveSubstep
                                           ? "bg-indigo-500"
                                           : "bg-gray-300"
                                       }`}
                                     />
                                     <span
-                                      className={`text-xs transition-colors ${
+                                      className={`text-xs transition-colors line-clamp-2 ${
                                         isSubstepCompleted || isActiveSubstep
                                           ? "text-gray-700"
                                           : "text-gray-500"
@@ -223,8 +224,8 @@ export function CompactProgressCard({
                                     >
                                       {substep}
                                       {isActiveSubstep && (
-                                        <span className="ml-1.5 inline-block">
-                                          <Loader2 className="size-2 animate-spin inline text-indigo-600" />
+                                        <span className="ml-1 inline-block">
+                                          <Loader2 className="size-1.5 animate-spin inline text-indigo-600" />
                                         </span>
                                       )}
                                     </span>

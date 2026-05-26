@@ -5,8 +5,9 @@ Uses feedparser for RSS feeds and simple web scraping.
 import json
 import urllib.parse
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 import re
+import time
 from urllib.parse import urlparse
 
 try:
@@ -16,6 +17,88 @@ except ImportError:
     FEEDPARSER_AVAILABLE = False
     print("[WARN] feedparser not installed. News fetching will be limited.")
 
+import requests
+from googlenewsdecoder import gnewsdecoder
+
+BLACKLIST = ["youtube.com", "linkedin.com"]
+
+TRUSTED_COMPANY_DOMAINS_SUFFIXES = [".com", ".in", ".org"]
+
+COMPANY_QUERY_STRIP_RE = re.compile(r"\b(?:ltd\.?|limited|inc\.?|pvt\.?|private|private limited|pvt ltd)\b", re.IGNORECASE)
+
+def normalize_company_query(company: str) -> str:
+    normalized = COMPANY_QUERY_STRIP_RE.sub("", company or "")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized or company
+
+
+def get_company_domains(company: str) -> Set[str]:
+    base = re.sub(r'[^a-z0-9]', '', company.lower())
+    return {f"{base}{suffix}" for suffix in TRUSTED_COMPANY_DOMAINS_SUFFIXES}
+
+
+def get_entry_published(entry: dict) -> str:
+    published = entry.get("published") or entry.get("updated") or ""
+    if not published:
+        parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+        if parsed:
+            try:
+                published = datetime.fromtimestamp(time.mktime(parsed)).isoformat()
+            except Exception:
+                published = ""
+    return published
+
+
+def is_trusted_source_url(url: str, company_domains: set[str]) -> bool:
+    if not url:
+        return False
+    try:
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower().replace("www.", "")
+
+        for trusted in NewsService.TRUSTED_SOURCES:
+            if domain == trusted or domain.endswith("." + trusted):
+                return True
+
+        for cd in company_domains:
+            if domain == cd or domain.endswith("." + cd):
+                return True
+
+        return False
+    except Exception:
+        return False
+
+
+def resolve_url(url: str) -> str:
+    if "news.google.com" in urlparse(url).netloc.lower():
+        time.sleep(1)
+        result = gnewsdecoder(url, interval=0)
+        if result.get("status") and result.get("decoded_url"):
+            final = result["decoded_url"]
+            final = final.replace(
+                "m.economictimes.com",
+                "economictimes.indiatimes.com"
+            )
+            return final
+        raise RuntimeError(f"decode failed: {result}")
+    return url
+
+
+def fetch_news(company: str, window: str) -> List[Dict[str, Any]]:
+    keywords = " OR ".join([
+        "earnings", "profit", "revenue",
+        "acquisition", "deal", "launch",
+        "layoff", "hiring", "investment"
+    ])
+    query_company = normalize_company_query(company)
+    query = f'"{query_company}" ({keywords}) when:{window}'
+    rss_url = (
+        f"https://news.google.com/rss/search?"
+        f"q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+    print(f"\n🔎 Fetching {window} news")
+    feed = feedparser.parse(rss_url)
+    return feed.entries if feed.entries else []
 
 
 class NewsService:
@@ -29,21 +112,17 @@ class NewsService:
         "livemint.com",
         "economictimes.indiatimes.com",
         "timesofindia.indiatimes.com",
-        "msn.com",
         "ndtvprofit.com",
         "manufacturingtodayindia.com",
         "fortuneindia.com",
         "newindianexpress.com",
         "economictimes.com",
+        "yahoo.finance.com",
         "businesstoday.in",
         "cnbctv18.com",
         "zeebiz.com",
         "marketsmojo.com",
-        "indianchemicalnews.com",
-        "scanx.trade",
-        "whalesbook.com",
         "hdfcsky.com",
-        "devdiscourse.com",
         "chinimandi.com",
         "unilever.com",
         "businessworld.in",
@@ -119,28 +198,20 @@ class NewsService:
     TIMEOUT = 10
     
     @staticmethod
-    def _is_trusted_source(url: str) -> bool:
-        """
-        Check if a URL belongs to a trusted news source.
-        
-        Args:
-            url: The URL to check
-            
-        Returns:
-            True if the URL is from a trusted source, False otherwise
-        """
+    def _get_search_windows(days_back: int) -> List[str]:
+        if days_back >= 30:
+            return ["1d", "7d", "30d"]
+        if days_back >= 7:
+            return ["1d", "7d"]
+        return ["1d"]
+
+    @staticmethod
+    def _is_trusted_source(url: str, company_name: Optional[str] = None) -> bool:
         if not url:
             return False
-        
         try:
-            parsed_url = urlparse(url)
-            domain = parsed_url.netloc.lower().replace("www.", "")
-            
-            # Check if domain matches any trusted source
-            for trusted in NewsService.TRUSTED_SOURCES:
-                if domain == trusted or domain.endswith("." + trusted):
-                    return True
-            return False
+            company_domains = get_company_domains(company_name or "")
+            return is_trusted_source_url(url, company_domains)
         except Exception as e:
             print(f"[WARN] Error checking trusted source for URL {url}: {str(e)}")
             return False
@@ -174,54 +245,79 @@ class NewsService:
                 "error": "feedparser not installed. Please install feedparser: pip install feedparser",
                 "last_updated": datetime.now().isoformat()
             }
-        
-        articles = []
-        
-        # Try Google News RSS first (activity keywords narrow results)
-        try:
-            google_articles = NewsService._fetch_google_news(company_name, max_results)
-            articles.extend(google_articles)
-            print(f"[INFO] Successfully fetched {len(google_articles)} articles for {company_name}")
-        except Exception as e:
-            print(f"[WARN] Failed to fetch Google News for {company_name}: {str(e)}")
 
-        # Broad fallback: quoted company name only (many companies match nothing with the strict OR query)
-        if not articles:
-            try:
-                fallback = NewsService._fetch_google_news(
-                    company_name, max_results, simple_query=True
-                )
-                articles.extend(fallback)
-                print(f"[INFO] Fallback RSS fetched {len(fallback)} articles for {company_name}")
-            except Exception as e:
-                print(f"[WARN] Fallback Google News failed for {company_name}: {str(e)}")
-        
-        # Remove duplicates by title (keep all sources, no trusted source filtering)
+        articles: List[Dict[str, Any]] = []
         seen_titles = set()
-        unique_articles = []
-        
-        for article in articles:
-            title = article.get("title", "").lower()
-            
-            # Skip if title is duplicate
-            if title and title in seen_titles:
+        seen_urls = set()
+        company_domains = get_company_domains(company_name)
+        windows = NewsService._get_search_windows(days_back)
+
+        for window in windows:
+            if len(articles) >= max_results:
+                break
+
+            try:
+                feed_entries = fetch_news(company_name, window)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch Google News for {company_name} window {window}: {str(e)}")
                 continue
-            
-            # Add article without checking trusted source
-            if title:
-                seen_titles.add(title)
-                unique_articles.append(article)
-        
-        # Limit to max_results
-        unique_articles = unique_articles[:max_results]
-        
+
+            for entry in feed_entries:
+                if len(articles) >= max_results:
+                    break
+
+                title = (entry.get("title") or "").strip()
+                raw_url = (entry.get("link") or "").strip()
+                published = get_entry_published(entry)
+                if not title or not raw_url:
+                    continue
+
+                normalized_title = title.lower()
+                if normalized_title in seen_titles or raw_url in seen_urls:
+                    continue
+
+                try:
+                    resolved_url = resolve_url(raw_url)
+                except Exception:
+                    resolved_url = raw_url
+
+                if resolved_url in seen_urls:
+                    continue
+
+                if any(blocked in resolved_url for blocked in BLACKLIST):
+                    print(f"[DEBUG] Blacklisted URL skipped: {resolved_url}")
+                    continue
+
+                if not is_trusted_source_url(resolved_url, company_domains):
+                    print(f"[DEBUG] Untrusted source skipped: {resolved_url}")
+                    continue
+
+                seen_titles.add(normalized_title)
+                seen_urls.add(raw_url)
+                seen_urls.add(resolved_url)
+
+                articles.append({
+                    "title": title,
+                    "link": raw_url,
+                    "resolved_url": resolved_url,
+                    "published": published,
+                    "summary": NewsService._clean_html(entry.get("summary", "")),
+                    "source": "Google News",
+                    "fetched_at": datetime.now().isoformat()
+                })
+
+        if not articles and days_back < 30:
+            print(f"[INFO] No articles found for {company_name} in {days_back} days, expanding to 30d")
+            return NewsService.get_company_news(company_name, max_results=max_results, days_back=30)
+
         return {
-            "articles": unique_articles,
-            "count": len(unique_articles),
+            "articles": articles[:max_results],
+            "count": len(articles[:max_results]),
             "source": "google_news_rss",
             "company_name": company_name,
             "last_updated": datetime.now().isoformat(),
-            "date_range": f"Last {days_back} days"
+            "date_range": f"Last {days_back} days",
+            "trusted_sources_only": True
         }
     
     @staticmethod
@@ -246,11 +342,12 @@ class NewsService:
         if not FEEDPARSER_AVAILABLE:
             return articles
         
+        query_company = normalize_company_query(company_name)
         if simple_query:
-            query = f'"{company_name}"'
+            query = f'"{query_company}"'
         else:
             keywords = " OR ".join(NewsService.ACTIVITY_KEYWORDS)
-            query = f'"{company_name}" ({keywords})'
+            query = f'"{query_company}" ({keywords})'
         
         encoded_query = urllib.parse.quote(query)
         
@@ -289,7 +386,7 @@ class NewsService:
                 article = {
                     "title": entry.get("title", ""),
                     "link": raw_url or "",
-                    "published": entry.get("published", ""),
+                    "published": get_entry_published(entry),
                     "summary": entry.get("summary", ""),
                     "source": "Google News",
                     "fetched_at": datetime.now().isoformat()

@@ -215,9 +215,52 @@ function parseTextWithFormatting(text: string): any[] {
 export function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
 
+  const normalizeFileName = (text: string) => {
+    const cleaned = text
+      .replace(/^[#_*\s]+/, "")
+      .replace(/[\/:*?"<>|]/g, "")
+      .replace(/_+/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/^[#_*\s]+|[#_*\s]+$/g, "")
+      .trim();
+    if (!cleaned) {
+      return `FinBot-response-${message.id}`;
+    }
+    const words = cleaned.split(" ").slice(0, 8).join(" ");
+    return words;
+  };
+
+  const extractTitleCandidate = (content: string): string => {
+    const lines = content.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (lines.length === 0) {
+      return message.id;
+    }
+
+    const prefixPattern = /^(?:#+\s*)?comprehensive financial analysis report\s*[:\-]?\s*/i;
+
+    // Prefer the first non-empty line that is not just the standard report heading.
+    for (let i = 0; i < lines.length; i += 1) {
+      let line = lines[i].replace(/^[#_*\s]+/, "");
+      if (!prefixPattern.test(line)) {
+        return line;
+      }
+      const stripped = line.replace(prefixPattern, "").replace(/^[#_*\s]+/, "").trim();
+      if (stripped) {
+        return stripped;
+      }
+      if (i + 1 < lines.length) {
+        return lines[i + 1].replace(/^[#_*\s]+/, "");
+      }
+    }
+
+    return lines[0].replace(prefixPattern, "").replace(/^[#_*\s]+/, "").trim() || message.id;
+  };
+
   const handleDownload = () => {
     const docDefinition = markdownToPdfmake(message.content);
-    pdfMake.createPdf(docDefinition).download(`chat-${message.id}.pdf`);
+    const titleSource = message.title?.trim() || extractTitleCandidate(message.content);
+    const fileName = normalizeFileName(titleSource);
+    pdfMake.createPdf(docDefinition).download(`${fileName}.pdf`);
   };
 
   const handleCopy = () => {

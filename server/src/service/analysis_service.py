@@ -109,149 +109,145 @@ def _get_company_info_by_symbol(repo: SqliteRepository, symbol: str) -> Dict[str
         "company": row[2],
         "industry": row[3],
     }
+
+def _normalize_company_folder_name(company_name: str) -> str:
+    if not company_name:
+        return "UNKNOWN_COMPANY"
+    normalized = company_name.strip().upper().replace("&", "AND")
+    normalized = re.sub(r"[^A-Z0-9_]", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or "UNKNOWN_COMPANY"
+
 def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
-    """Fetch today's news summary for a company from markdown folder.
+    """Fetch today's cached news markdown for a company from markdown folder.
     
-    Searches for: markdown/{company_name}/{YYYYMMDD}/summary.md
-    where {YYYYMMDD} is today's date.
-    Folder names follow pattern: UPPERCASE_WITH_UNDERSCORES
-    
-    Args:
-        company_name: Company name (e.g., "Tata Consultancy Services Ltd.", "Infosys Ltd")
-        
-    Returns:
-        Content of summary.md if exists, None otherwise
+    Searches for: markdown/{company_name}/{YYYYMMDD}/
+    Returns raw article markdown from up to 5 files if available.
+    Falls back to summary.md only when article files are missing.
     """
     if not company_name:
         return None
-        
-    
+
     try:
-        # Get today's date in YYYYMMDD format
         today = datetime.now().strftime("%Y%m%d")
-        
-        # Construct path to markdown folder (from server/src)
-        src_dir = Path(__file__).resolve().parents[1]  # points to src/
+        src_dir = Path(__file__).resolve().parents[1]
         markdown_base = src_dir / "markdown"
-        
-        # Convert company name to match folder naming: UPPERCASE_WITH_UNDERSCORES
-        # e.g., "Tata Consultancy Services Ltd." -> "TATA_CONSULTANCY_SERVICES_LTD"
-        safe_company_name = (
-            company_name.strip()
-            .upper()  # Convert to uppercase FIRST
-            .replace(" ", "_")  # Replace spaces with underscores
-            .replace(".", "")  # Remove periods
-            .replace("&", "AND")  # Replace & with AND
-        )
-        
-        # Path: markdown/{safe_company_name}/{today}/summary.md
-        news_path = markdown_base / safe_company_name / today / "summary.md"
-        
-        print(f"[DEBUG] Looking for markdown summary at: {news_path}")
-        
-        if news_path.exists() and news_path.is_file():
-            with open(news_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                print(f"[DEBUG] Found markdown summary for {company_name}")
-                return content
-        else:
-            print(f"[DEBUG] No markdown summary found at: {news_path}")
+        safe_company_name = _normalize_company_folder_name(company_name)
+        company_date_folder = markdown_base / safe_company_name / today
+
+        if company_date_folder.exists():
+            article_files = [
+                path for path in sorted(company_date_folder.glob("*.md"))
+                if path.name.lower() != "summary.md"
+            ][:5]
+
+            if article_files:
+                contents = []
+                for path in article_files:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        contents.append(f.read().strip())
+                return "\n\n".join(contents)
+
+            summary_path = company_date_folder / "summary.md"
+            if summary_path.exists() and summary_path.is_file():
+                with open(summary_path, 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+
     except Exception as e:
-        # Silently return None if file not found or error reading
-        print(f"[DEBUG] Error reading markdown summary for {company_name}: {str(e)}")
-        pass
-    
+        print(f"[DEBUG] Error reading markdown news for {company_name}: {str(e)}")
+
     return None
 
 
 async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_code: Optional[str] = None) -> Optional[str]:
     """
-    Fetch today's news summary from markdown folder.
-    If summary.md doesn't exist, fetch news, generate summary, and save it on-demand.
+    Fetch today's raw news markdown from the cache or scrape it on-demand.
     
-    Searches for: markdown/{company_name}/{YYYYMMDD}/summary.md
+    Searches for: markdown/{company_name}/{YYYYMMDD}/
     where {YYYYMMDD} is today's date.
-    
-    Args:
-        company_name: Company name
-        scrip_code: Optional BSE scrip code for reference
-        
-    Returns:
-        Content of summary.md if exists or newly generated, None otherwise
+    If the date folder already contains markdown files, it returns up to 5 of them.
+    Otherwise it fetches article URLs and scrapes raw markdown content to the folder.
     """
     if not company_name:
         return None
-    
+
     try:
         today = datetime.now().strftime("%Y%m%d")
         src_dir = Path(__file__).resolve().parents[1]
         markdown_base = src_dir / "markdown"
-        
-        safe_company_name = (
-            company_name.strip()
-            .upper()
-            .replace(" ", "_")
-            .replace(".", "")
-            .replace("&", "AND")
-        )
-        
-        news_path = markdown_base / safe_company_name / today / "summary.md"
-        
-        # If summary exists, return it
-        if news_path.exists() and news_path.is_file():
-            with open(news_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                print(f"[INFO] Found existing markdown summary for {company_name}")
-                return content
-        
-        print(f"[INFO] No existing summary for {company_name}, fetching news on-demand...")
-        
-        # Summary doesn't exist - fetch news and generate it
+        safe_company_name = _normalize_company_folder_name(company_name)
+        company_date_folder = markdown_base / safe_company_name / today
+
+        # If today's date folder already contains markdown article files, return them.
+        if company_date_folder.exists():
+            article_files = [
+                path for path in sorted(company_date_folder.glob("*.md"))
+                if path.name.lower() != "summary.md"
+            ][:5]
+            if article_files:
+                contents = []
+                for path in article_files:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        contents.append(f.read().strip())
+                print(f"[INFO] Using cached markdown articles for {company_name}")
+                return "\n\n".join(contents)
+
+            summary_file = company_date_folder / "summary.md"
+            if summary_file.exists() and summary_file.is_file():
+                with open(summary_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    print(f"[INFO] Using fallback cached summary for {company_name}")
+                    return content
+
+        print(f"[INFO] No cached markdown articles for {company_name}, fetching news on-demand...")
+
         try:
-            # Fetch only 2 articles for on-demand chat to keep it fast
-            news_data = NewsService.get_company_news(company_name, max_results=2, days_back=7)
-            
-            # If no articles found in last 7 days, try for last 30 days
+            news_data = NewsService.get_company_news(company_name, max_results=10, days_back=7)
             if not news_data.get("articles"):
                 print(f"[INFO] No articles found in last 7 days for {company_name}, trying last 30 days...")
-                news_data = NewsService.get_company_news(company_name, max_results=2, days_back=30)
-            
+                news_data = NewsService.get_company_news(company_name, max_results=10, days_back=30)
+
             if not news_data.get("articles"):
                 print(f"[WARN] No news articles found for {company_name} even after trying 30 days")
                 return None
-            
-            print(f"[INFO] Fetched {len(news_data['articles'])} articles, scraping...")
-            
-            articles_with_urls = [{"title": a.get("title", ""), "url": a.get("link", "")} for a in news_data["articles"]]
-            
-            # Import here to avoid circular imports
+
+            print(f"[INFO] Fetched {len(news_data['articles'])} articles, scraping raw markdown...")
+            articles_with_urls = [
+                {
+                  "title": a.get("title", ""),
+                  "url": a.get("link", ""),
+                  "published": a.get("published", "")
+                }
+                for a in news_data["articles"]
+            ]
+
             from service.news_scraper_service import NewsScraperService
-            
-            # Mock websocket for scraper
-            class MockWebSocket:
-                async def send_json(self, data: dict):
-                    pass
-            
-            mock_ws = MockWebSocket()
-            summary_folder = await NewsScraperService.scrape_and_summarize_articles(
+
+            article_folder = await NewsScraperService.scrape_articles_to_markdown(
                 company_name,
                 articles_with_urls,
-                mock_ws,
-                1
+                max_articles=5,
+                date_str=today,
             )
-            
-            summary_file = summary_folder / "summary.md"
-            if summary_file.exists():
-                with open(summary_file, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    print(f"[INFO] Generated and cached summary for {company_name}")
-                    return content
-        
+
+            if article_folder.exists():
+                article_files = [
+                    path for path in sorted(article_folder.glob("*.md"))
+                    if path.name.lower() != "summary.md"
+                ][:5]
+                if article_files:
+                    contents = []
+                    for path in article_files:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            contents.append(f.read().strip())
+                    print(f"[INFO] Scraped and cached {len(article_files)} markdown articles for {company_name}")
+                    return "\n\n".join(contents)
+
         except Exception as e:
             print(f"[WARN] Failed to fetch news on-demand for {company_name}: {str(e)}")
-        
+
         return None
-        
+
     except Exception as e:
         print(f"[ERROR] Error in _get_or_fetch_today_news_summary: {str(e)}")
         return None

@@ -11,7 +11,7 @@ import re
 import csv
 from pathlib import Path
 
-from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data, _get_today_news_summary, _get_or_fetch_today_news_summary
+from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data, _get_or_fetch_today_news_summary
 from service.news_service import NewsService
 from repository.sqlite_repository import SqliteRepository
 
@@ -845,29 +845,28 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 print(f"Processing company: {company_name}, resolved_name: {news_company_name}, scrip_code: {scrip_code}")
                 
                 if scrip_code:
-                    # Fetch from markdown summary, or generate on-demand if missing
-                    # Will fetch news and generate summary.md if it doesn't exist
+                    # Fetch from cached raw markdown articles, or scrape on-demand if missing.
                     markdown_news = await _get_or_fetch_today_news_summary(news_company_name, scrip_code)
                     
                     if markdown_news:
-                        # Include today's markdown summary
-                        print(f"Found markdown summary for {company_name}")
-                        company_news_str = f"\n### {company_name} - Today's News Summary\n"
+                        # Include today's raw markdown news content
+                        print(f"Found cached news content for {company_name}")
+                        company_news_str = f"\n### {company_name} - Today's News Content\n"
                         company_news_str += markdown_news
                         company_news_str += "\n"
                         news_context_parts.append(company_news_str)
                         news_fetch_log[company_name] = {
                             "scrip_code": scrip_code,
-                            "source": "markdown_daily_summary",
+                            "source": "markdown_daily_articles",
                             "date": datetime.now().strftime("%Y%m%d"),
                             "status": "found"
                         }
                     else:
-                        # No markdown summary for today - do not fetch from other sources
-                        print(f"No markdown summary found for {company_name} on {datetime.now().strftime('%Y%m%d')}")
+                        # No cached markdown articles for today - do not fetch from other sources
+                        print(f"No cached markdown articles found for {company_name} on {datetime.now().strftime('%Y%m%d')}")
                         news_fetch_log[company_name] = {
                             "scrip_code": scrip_code,
-                            "source": "markdown_daily_summary",
+                            "source": "markdown_daily_articles",
                             "date": datetime.now().strftime("%Y%m%d"),
                             "status": "not_found"
                         }

@@ -12,6 +12,7 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  title?: string;
   timestamp: Date;
   widget?: ChatWidget;
   progressMessages?: ProgressMessage[];

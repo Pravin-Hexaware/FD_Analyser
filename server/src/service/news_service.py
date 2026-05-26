@@ -24,9 +24,29 @@ BLACKLIST = ["youtube.com", "linkedin.com"]
 
 TRUSTED_COMPANY_DOMAINS_SUFFIXES = [".com", ".in", ".org"]
 
+COMPANY_QUERY_STRIP_RE = re.compile(r"\b(?:ltd\.?|limited|inc\.?|pvt\.?|private|private limited|pvt ltd)\b", re.IGNORECASE)
+
+def normalize_company_query(company: str) -> str:
+    normalized = COMPANY_QUERY_STRIP_RE.sub("", company or "")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized or company
+
+
 def get_company_domains(company: str) -> Set[str]:
     base = re.sub(r'[^a-z0-9]', '', company.lower())
     return {f"{base}{suffix}" for suffix in TRUSTED_COMPANY_DOMAINS_SUFFIXES}
+
+
+def get_entry_published(entry: dict) -> str:
+    published = entry.get("published") or entry.get("updated") or ""
+    if not published:
+        parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+        if parsed:
+            try:
+                published = datetime.fromtimestamp(time.mktime(parsed)).isoformat()
+            except Exception:
+                published = ""
+    return published
 
 
 def is_trusted_source_url(url: str, company_domains: set[str]) -> bool:
@@ -70,7 +90,8 @@ def fetch_news(company: str, window: str) -> List[Dict[str, Any]]:
         "acquisition", "deal", "launch",
         "layoff", "hiring", "investment"
     ])
-    query = f'"{company}" ({keywords}) when:{window}'
+    query_company = normalize_company_query(company)
+    query = f'"{query_company}" ({keywords}) when:{window}'
     rss_url = (
         f"https://news.google.com/rss/search?"
         f"q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
@@ -96,14 +117,12 @@ class NewsService:
         "fortuneindia.com",
         "newindianexpress.com",
         "economictimes.com",
+        "yahoo.finance.com",
         "businesstoday.in",
         "cnbctv18.com",
         "zeebiz.com",
         "marketsmojo.com",
-        "indianchemicalnews.com",
-        "whalesbook.com",
         "hdfcsky.com",
-        "devdiscourse.com",
         "chinimandi.com",
         "unilever.com",
         "businessworld.in",
@@ -249,7 +268,7 @@ class NewsService:
 
                 title = (entry.get("title") or "").strip()
                 raw_url = (entry.get("link") or "").strip()
-                published = entry.get("published", "")
+                published = get_entry_published(entry)
                 if not title or not raw_url:
                     continue
 
@@ -323,11 +342,12 @@ class NewsService:
         if not FEEDPARSER_AVAILABLE:
             return articles
         
+        query_company = normalize_company_query(company_name)
         if simple_query:
-            query = f'"{company_name}"'
+            query = f'"{query_company}"'
         else:
             keywords = " OR ".join(NewsService.ACTIVITY_KEYWORDS)
-            query = f'"{company_name}" ({keywords})'
+            query = f'"{query_company}" ({keywords})'
         
         encoded_query = urllib.parse.quote(query)
         
@@ -366,7 +386,7 @@ class NewsService:
                 article = {
                     "title": entry.get("title", ""),
                     "link": raw_url or "",
-                    "published": entry.get("published", ""),
+                    "published": get_entry_published(entry),
                     "summary": entry.get("summary", ""),
                     "source": "Google News",
                     "fetched_at": datetime.now().isoformat()

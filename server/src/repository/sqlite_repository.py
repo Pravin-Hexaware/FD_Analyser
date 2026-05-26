@@ -1236,3 +1236,10 @@ class SqliteRepository:
         except Exception:
             pass
 
+    def delete_companies_by_sector(self, sector: str) -> int:
+        """Deletes all company records that belong to the specified sector."""
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM company_table WHERE sector = ?", (sector,))
+        self._conn.commit()
+        return cur.rowcount
+

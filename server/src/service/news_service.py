@@ -196,35 +196,21 @@ class NewsService:
             except Exception as e:
                 print(f"[WARN] Fallback Google News failed for {company_name}: {str(e)}")
         
-        # Remove duplicates by title and filter by trusted sources
-        # Note: We need to check if URLs are Google News redirects or actual publisher URLs
+        # Remove duplicates by title (keep all sources, no trusted source filtering)
         seen_titles = set()
         unique_articles = []
         
         for article in articles:
             title = article.get("title", "").lower()
-            link = article.get("link", "")
             
             # Skip if title is duplicate
             if title and title in seen_titles:
                 continue
             
-            # Check if it's a Google News redirect URL
-            if "news.google.com" in link:
-                print(f"[DEBUG] Detected Google News redirect URL, will validate during scraping: {link}")
-                # Add the article - validation will happen during scraping when URL is resolved
-                if title:
-                    seen_titles.add(title)
-                    unique_articles.append(article)
-            else:
-                # Direct URL from non-Google source - validate trusted source here
-                if NewsService._is_trusted_source(link):
-                    if title:
-                        seen_titles.add(title)
-                        unique_articles.append(article)
-                    print(f"[DEBUG] Added article from trusted source: {link}")
-                else:
-                    print(f"[DEBUG] Filtering out article from untrusted source: {link}")
+            # Add article without checking trusted source
+            if title:
+                seen_titles.add(title)
+                unique_articles.append(article)
         
         # Limit to max_results
         unique_articles = unique_articles[:max_results]
@@ -235,8 +221,7 @@ class NewsService:
             "source": "google_news_rss",
             "company_name": company_name,
             "last_updated": datetime.now().isoformat(),
-            "date_range": f"Last {days_back} days",
-            "trusted_sources_only": True
+            "date_range": f"Last {days_back} days"
         }
     
     @staticmethod

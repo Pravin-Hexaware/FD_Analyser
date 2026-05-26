@@ -213,7 +213,12 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
 
             print(f"[INFO] Fetched {len(news_data['articles'])} articles, scraping raw markdown...")
             articles_with_urls = [
-                {"title": a.get("title", ""), "url": a.get("link", "")} for a in news_data["articles"]
+                {
+                  "title": a.get("title", ""),
+                  "url": a.get("link", ""),
+                  "published": a.get("published", "")
+                }
+                for a in news_data["articles"]
             ]
 
             from service.news_scraper_service import NewsScraperService

@@ -36,10 +36,10 @@ const stageSubsteps: Record<string, string[]> = {
 };
 
 const stageDurations: Record<string, number> = {
-  "Extracting user intent": 634,
-  "Identifying the companies": 856,
+  "Extracting user intent": 1500,
+  "Identifying the companies": 1200,
   "Fetching relevant data": 1245,
-  "Collecting the latest news": 1523,
+  "Collecting the latest news": 3000,
   "Generating the response": 2045
 };
 
@@ -60,7 +60,7 @@ export function ProgressMessages({ messages, isLoading = false }: ProgressMessag
         }
         return prev;
       });
-    }, 10000); // 10 seconds
+    }, 30000); // 10 seconds
 
     return () => clearInterval(interval);
   }, [isLoading]);
@@ -87,7 +87,7 @@ export function ProgressMessages({ messages, isLoading = false }: ProgressMessag
         }
         return prev;
       });
-    }, 30000); // 30 seconds per substep
+    }, 10000); // 30 seconds per substep
 
     return () => clearInterval(substepInterval);
   }, [isLoading, currentStepIndex]);

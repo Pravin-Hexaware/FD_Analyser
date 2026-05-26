@@ -2,10 +2,11 @@ import { useState, useRef, useEffect, type KeyboardEvent } from "react";
 import { useLocation } from "react-router-dom";
 import {
   Send, Plus, MessageSquare,
-  Settings, Home, Search, Sparkles, Bot,
+  Settings, Home, Sparkles, Bot,
   TrendingUp, Building2, FileText
 } from "lucide-react";
 import { ChatMessage } from "../components/ChatMessage";
+import { CompactProgressCard } from "../components/CompactProgressCard";
 import { Sidebar } from "../../components/Sidebar";
 import { useSidebarContext } from "../../context/SidebarContext";
 import type { ChatMessage as ChatMessageType } from "../data/chatbot";
@@ -28,21 +29,6 @@ const suggestions = [
   { icon: FileText, text: "Compare HDFC and Reliance", color: "rose" },
 ];
 
-function TypingIndicator() {
-  return (
-    <div className="flex gap-3 items-start">
-      <div className="size-8 rounded-lg bg-indigo-600 flex items-center justify-center flex-shrink-0 shadow-sm shadow-indigo-200">
-        <Bot className="size-4 text-white" />
-      </div>
-      <div className="flex items-center gap-1.5 px-4 py-3 bg-white border border-gray-100 rounded-2xl rounded-tl-sm shadow-sm">
-        <div className="size-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: "0ms" }} />
-        <div className="size-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: "150ms" }} />
-        <div className="size-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: "300ms" }} />
-      </div>
-    </div>
-  );
-}
-
 export default function ChatbotPage() {
   const location = useLocation();
   const { isCollapsed } = useSidebarContext();
@@ -50,12 +36,13 @@ export default function ChatbotPage() {
     {
       id: "welcome",
       role: "assistant",
-      content: "Hello! I'm **FinBot**, your AI-powered financial analysis assistant.\n\nI can help you with:\n• Company financials, KPIs & trends\n• Multi-company comparisons\n• AI-generated investment reports\n• XBRL data analysis\n\nTry asking: *\"Show financials for Reliance\"* or *\"Compare TCS and Infosys\"*",
+      content: "Hello! I'm **FinBot**, your AI-powered financial analysis assistant.\n\nI can help you with:\n• Company financials, KPIs & trends\n• Multi-company comparisons\n• AI-generated investment reports\n• Financial data analysis\n\nTry asking: *\"Show financials for Reliance\"* or *\"Compare TCS and Infosys\"*",
       timestamp: new Date(),
     }
   ]);
   const [inputValue, setInputValue] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [isResponseComplete, setIsResponseComplete] = useState(false);
   const [currentChatId, setCurrentChatId] = useState<number | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -88,6 +75,7 @@ export default function ChatbotPage() {
       }));
 
       setMessages(loadedMessages);
+      setIsResponseComplete(false);
     } catch (error) {
       console.warn("Failed to load chat:", error);
     }
@@ -110,11 +98,13 @@ export default function ChatbotPage() {
     setMessages(prev => [...prev, userMessage]);
     setInputValue("");
     setIsTyping(true);
+    setIsResponseComplete(false);
 
     // Call the async function to process the query
     processChatQuery(text, companies, currentChatId ?? undefined)
       .then((response) => {
         setIsTyping(false);
+        setIsResponseComplete(true);
         setMessages(prev => [...prev, response.message]);
         if (response.conversationId) {
           setCurrentChatId(response.conversationId);
@@ -124,6 +114,7 @@ export default function ChatbotPage() {
       .catch(error => {
         console.error("Error processing chat query:", error);
         setIsTyping(false);
+        setIsResponseComplete(true);
         // Don't show error message, just log the error
       });
   };
@@ -146,6 +137,7 @@ export default function ChatbotPage() {
       }
     ]);
     setInputValue("");
+    setIsResponseComplete(false);
   };
 
   const formatToIST = (value: string) => {
@@ -248,7 +240,12 @@ export default function ChatbotPage() {
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} />
             ))}
-            {isTyping && <TypingIndicator />}
+            {isTyping && !isResponseComplete && (
+              <CompactProgressCard 
+                isLoading={isTyping} 
+                isResponseComplete={isResponseComplete}
+              />
+            )}
 
             {messages.length === 1 && !isTyping && (
               <div className="px-6 pb-4">

@@ -16,9 +16,18 @@ export interface LLMQueryRequest {
   conversation_id?: number;
 }
 
+export interface ProgressMessage {
+  stage: string;
+  timestamp: string;
+}
+
 export interface LLMQueryResponse {
   chat_id: string;
   answer: string;
+  tokens_used: Record<string, number>;
+  progress_messages: ProgressMessage[];
+  invalid_companies?: string[];
+  background_note?: string;
 }
 
 export interface ChatHistoryItem {

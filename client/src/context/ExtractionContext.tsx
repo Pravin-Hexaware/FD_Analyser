@@ -123,7 +123,7 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
   const startXbrlExtraction = useCallback(async () => {
     setIsCollecting(true);
     clearLiveLog();
-    addLiveLog("Initializing XBRL fetch pipeline...");
+    addLiveLog("Initializing Data fetch pipeline...");
 
     try {
       const ws = await connectWebSocket("fetch");

@@ -15,140 +15,77 @@ import urllib3
 from googlenewsdecoder import gnewsdecoder
 
 from service.analysis_service import _get_llm
-from service.news_service import NewsService
+from service.news_service import NewsService, get_company_domains, is_trusted_source_url, BLACKLIST
 from langchain_core.messages import HumanMessage
- 
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
- 
- 
+
+
 def safe_filename(value: str) -> str:
     """Convert string to safe filename."""
     return re.sub(r"[^a-zA-Z0-9_-]", "_", value) or "article"
- 
- 
+
+
 def _get_page_html(url: str) -> str:
-    """Fetch HTML from URL with proper headers and SSL fallback."""
     parsed = urlparse(url)
     origin = f"{parsed.scheme}://{parsed.netloc}/"
-    
-    # Enhanced headers to handle paywalled sites like Reuters
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.91 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,en-GB;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": origin,
+        "Connection": "keep-alive"
     }
-    
-    # Add domain-specific headers for sites that block scrapers
-    domain = parsed.netloc.lower()
-    if "reuters.com" in domain:
-        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        headers["Cache-Control"] = "no-cache"
-    elif "bloomberg.com" in domain:
-        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-        response.raise_for_status()
-        return response.text
-    except requests.exceptions.HTTPError as e:
-        # Try with SSL verification disabled for blocked sites
-        if e.response.status_code in [401, 403, 503]:
-            try:
-                response = requests.get(url, headers=headers, timeout=30, verify=False, allow_redirects=True)
-                response.raise_for_status()
-                return response.text
-            except Exception:
-                pass
-        raise
-    except requests.exceptions.SSLError:
-        response = requests.get(url, headers=headers, timeout=30, verify=False, allow_redirects=True)
-        response.raise_for_status()
-        return response.text
+
+    url = url.replace("m.economictimes.com", "economictimes.indiatimes.com")
+
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=30,
+        verify=False,
+        allow_redirects=True
+    )
+
+    response.raise_for_status()
+    return response.text
  
  
 def _extract_markdown_trafilatura(html: str, page_url: str) -> Optional[str]:
-    """Extract markdown using trafilatura (primary extraction method)."""
     text = trafilatura.extract(
         html,
         url=page_url,
         output_format="markdown",
-        favor_precision=True,
-        include_comments=False,
-        include_tables=True,
-        include_images=True,
-        include_formatting=True,
-        include_links=True,
-        deduplicate=True,
+        favor_precision=True
     )
-    if text:
-        text = text.strip()
-    if text and len(text) >= 80:
-        return text
-    return None
+    return text.strip() if text else None
  
  
-def _pick_content_root(soup: BeautifulSoup) -> Optional[BeautifulSoup]:
-    """Find the main article content root element."""
-    candidates = []
-    selectors = (
-        '[itemprop="articleBody"]',
+def _extract_markdown_from_pruned_soup(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "noscript", "iframe", "header", "footer"]):
+        tag.decompose()
+
+    selectors = [
         "article",
-        ".article-content",
-        ".article__content",
         ".article-body",
-        ".article__body",
         ".story-content",
         ".post-content",
-        ".story-body",
-        "#article-body",
-        '[role="main"]',
-        "main",
-    )
+        "main"
+    ]
+
     for sel in selectors:
-        if sel in ("article", "main"):
-            found = soup.find(sel)
-            nodes = [found] if found else []
-        else:
-            nodes = soup.select(sel)
-        for node in nodes:
-            text_len = len(node.get_text(strip=True))
-            if text_len > 200:
-                candidates.append((text_len, node))
-    if candidates:
-        return max(candidates, key=lambda x: x[0])[1]
-    return (
-        soup.find("article")
-        or soup.body
-        or soup.find("main")
-        or (soup.html if soup.html else None)
-    )
- 
- 
-def _extract_markdown_from_pruned_soup(soup: BeautifulSoup) -> str:
-    """Fallback extraction: use BeautifulSoup and markdownify."""
-    content_root = _pick_content_root(soup)
-    if not content_root:
-        raise ValueError("No readable content found")
-   
-    # Remove noise tags
-    for tag in content_root(["script", "style", "noscript", "iframe", "header", "footer", "nav"]):
-        tag.decompose()
-   
-    markdown_body = md(str(content_root), heading_style="ATX")
-    return markdown_body.strip()
+        node = soup.select_one(sel)
+        if node:
+            return md(str(node))
+
+    paragraphs = soup.find_all("p")
+    return "\n".join(p.get_text() for p in paragraphs)
  
  
 def _resolve_publisher_url(google_or_any_url: str, decode_interval: Optional[int] = 1) -> str:
-    """Resolve Google News redirect URLs to actual publisher URLs."""
     netloc = (urlparse(google_or_any_url).netloc or "").lower()
     if "news.google.com" in netloc:
         if decode_interval:
@@ -160,31 +97,25 @@ def _resolve_publisher_url(google_or_any_url: str, decode_interval: Optional[int
     return google_or_any_url
  
  
-def _scrape_url_to_markdown(publisher_url: str, title: str, company: str) -> str:
-    """Scrape article from URL and convert to markdown."""
+def _scrape_url_to_markdown(publisher_url: str, title: str, company: str, published: str) -> str:
     html = _get_page_html(publisher_url)
-   
-    # Try trafilatura first
-    markdown_body = _extract_markdown_trafilatura(html, publisher_url)
-    if not markdown_body:
-        # Fallback to BeautifulSoup
-        soup = BeautifulSoup(html, "html.parser")
-        markdown_body = _extract_markdown_from_pruned_soup(soup)
-   
-    if len(markdown_body) < 80:
-        raise ValueError("Extracted content too short; page may require JavaScript")
-   
-    header = f"""# {title}
- 
-**Company:** {company}  
-**Source URL:** {publisher_url}  
-**Fetched At:** {datetime.now().isoformat()}
- 
+
+    content = _extract_markdown_trafilatura(html, publisher_url)
+
+    if not content:
+        content = _extract_markdown_from_pruned_soup(html)
+
+    return f"""# {title}
+
+Company: {company}
+Published: {published}
+Source: {publisher_url}
+Fetched: {datetime.now().isoformat()}
+
 ---
- 
+
+{content}
 """
-   
-    return header + markdown_body
  
  
 def _article_markdown_path(company_folder: Path, article_idx: int, title: str, publisher_url: str) -> Path:
@@ -199,26 +130,129 @@ def _article_markdown_path(company_folder: Path, article_idx: int, title: str, p
     return company_folder / f"{stem}.md"
  
  
+def _get_company_date_folder_path(company_name: str, date_str: Optional[str] = None) -> Path:
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y%m%d")
+    base_dir = Path(__file__).resolve().parents[1]  # server/src
+    markdown_dir = base_dir / "markdown"
+    return markdown_dir / safe_filename(company_name).upper() / date_str
+ 
+ 
+def _load_markdown_article_files(company_date_folder: Path, max_articles: int = 5) -> List[Path]:
+    if not company_date_folder.exists():
+        return []
+    article_files = [
+        path for path in sorted(company_date_folder.glob("*.md"))
+        if path.name.lower() != "summary.md"
+    ]
+    return article_files[:max_articles]
+ 
+ 
+def _load_markdown_contents_from_files(article_files: List[Path]) -> Optional[str]:
+    if not article_files:
+        return None
+    contents = []
+    for path in article_files:
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                contents.append(f"---\nFile: {path.name}\n---\n{text}")
+        except Exception:
+            continue
+    return "\n\n".join(contents) if contents else None
+ 
+ 
 def _fetch_and_markdown_one_article(
-    company_name: str, title: str, raw_url: str, decode_interval: int = 1
+    company_name: str,
+    title: str,
+    raw_url: str,
+    published: str = "",
+    decode_interval: int = 1,
 ) -> Tuple[str, str]:
     """
     Resolve Google News redirect URLs to the publisher page, then extract markdown.
     Validates that the URL is from a trusted source.
     Returns (publisher_url, markdown_document).
     """
-    publisher_url = _resolve_publisher_url(raw_url, decode_interval=decode_interval)
-    
-    # Validate the publisher URL is from a trusted source
-    if not NewsService._is_trusted_source(publisher_url):
+    publisher_url = _resolve_publisher_url(raw_url)
+
+    if any(bad in publisher_url for bad in BLACKLIST):
+        raise ValueError(f"Publisher URL {publisher_url} is blacklisted")
+
+    if not is_trusted_source_url(
+        publisher_url, get_company_domains(company_name)
+    ):
         raise ValueError(f"Publisher URL {publisher_url} is not from a trusted news source")
-    
-    body = _scrape_url_to_markdown(publisher_url, title, company_name)
+
+    body = _scrape_url_to_markdown(
+        publisher_url,
+        title,
+        company_name,
+        published,
+    )
     return publisher_url, body
  
  
 class NewsScraperService:
     """Service to scrape articles and create summaries."""
+ 
+    @staticmethod
+    async def scrape_articles_to_markdown(
+        company_name: str,
+        articles: List[dict],
+        max_articles: int = 5,
+        date_str: Optional[str] = None,
+    ) -> Path:
+        """Scrape up to max_articles and save them as markdown in the date folder."""
+        company_date_folder = _get_company_date_folder_path(company_name, date_str)
+        company_date_folder.mkdir(parents=True, exist_ok=True)
+ 
+        successful_count = 0
+        for article_idx, article in enumerate(articles, start=1):
+            if successful_count >= max_articles:
+                break
+ 
+            title = article.get("title", "Untitled")
+            url = article.get("url", "")
+            try:
+                if not url or not url.strip():
+                    raise ValueError("Empty article URL from RSS")
+ 
+                publisher_url, markdown_content = await asyncio.to_thread(
+                    _fetch_and_markdown_one_article,
+                    company_name,
+                    title,
+                    url.strip(),
+                    article.get("published", ""),
+                    1,
+                )
+
+                file_path = _article_markdown_path(
+                    company_date_folder,
+                    successful_count + 1,
+                    title,
+                    publisher_url,
+                )
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(markdown_content)
+ 
+                successful_count += 1
+            except Exception as e:
+                # Ignore individual article failures for runtime scraping.
+                print(f"[WARN] Skipping article for {company_name}: {str(e)}")
+                continue
+ 
+        return company_date_folder
+ 
+    @staticmethod
+    def load_markdown_contents(
+        company_name: str,
+        date_str: Optional[str] = None,
+        max_articles: int = 5,
+    ) -> Optional[str]:
+        company_date_folder = _get_company_date_folder_path(company_name, date_str)
+        article_files = _load_markdown_article_files(company_date_folder, max_articles=max_articles)
+        return _load_markdown_contents_from_files(article_files)
  
     @staticmethod
     async def scrape_and_summarize_articles(
@@ -242,7 +276,7 @@ class NewsScraperService:
         today = datetime.now().strftime("%Y%m%d")
         base_dir = Path(__file__).resolve().parents[1]  # server/src
         markdown_dir = base_dir / "markdown"
-        company_date_folder = markdown_dir / f"{safe_filename(company_name).upper()}"
+        company_date_folder = markdown_dir / f"{safe_filename(company_name).upper()}" / today
         company_date_folder.mkdir(parents=True, exist_ok=True)
  
         markdown_files = []
@@ -274,6 +308,7 @@ class NewsScraperService:
                     company_name,
                     title,
                     url.strip(),
+                    article.get("published", ""),
                     1,
                 )
 

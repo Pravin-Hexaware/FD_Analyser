@@ -45,10 +45,44 @@ def is_html_root(root: ET._Element) -> bool:
     """True if the root looks like HTML/XHTML (iXBRL container)."""
     return localname(root.tag).lower() in {"html", "xhtml"}
 
+def strip_pre_xml_content(data: bytes) -> bytes:
+    """
+    Strip HTML comments, text, and other non-XML content that appears
+    before the actual XML/XHTML root element.
+    
+    This handles cases where XML files have content like:
+    - "This XML file does not appear to have any style information..."
+    - HTML comments
+    - Other text nodes
+    
+    before the actual root element (e.g., <xbrli:xbrl> or <html>).
+    """
+    try:
+        # Find the first '<' character which marks the start of XML/markup
+        text = data.decode("utf-8", errors="ignore")
+        first_bracket = text.find("<")
+        
+        if first_bracket > 0:
+            # Strip everything before the first '<'
+            cleaned = text[first_bracket:].encode("utf-8")
+            return cleaned
+        elif first_bracket == 0:
+            # Already starts with '<', no stripping needed
+            return data
+        else:
+            # No '<' found, return original data
+            return data
+    except Exception:
+        # If any error occurs, return original data
+        return data
+
+
 def parse_xml_bytes(data: bytes) -> ET._ElementTree:
     """Parse bytes into an XML tree allowing recovery for messy iXBRL."""
+    # Strip any pre-XML content (HTML comments, text nodes, etc.)
+    cleaned_data = strip_pre_xml_content(data)
     parser = ET.XMLParser(recover=True, huge_tree=True)
-    return ET.parse(io.BytesIO(data), parser=parser)
+    return ET.parse(io.BytesIO(cleaned_data), parser=parser)
 
 def extract_xbrl_subtree_from_html(root: ET._Element) -> ET._Element:
     """
@@ -175,10 +209,15 @@ def extract_xbrl_data_from_bytes(content: bytes, only_prefix: Optional[str] = No
     """Extract XBRL data from raw XML bytes."""
     tree = load_tree_from_bytes(content)
     xbrl_root = get_xbrl_root(tree)
-    return walk_collect(xbrl_root, only_prefix)
+    extracted = walk_collect(xbrl_root, only_prefix)
+    if only_prefix is not None and not extracted:
+        # Fallback: if prefix filtering yields nothing, retry without prefix filtering.
+        extracted = walk_collect(xbrl_root, None)
+    return extracted
 
 
 def extract_xbrl_data(url: str, only_prefix: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
+
     """Extract XBRL data from a URL."""
     try:
         headers = {

@@ -308,7 +308,7 @@ async def get_first_xbrl_url(page) -> Optional[str]:
             open_url = extract_window_open_url(onclick)
             if open_url:
                 url = await resolve_absolute_url(page, open_url)
-                print(f"[OK] Extracted XBRL link from onclick: {url}")
+                print(f"[OK] Extracted Data from onclick: {url}")
                 return url
 
             # Case 2: popup
@@ -326,7 +326,7 @@ async def get_first_xbrl_url(page) -> Optional[str]:
                 except Exception:
                     pass
                 if url and not url.startswith(("about:", "javascript:")):
-                    print(f"[OK] Captured XBRL from popup: {url}")
+                    print(f"[OK] Captured Data from popup: {url}")
                     return url
             except Exception:
                 if href and not href_l.startswith("javascript:"):

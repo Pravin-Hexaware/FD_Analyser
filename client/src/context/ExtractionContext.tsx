@@ -44,6 +44,8 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
   });
 
   const wsRef = useRef<WebSocket | null>(null);
+  const extractionBufferRef = useRef<string[]>([]);
+  const extractionBatchTimerRef = useRef<number | null>(null);
   const onCompanyExtractedRef = useRef<((company: any) => void) | undefined>(undefined);
 
   const setOnCompanyExtracted = useCallback((callback: (company: any) => void) => {
@@ -60,22 +62,48 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
     localStorage.setItem("adminLogs", JSON.stringify(newLogs));
   }, []);
 
-  const addLiveLog = useCallback((text: string) => {
-    const newLine = `[${new Date().toLocaleTimeString()}] ${text}`;
+  const formatLogLine = useCallback((text: string) => {
+    return `[${new Date().toLocaleTimeString()}] ${text}`;
+  }, []);
+
+  const addLiveLogBatch = useCallback((lines: string[]) => {
     setLiveLog((prev) => {
-      const updated = [...prev, newLine];
-      persistLiveLog(updated);
-      return updated;
+      const updated = [...prev, ...lines];
+      const trimmed = updated.slice(-300);
+      persistLiveLog(trimmed);
+      return trimmed;
     });
   }, [persistLiveLog]);
 
+  const addLiveLog = useCallback((text: string) => {
+    const newLine = formatLogLine(text);
+    setLiveLog((prev) => {
+      const updated = [...prev, newLine].slice(-300);
+      persistLiveLog(updated);
+      return updated;
+    });
+  }, [formatLogLine, persistLiveLog]);
+
+  const addBufferedLiveLog = useCallback((text: string) => {
+    extractionBufferRef.current.push(formatLogLine(text));
+  }, [formatLogLine]);
+
   const addLog = useCallback((log: any) => {
     setLogs((prev) => {
-      const updated = [log, ...prev];
+      const updated = [log, ...prev].slice(0, 200);
       persistLogs(updated);
       return updated;
     });
   }, [persistLogs]);
+
+  const flushExtractionBuffer = useCallback(() => {
+    const buffered = extractionBufferRef.current;
+    if (!buffered.length) {
+      return;
+    }
+    addLiveLogBatch(buffered);
+    extractionBufferRef.current = [];
+  }, [addLiveLogBatch]);
 
   const clearLiveLog = useCallback(() => {
     setLiveLog([]);
@@ -123,7 +151,7 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
   const startXbrlExtraction = useCallback(async () => {
     setIsCollecting(true);
     clearLiveLog();
-    addLiveLog("Initializing XBRL fetch pipeline...");
+    addLiveLog("Initializing Data fetch pipeline...");
 
     try {
       const ws = await connectWebSocket("fetch");
@@ -201,6 +229,15 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
     clearLiveLog();
     addLiveLog("Initializing data extraction pipeline...");
 
+    if (extractionBatchTimerRef.current) {
+      window.clearInterval(extractionBatchTimerRef.current);
+      extractionBatchTimerRef.current = null;
+    }
+    extractionBufferRef.current = [];
+    extractionBatchTimerRef.current = window.setInterval(() => {
+      flushExtractionBuffer();
+    }, 15000);
+
     try {
       const ws = await connectWebSocket("extract");
       wsRef.current = ws;
@@ -209,15 +246,14 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
         const data = JSON.parse(event.data);
 
         if (data.status === "starting") {
-          addLiveLog("Data extraction started...");
+          addBufferedLiveLog("Data extraction started...");
         } else if (data.status === "found_filings") {
-          addLiveLog(`✓ Found ${data.count} XBRL filings in database`);
+          addBufferedLiveLog(`✓ Found ${data.count} XBRL filings in database`);
         } else if (data.status === "processing") {
-          addLiveLog(`→ Processing ${data.scrip_code} (${data.report_type})`);
+          addBufferedLiveLog(`→ Processing ${data.scrip_code} (${data.report_type})`);
         } else if (data.status === "stored") {
-          addLiveLog(`✓ ${data.scrip_code} data stored (${data.report_type})`);
+          addBufferedLiveLog(`✓ ${data.scrip_code} data stored (${data.report_type})`);
           
-          // Add individual company to Recent Runs
           const companyLog = {
             id: String(Date.now() + Math.random()),
             company: `${data.scrip_code}`,
@@ -228,11 +264,10 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
           };
           addLog(companyLog);
         } else if (data.status === "skipped_already_extracted") {
-          addLiveLog(`⊘ ${data.scrip_code} already extracted, skipped`);
+          addBufferedLiveLog(`⊘ ${data.scrip_code} already extracted, skipped`);
         } else if (data.status === "extracted") {
-          addLiveLog(`✓ Data extracted and stored: ${data.scrip_code}`);
+          addBufferedLiveLog(`✓ Data extracted and stored: ${data.scrip_code}`);
           
-          // Add individual company to Recent Runs
           const companyLog = {
             id: String(Date.now() + Math.random()),
             company: `${data.scrip_code}`,
@@ -243,11 +278,11 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
           };
           addLog(companyLog);
           
-          // Trigger callback to add company to master list
           if (onCompanyExtractedRef.current && data.company_data) {
             onCompanyExtractedRef.current(data.company_data);
           }
         } else if (data.status === "complete") {
+          flushExtractionBuffer();
           addLiveLog("✓ Data extraction complete!");
           setIsExtractingData(false);
 
@@ -262,27 +297,42 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
           addLog(newLog);
           ws.close();
           wsRef.current = null;
+          if (extractionBatchTimerRef.current) {
+            window.clearInterval(extractionBatchTimerRef.current);
+            extractionBatchTimerRef.current = null;
+          }
         } else if (data.error) {
+          flushExtractionBuffer();
           addLiveLog(`✗ Error: ${data.error}`);
         }
       };
 
       ws.onerror = () => {
         setIsExtractingData(false);
+        flushExtractionBuffer();
         addLiveLog("✗ WebSocket connection error");
       };
 
       ws.onclose = () => {
         if (isExtractingData) {
+          flushExtractionBuffer();
           addLiveLog("⟳ Connection closed (extraction may still be running on server)");
+        }
+        if (extractionBatchTimerRef.current) {
+          window.clearInterval(extractionBatchTimerRef.current);
+          extractionBatchTimerRef.current = null;
         }
       };
     } catch (error) {
       setIsExtractingData(false);
+      if (extractionBatchTimerRef.current) {
+        window.clearInterval(extractionBatchTimerRef.current);
+        extractionBatchTimerRef.current = null;
+      }
       const errorMsg = error instanceof Error ? error.message : String(error);
       addLiveLog(`✗ Failed to connect: ${errorMsg}`);
     }
-  }, [connectWebSocket, addLiveLog, clearLiveLog, logs.length, addLog, isExtractingData]);
+  }, [connectWebSocket, addLiveLog, clearLiveLog, logs.length, addLog, isExtractingData, formatLogLine, flushExtractionBuffer]);
 
   const startNewsCollection = useCallback(async () => {
     setIsCollectingNews(true);
@@ -382,11 +432,16 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
-      addLiveLog("✓ Extraction stopped by user");
-      setIsCollecting(false);
-      setIsExtractingData(false);
-      setIsCollectingNews(false);
     }
+    if (extractionBatchTimerRef.current) {
+      window.clearInterval(extractionBatchTimerRef.current);
+      extractionBatchTimerRef.current = null;
+    }
+    extractionBufferRef.current = [];
+    addLiveLog("✓ Extraction stopped by user");
+    setIsCollecting(false);
+    setIsExtractingData(false);
+    setIsCollectingNews(false);
   }, [addLiveLog]);
 
   return (

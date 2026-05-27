@@ -5,7 +5,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001/api'
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 120000, // Increased to 2 minutes for long LLM processing
+  timeout: 240000, // Increased to 2 minutes for long LLM processing
   headers: {
     'Content-Type': 'application/json',
   },
@@ -16,9 +16,18 @@ export interface LLMQueryRequest {
   conversation_id?: number;
 }
 
+export interface ProgressMessage {
+  stage: string;
+  timestamp: string;
+}
+
 export interface LLMQueryResponse {
   chat_id: string;
   answer: string;
+  tokens_used: Record<string, number>;
+  progress_messages: ProgressMessage[];
+  invalid_companies?: string[];
+  background_note?: string;
 }
 
 export interface ChatHistoryItem {

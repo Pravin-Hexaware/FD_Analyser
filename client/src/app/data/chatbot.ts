@@ -2,6 +2,12 @@
 import type { CompanyData } from "./companies";
 import { companies } from "./companies";
 import { sendLLMQuery } from "../services/api";
+
+export interface ProgressMessage {
+  stage: string;
+  timestamp: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -9,6 +15,7 @@ export interface ChatMessage {
   title?: string;
   timestamp: Date;
   widget?: ChatWidget;
+  progressMessages?: ProgressMessage[];
 }
  
 export type ChatWidget =
@@ -161,6 +168,7 @@ export async function processChatQuery(query: string, companiesList: CompanyData
       role: "assistant",
       content: response.answer,
       timestamp: new Date(),
+      progressMessages: response.progress_messages,
     },
     conversationId: Number(response.chat_id),
   };

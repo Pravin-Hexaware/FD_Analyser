@@ -305,6 +305,22 @@ class ConversationResponse(BaseModel):
     messages: List[ChatMessageResponse]
 
 
+class ProgressMessage(BaseModel):
+    """Progress update message during query processing."""
+    stage: str  # e.g., "Extracting user intent", "Fetching relevant data", etc.
+    timestamp: str
+
+
+class LLMTargetCompaniesResponse(BaseModel):
+    """Response with progress messages and final answer."""
+    chat_id: str
+    answer: str
+    tokens_used: Dict[str, int]
+    progress_messages: List[ProgressMessage]
+    invalid_companies: Optional[List[str]] = None
+    background_note: Optional[str] = None
+
+
 def _determine_frequency(statement_frequency: str, statement_type: str, period: str) -> str:
     """Determine the frequency: annual or quarterly."""
     sf = (statement_frequency or "").strip().lower()
@@ -512,11 +528,14 @@ def _fetch_company_data(
     return results if len(results) > 1 else results[0]
 
 
-@router.post("/llm/target_companies", response_model=Dict[str, Any])
+@router.post("/llm/target_companies", response_model=LLMTargetCompaniesResponse)
 async def llm_target_companies(request: LLMQueryRequest, background_tasks: BackgroundTasks):
     """Parse user query, fetch data, and generate answer with Azure LLM."""
     try:
         repo = SqliteRepository()
+        
+        # Initialize progress messages list
+        progress_messages: List[Dict[str, str]] = []
 
         # Create or validate conversation
         if request.conversation_id is None:
@@ -543,6 +562,11 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Step 1: Parse user query
         print("Step 1: Parsing user query with NLP (no LLM)")
+        progress_messages.append({
+            "stage": "Extracting user intent",
+            "timestamp": datetime.now().isoformat()
+        })
+        
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(request.query)
         print("1st NLP extraction returned:", parsed)
 
@@ -580,6 +604,12 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             if not validation_results[company_name]["valid"]:
                 invalid_companies.append(company_name)
 
+        # Add progress message for company identification
+        progress_messages.append({
+            "stage": "Identifying the companies",
+            "timestamp": datetime.now().isoformat()
+        })
+
         if invalid_companies:
             repo.save_detailed_log(
                 chat_id=chat_id,
@@ -601,10 +631,16 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 "answer": answer,
                 "invalid_companies": invalid_companies,
                 "tokens_used": {},
+                "progress_messages": progress_messages,
             }
 
         # Step 2: Fetch data for target companies and peers
         print("Step 2: Fetching data for target companies" + (" + peers" if get_peer else ""))
+        progress_messages.append({
+            "stage": "Fetching relevant data",
+            "timestamp": datetime.now().isoformat()
+        })
+        
         all_data = {}
         tracked_missing = set()
 
@@ -713,7 +749,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         if not has_data:
             # No data available, return message without calling LLM
-            answer = "Company data for the specified period was unavailable. Please try some other company or period."
+            answer = "Company data for the selected period is temporarily unavailable, possibly due to processing delays. Please try again after 10 minutes."
             tokens_used = {}
             final_llm_response = answer
             final_llm_prompt = ""
@@ -757,6 +793,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 "chat_id": chat_id,
                 "answer": answer,
                 "tokens_used": tokens_used,
+                "progress_messages": progress_messages,
             }
             if background_note:
                 response["background_note"] = background_note
@@ -765,6 +802,10 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Step 3: Generate answer using LLM (with data fetched and company names resolved via NLP)
         print("Step 3: Fetching news context for companies")
+        progress_messages.append({
+            "stage": "Collecting news feeds",
+            "timestamp": datetime.now().isoformat()
+        })
         
         # Fetch news for ALL validated companies (not just those with data in all_data)
         news_context_parts = []
@@ -859,7 +900,11 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             output_data=json.dumps(news_fetch_log)
         )
 
-        print("Step 3: Generating answer with LLM")
+        print("Step 4: Generating answer with LLM")
+        progress_messages.append({
+            "stage": "Generating response",
+            "timestamp": datetime.now().isoformat()
+        })
 
         # Prepare the EXACT data being sent to LLM
         system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided financial data.
@@ -922,7 +967,8 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         return {
             "chat_id": chat_id,
             "answer": answer,
-            "tokens_used": tokens_used
+            "tokens_used": tokens_used,
+            "progress_messages": progress_messages,
         }
 
     except HTTPException:
@@ -1161,5 +1207,19 @@ async def test_news_fetch(company_name: str):
         print(f"Error in test_news_fetch: {str(e)}")
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/llm/delete-unknown-sector-companies")
+async def delete_unknown_sector_companies():
+    """Deletes all company records from the database where the sector is 'Unknown Sector'
+    """
+    try:
+        repo = SqliteRepository()
+        deleted_count = repo.delete_companies_by_sector("")
+        repo.close()
+        return {"message": f"Successfully deleted {deleted_count} companies with 'Unknown Sector'."}
+    except Exception as e:
+        print("Error deleting unknown sector companies:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 

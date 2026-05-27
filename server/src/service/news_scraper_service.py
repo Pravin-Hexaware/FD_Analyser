@@ -200,7 +200,7 @@ class NewsScraperService:
     async def scrape_articles_to_markdown(
         company_name: str,
         articles: List[dict],
-        max_articles: int = 5,
+        max_articles: int = 3,
         date_str: Optional[str] = None,
     ) -> Path:
         """Scrape up to max_articles and save them as markdown in the date folder."""
@@ -248,7 +248,7 @@ class NewsScraperService:
     def load_markdown_contents(
         company_name: str,
         date_str: Optional[str] = None,
-        max_articles: int = 5,
+        max_articles: int = 3,
     ) -> Optional[str]:
         company_date_folder = _get_company_date_folder_path(company_name, date_str)
         article_files = _load_markdown_article_files(company_date_folder, max_articles=max_articles)
@@ -282,8 +282,8 @@ class NewsScraperService:
         markdown_files = []
         all_content = ""
         
-        # Limit to 10 successfully scraped articles (trusted sources only)
-        max_successful_articles = 10
+        # Limit to 3 successfully scraped articles (trusted sources only)
+        max_successful_articles = 3
         successful_count = 0
 
         for article_idx, article in enumerate(articles, start=1):
@@ -331,7 +331,7 @@ class NewsScraperService:
                     "status": "saved"
                 })
 
-                # Stop after 10 successful scrapes (trusted source articles)
+                # Stop after 3 successful scrapes (trusted source articles)
                 if successful_count >= max_successful_articles:
                     await websocket.send_json({
                         "idx": idx,

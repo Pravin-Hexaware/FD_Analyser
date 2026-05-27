@@ -49,6 +49,29 @@ def get_entry_published(entry: dict) -> str:
     return published
 
 
+def parse_entry_published_datetime(entry: dict) -> Optional[datetime]:
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        try:
+            return datetime.fromtimestamp(time.mktime(parsed))
+        except Exception:
+            return None
+    return None
+
+
+def is_within_window(published_dt: Optional[datetime], window: str) -> bool:
+    if not published_dt:
+        return False
+    age = datetime.now() - published_dt
+    if window == "1d":
+        return age <= timedelta(days=1)
+    if window == "7d":
+        return age <= timedelta(days=7)
+    if window == "30d":
+        return age <= timedelta(days=30)
+    return True
+
+
 def is_trusted_source_url(url: str, company_domains: set[str]) -> bool:
     if not url:
         return False
@@ -84,6 +107,13 @@ def resolve_url(url: str) -> str:
     return url
 
 
+def get_domain_from_url(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower().replace("www.", "")
+    except Exception:
+        return ""
+
+
 def fetch_news(company: str, window: str) -> List[Dict[str, Any]]:
     keywords = " OR ".join([
         "earnings", "profit", "revenue",
@@ -91,12 +121,14 @@ def fetch_news(company: str, window: str) -> List[Dict[str, Any]]:
         "layoff", "hiring", "investment"
     ])
     query_company = normalize_company_query(company)
-    query = f'"{query_company}" ({keywords}) when:{window}'
+    site_filters = " OR ".join(f"site:{source}" for source in sorted(NewsService.TRUSTED_SOURCES))
+    query = f'"{query_company}" ({keywords}) ({site_filters}) when:{window}'
     rss_url = (
         f"https://news.google.com/rss/search?"
         f"q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
     )
     print(f"\n🔎 Fetching {window} news")
+    print(f"[DEBUG] Google News RSS query: {query}")
     feed = feedparser.parse(rss_url)
     return feed.entries if feed.entries else []
 
@@ -268,8 +300,12 @@ class NewsService:
 
                 title = (entry.get("title") or "").strip()
                 raw_url = (entry.get("link") or "").strip()
-                published = get_entry_published(entry)
-                if not title or not raw_url:
+                published_dt = parse_entry_published_datetime(entry)
+                if not title or not raw_url or not published_dt:
+                    continue
+
+                if not is_within_window(published_dt, window):
+                    print(f"[DEBUG] Article outside {window} window skipped: {title}")
                     continue
 
                 normalized_title = title.lower()
@@ -300,7 +336,7 @@ class NewsService:
                     "title": title,
                     "link": raw_url,
                     "resolved_url": resolved_url,
-                    "published": published,
+                    "published": published_dt.isoformat(),
                     "summary": NewsService._clean_html(entry.get("summary", "")),
                     "source": "Google News",
                     "fetched_at": datetime.now().isoformat()

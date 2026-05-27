@@ -122,7 +122,7 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
     """Fetch today's cached news markdown for a company from markdown folder.
     
     Searches for: markdown/{company_name}/{YYYYMMDD}/
-    Returns raw article markdown from up to 5 files if available.
+    Returns raw article markdown from up to 3 files if available.
     Falls back to summary.md only when article files are missing.
     """
     if not company_name:
@@ -165,7 +165,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
     
     Searches for: markdown/{company_name}/{YYYYMMDD}/
     where {YYYYMMDD} is today's date.
-    If the date folder already contains markdown files, it returns up to 5 of them.
+    If the date folder already contains markdown files, it returns up to 3 of them.
     Otherwise it fetches article URLs and scrapes raw markdown content to the folder.
     """
     if not company_name:
@@ -183,7 +183,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
             article_files = [
                 path for path in sorted(company_date_folder.glob("*.md"))
                 if path.name.lower() != "summary.md"
-            ][:5]
+            ][:3]
             if article_files:
                 contents = []
                 for path in article_files:
@@ -202,10 +202,10 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
         print(f"[INFO] No cached markdown articles for {company_name}, fetching news on-demand...")
 
         try:
-            news_data = NewsService.get_company_news(company_name, max_results=10, days_back=7)
+            news_data = NewsService.get_company_news(company_name, max_results=3, days_back=7)
             if not news_data.get("articles"):
                 print(f"[INFO] No articles found in last 7 days for {company_name}, trying last 30 days...")
-                news_data = NewsService.get_company_news(company_name, max_results=10, days_back=30)
+                news_data = NewsService.get_company_news(company_name, max_results=3, days_back=30)
 
             if not news_data.get("articles"):
                 print(f"[WARN] No news articles found for {company_name} even after trying 30 days")
@@ -226,7 +226,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
             article_folder = await NewsScraperService.scrape_articles_to_markdown(
                 company_name,
                 articles_with_urls,
-                max_articles=5,
+                max_articles=3,
                 date_str=today,
             )
 
@@ -234,7 +234,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
                 article_files = [
                     path for path in sorted(article_folder.glob("*.md"))
                     if path.name.lower() != "summary.md"
-                ][:5]
+                ][:3]
                 if article_files:
                     contents = []
                     for path in article_files:

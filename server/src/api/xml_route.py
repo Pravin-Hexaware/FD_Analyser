@@ -8,6 +8,7 @@ router = APIRouter()
 
 class ExtractRequest(BaseModel):
     url: str
+    only_prefix: Optional[str] = None
 
 class ExtractResponse(BaseModel):
     count: int
@@ -22,8 +23,7 @@ async def extract_xml(request: ExtractRequest):
     Returns JSON with extracted data.
     """
     try:
-        only_prefix="in-bse-fin"
-        extracted_data = extract_xbrl_data(request.url,only_prefix)
+        extracted_data = extract_xbrl_data(request.url, request.only_prefix)
 
         # Optionally save to files
         repo = XMLDataRepository()

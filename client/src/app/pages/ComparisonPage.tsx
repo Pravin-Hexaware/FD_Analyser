@@ -333,43 +333,15 @@ export default function ComparisonPage() {
                 )}
               </div>
             </div>
-
-            {selectedCompanies.length > 0 && (
-              <div className="mt-4 border-t border-gray-100 pt-4">
-                <div className="text-xs font-semibold text-gray-700 mb-2">Selected companies</div>
-                <div className="flex flex-wrap gap-2">
-                  {selectedData.map((company) => (
-                    <div
-                      key={company.scrip_code}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-all"
-                      style={{
-                        borderColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "40",
-                        backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "10",
-                        color: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length]
-                      }}
-                    >
-                      <span className="font-semibold">{company.symbol}</span>
-                      <button
-                        onClick={() => handleRemoveCompany(company.scrip_code)}
-                        className="flex-shrink-0 ml-1 p-0.5 hover:bg-red-100 hover:text-red-600 text-gray-400 rounded-full transition-colors"
-                        title="Remove company"
-                      >
-                        <X className="size-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
 
           {/* Search Bar */}
           <div className="mb-4 relative">
-            <div className="relative">
-              <div className="flex items-center gap-2">
-                <Search className="size-4 text-gray-400" />
-
-                {selectedSector ? (
+            {/* Sector/Companies row above search */}
+            {selectedSector && (
+              <div className="mb-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-gray-700">Sector:</span>
                   <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-100">
                     <span className="text-xs font-medium text-indigo-700">{selectedSector}</span>
                     <button
@@ -384,33 +356,61 @@ export default function ComparisonPage() {
                       <X className="size-4" />
                     </button>
                   </div>
-                ) : null}
-
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  placeholder={selectedSector ? "Filter companies in selected sector..." : "Search by company name, symbol, or sector..."}
-                  value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    setShowDropdown(true);
-                  }}
-                  onFocus={() => setShowDropdown(true)}
-                  className="w-full pl-2 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                />
-
-                {searchQuery && (
-                  <button
-                    onClick={() => {
-                      setSearchQuery("");
-                      setShowDropdown(false);
-                    }}
-                    className="text-gray-400 hover:text-gray-600"
-                  >
-                    <X className="size-4" />
-                  </button>
-                )}
+                  {selectedData.length > 0 && (
+                    <>
+                      <span className="text-sm font-medium text-gray-700">Companies:</span>
+                      {selectedData.map((company) => (
+                        <div
+                          key={company.scrip_code}
+                          className="flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-medium transition-all"
+                          style={{
+                            borderColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "40",
+                            backgroundColor: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length] + "10",
+                            color: COMPANY_COLORS[selectedCompanies.indexOf(company.scrip_code) % COMPANY_COLORS.length]
+                          }}
+                        >
+                          <span className="font-semibold">{company.symbol}</span>
+                          <button
+                            onClick={() => handleRemoveCompany(company.scrip_code)}
+                            className="flex-shrink-0 p-0.5 hover:bg-red-100 hover:text-red-600 text-gray-400 rounded-full transition-colors"
+                            title="Remove company"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
               </div>
+            )}
+
+            {/* Search Input (full width) */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 size-4 text-gray-400" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder={selectedSector ? "Filter companies in selected sector..." : "Search by company name, symbol, or sector..."}
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setShowDropdown(true);
+                }}
+                onFocus={() => setShowDropdown(true)}
+                className="w-full pl-10 pr-10 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => {
+                    setSearchQuery("");
+                    setShowDropdown(false);
+                  }}
+                  className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <X className="size-4" />
+                </button>
+              )}
             </div>
 
             {/* Multi-select Dropdown with Sector Filter */}

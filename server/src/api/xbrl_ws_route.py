@@ -534,7 +534,7 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
             if not scrip_code:
                 continue
             try:
-                if repo.xbrl_filing_recent(scrip_code, days=10):
+                if repo.xbrl_filing_recent(scrip_code, days=50):
                     continue
                 start_idx = idx
                 break

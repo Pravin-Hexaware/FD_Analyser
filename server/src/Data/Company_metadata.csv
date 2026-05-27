@@ -1,4 +1,331 @@
-Company,Symbol,Scrip-code,Sector ,Industry
-Dr Reddys Laboratories,DRREDDY,500124,,
+Company,Symbol,Scrip-code,Sector,Industry
+HEXAWARE TECHNOLOGIES LTD,HEXT,544362,Information Technology,IT Services & Consulting
+RELIANCE INDUSTRIES LTD,RELIANCE ,500325,"Oil, Gas & Consumable Fuels","Oil, Gas & Consumable Fuels"
+HDFC BANK LTD,HDFCBANK ,500180,Financial Services,Private Sector Bank
+BHARTI AIRTEL LTD,BHARTIARTL ,532454,Telecommunication,Telecom Services
+STATE BANK OF INDIA,SBIN ,500112,Financial Services,Public Sector Bank
+ICICI BANK LTD,ICICIBANK ,532174,Financial Services,Private Sector Bank
+TATA CONSULTANCY SERVICES LTD,TCS ,532540,Information Technology,IT Services & Consulting
+BAJAJ FINANCE LTD,BAJFINANCE ,500034,Financial Services,NBFC � Consumer Finance
+HINDUSTAN UNILEVER LTD,HINDUNILVR ,500696,Fast Moving Consumer Goods,Diversified FMCG
+INFOSYS LTD,INFY ,500209,Information Technology,IT Services
+LIFE INSURANCE CORPORATION OF INDIA,LICI ,543526,Financial Services,Insurance / Life Insurance
+LARSEN & TOUBRO LTD,LT ,500510,Infrastructure,Engineering � Construction
+SUN PHARMACEUTICAL INDUSTRIES LTD,SUNPHARMA ,524715,Healthcare,Pharmaceuticals & Drugs
+MARUTI SUZUKI INDIA LTD,MARUTI ,532500,Automobile & Auto Components,Automobiles � Passenger Cars
+ITC LTD,ITC ,500875,Fast?moving Consumer Goods,Diversified FMCG
+AXIS BANK LTD,AXISBANK ,532215,Financial Services,Private Sector Bank
+NTPC LTD,NTPC ,532555,Power,Power Generation / Distribution
+KOTAK MAHINDRA BANK LTD,KOTAKBANK ,500247,Financial Services,Private Sector Bank
+MAHINDRA & MAHINDRA LTD,M&M ,500520,Automobile & Auto Components,Automobiles � Cars/UV/CV
+TITAN COMPANY LTD,TITAN ,500114,Consumer Durables / Retail,"Gems, Jewellery & Precious Metals"
+HCL TECHNOLOGIES LTD,HCLTECH ,532281,Information Technology,IT � Software & Consulting
+OIL & NATURAL GAS CORPORATION LTD,ONGC ,500312,"Oil, Gas & Consumable Fuels",Oil Exploration & Production
+ULTRATECH CEMENT LTD,ULTRACEMCO ,532538,Construction Materials,Cement & Cement Products
+ADANI PORTS AND SPECIAL ECONOMIC ZONE LTD,ADANIPORTS ,532921,Infrastructure / Services,Transport Infrastructure (Ports)
+BHARAT ELECTRONICS LTD,BEL ,500049,Defence,Aerospace & Defence Electronics
+ADANI POWER LTD,ADANIPOWER ,533096,Power,Power Generation (Thermal)
+COAL INDIA LTD,COALINDIA ,533278,Mining,Coal
+BAJAJ FINSERV LTD,BAJAJFINSV ,532978,Financial Services,Holding Company
+POWER GRID CORPORATION OF INDIA LTD,POWERGRID ,532898,Power,Power Transmission & Distribution
+JSW STEEL LTD,JSWSTEEL ,500228,Metals & Mining,Steel � Integrated
+VEDANTA LTD,VEDL ,500295,Metals & Mining,Diversified Mining
+HINDUSTAN AERONAUTICS LTD,HAL,541154,Defence,Aircraft & Aerospace Manufacturing
+ADANI ENTERPRISES LTD,ADANIENT,512599,Capital Goods,Trading Companies and Distributors
+WIPRO LTD,WIPRO,507685,Information Technology,IT Software
+DLF LTD,DLF,532868,Real Estate,Construction - Residential & Commercial Complexes
+PERSISTENT SYSTEMS LTD,PERSISTENT,533179,IT Services,Software Services
+BAJAJ AUTO LTD,BAJAJ-AUTO,532977,Auto - 2 & 3 Wheelers,Automobiles & Auto Components
+HINDUSTAN ZINC LTD,HINDZINC,500188,Non-Ferrous Metals,Metal - Non Ferrous
+TATA STEEL LTD,TATASTEEL,500470,Materials,Steel
+INDIAN OIL CORPORATION LTD,IOC,530965,"Oil, Gas & Consumable Fuels",Refining and Marketing
+ASIAN PAINTS LTD,ASIANPAINT,500820,Chemicals,Paints/Varnishes
+ZOMATO LTD,ZOMATO,543320,Technology,E-Retail / E-Commerce
+HINDALCO INDUSTRIES LTD,HINDALCO,500440,Metals - Non Ferrous,Aluminium
+SBI LIFE INSURANCE COMPANY LTD,SBILIFE,540719,Financial Services,Life Insurance
+SHRIRAM FINANCE LTD,SHRIRAMFIN,511218,Financial Services,Non-Banking Financial Company (NBFC)
+EICHER MOTORS LTD,EICHERMOT,505200,Automobiles,Auto - 2 & 3 Wheelers
+GRASIM INDUSTRIES LTD,GRASIM,500300,Diversified,Diversified
+TVS MOTOR COMPANY LTD,TVSMOTOR,532343,Automobiles,Motorcycle Manufacturers
+JIO FINANCIAL SERVICES LTD,JIOFIN,543940,Financial Services,Finance
+TORRENT PHARMACEUTICALS LTD,TORNTPHARM,500420,Healthcare,Pharmaceuticals
+BANK OF BARODA,BANKBARODA,532134,Banks - Public Sector,Financial Services
+ADANI GREEN ENERGY LTD,ADANIGREEN,541450,Power,Renewable Energy
+BRITANNIA INDUSTRIES LTD,BRITANNIA,500825,FMCG,Food Processing & Packaging
+BHARAT PETROLEUM CORPORATION LTD,BPCL,500547,Energy,"Oil, Gas & Consumable Fuels"
+PIDILITE INDUSTRIES LTD,PIDILITIND,500331,Chemicals,Diversified
+VARUN BEVERAGES LTD,VBL,500300,Consumer Goods,Beverages
+ABB INDIA LTD,ABB,500002,Capital Goods,Electric Equipment
+HDFC LIFE INSURANCE CO LTD,HDFCLIFE,540777,Financial Services,Life Insurance
+MUTHOOT FINANCE LTD,MUTHOOTFIN,533398,Financial Services,Financial Services
+POWER FINANCE CORPORATION LTD,PFC,532810,Financial Services,Power Finance
+UNION BANK OF INDIA,UNIONBANK,532477,Banks,Financial Services
+TECH MAHINDRA LTD,TECHM,532755,IT Software,IT Software
+CHOLAMANDALAM INVESTMENT & FINANCE COMPANY LTD,CHOLAFIN,511243,Financial Services,Diversified Financials
+SOLAR INDUSTRIES (INDIA) LTD,SOLARINDS,532725,Chemicals,Industrial Explosives
+CUMMINS INDIA LTD,CUMMINSIND,500480,Engineering,Engines
+PUNJAB NATIONAL BANK,PNB,532461,Banking,Public Sector
+INDIAN RAILWAY FINANCE CORPORATION LTD,IRFC,543287,Finance,Finance - Others
+TATA POWER COMPANY LTD,TATAPOWER,500400,Power,Power - Integrated
+LTIMINDTREE LTD,LTIM,540005,Information Technology ,IT Software
+TRENT LTD,TRENT,500251,Retail,Retail - Apparel/Accessories
+SAMVARDHANA MOTHERSON INTERNATIONAL LTD,MOTHERSON,540376,Auto Ancillaries,Auto Components
+ADANI ENERGY SOLUTIONS LTD,ADANIENSOL,541450,Power,Electric Utilities
+INDIAN BANK,INDIANB,532814,Banking,Public Sector Banks
+JINDAL STEEL & POWER LTD,JINDALSTEL,532286,Metals & Mining,Steel
+TATA MOTORS LTD,TATAMOTORS,500570,Automobiles,Auto Manufacturers
+SIEMENS LTD,SIEMENS,500470,Capital Goods,Electrical Equipment
+INDUS TOWERS LTD,INDUSTOWER,532822,Telecom,Telecom Infrastructure
+CG POWER & INDUSTRIAL SOLUTIONS LTD,CGPOWER,533151,Capital Goods,Electrical Equipment
+APOLLO HOSPITALS ENTERPRISE LTD,APOLLOHOSP,508869,Healthcare,Hospitals & Healthcare
+POLYCAB INDIA LTD,POLYCAB,543516,Consumer Durables,Cables & Wires
+DR REDDYS LABORATORIES LTD,DRREDDY,500124,Pharmaceuticals,Pharmaceuticals & Biotechnology
+ABB POWER PRODUCTS & SYSTEMS INDIA LTD,POWERINDIA,500103,Capital Goods,Electrical Equipment
 TATA CONSUMER PRODUCTS LTD,TATACONSUM,500800,Consumer Goods,Food & Beverages
-PepsiCo,PEP,500830,,
+CIPLA LTD,CIPLA,500087,Pharmaceuticals,Pharmaceuticals & Biotechnology
+LUPIN LTD,LUPIN,500257,Pharmaceuticals,Pharmaceuticals & Biotechnology
+BAJAJ HOLDINGS & INVESTMENT LTD,BAJAJHLDNG,532977,Financials,Investment Company
+AMBUJA CEMENTS LTD,AMBUJACEM,500425,Materials,Cement
+GODREJ CONSUMER PRODUCTS LTD,GODREJCP,532424,Consumer Goods,Household & Personal Products
+HERO MOTOCORP LTD,HEROMOTOCO,500182,Consumer Goods,Automobiles & Auto Components
+HDFC ASSET MANAGEMENT COMPANY LTD,HDFCAMC,543352,Financials,Asset Management
+VODAFONE IDEA LTD,IDEA,532822,Communication Services,Telecom Services
+ASHOK LEYLAND LTD,ASHOKLEY,500477,Industrials,Auto & Truck Manufacturers
+IDBI BANK LTD,IDBI,500116,Financials,Banks
+GAIL (INDIA) LTD,GAIL,532155,Energy,Gas Utilities
+MAX HEALTHCARE INSTITUTE LTD,MAXHEALTH,543220,Healthcare,Hospitals & Healthcare Services
+UNITED SPIRITS LTD,MCDOWELL-N,532432,Consumer Goods,Beverages
+GMR AIRPORTS LTD,GMRAIRPORT,532754,Industrials,Infrastructure & Airports
+MAZAGON DOCK SHIPBUILDERS LTD,MAZDOCK,543237,Industrials,Defense & Shipbuilding
+GE VERNOVA T&D INDIA LTD,GET&D,522275,Industrials,Power Transmission & Distribution
+ICICI LOMBARD GENERAL INSURANCE CO LTD,ICICIGI,540716,Financials,Insurance
+ZYDUS LIFESCIENCES LTD,ZYDUSLIFE,532321,Healthcare,Pharmaceuticals & Biotechnology
+BHARAT HEAVY ELECTRICALS LTD,BHEL,500103,Industrials,Heavy Electrical Equipment
+BOSCH LTD,BOSCHLTD,500530,Industrials,Auto Components & Equipment
+MANKIND PHARMA LTD,MANKIND,543904,Healthcare,Pharmaceuticals
+REC LTD,RECLTD,532955,Energy,Power Generation & Transmission
+THE INDIAN HOTELS COMPANY LTD,INDHOTEL,500850,Consumer Services,Hotels & Resorts
+MACROTECH DEVELOPERS LTD,LODHA,543287,Real Estate,Real Estate Development
+ICICI PRUDENTIAL LIFE INSURANCE COMPANY LTD,ICICIPRULI,540133,Financials,Insurance
+SHREE CEMENT LTD,SHREECEM,500387,Materials,Cement
+HAVELLS INDIA LTD,HAVELLS,517354,Industrials,Electrical Equipment
+ADITYA BIRLA CAPITAL LTD,ABCAPITAL,540691,Financials,Financial Services
+DABUR INDIA LTD,DABUR,500096,Consumer Goods,Personal Products
+BHARAT FORGE LTD,BHARATFORG,500493,Industrials,Auto Components
+HINDUSTAN PETROLEUM CORPORATION LTD,HINDPETRO,500104,Energy,Oil & Gas
+WAAREE ENERGIES LTD,WAAREE,544277,Energy,Renewable Energy
+SWIGGY LTD,SWIGGY,544285,Consumer Services,Online Food Delivery
+OIL INDIA LTD,OIL,533106,Energy,Oil & Gas
+PB FINTECH LTD,PBFINTECH,543390,Financials,FinTech
+NHPC LTD,NHPC,533098,Energy,Hydroelectric Power
+AUROBINDO PHARMA LTD,AUROPHARMA,524804,Healthcare,Pharmaceuticals
+SRF LTD,SRF,503806,Industrials,Chemicals & Materials
+BHARTI HEXACOM LTD,BHEXACOM,544162,Communication Services,Telecom Services
+TORRENT POWER LTD,TORNTPOWER,532779,Energy,Power Generation & Distribution
+NATIONAL ALUMINIUM COMPANY LTD,NATIONALUM,532234,Materials,Aluminium & Metal Products
+NMDC LTD,NMDC,526371,Materials,Mining & Natural Resources
+BAJAJ HOUSING FINANCE LTD,BAJAJHFL,544252,Financials,Housing Finance
+BANK OF INDIA,BANKINDIA,532149,Financials,Banking
+FSN ECOMMERCE VENTURES LTD,NYKAA,543384,Consumer Services,E-commerce
+SBI CARDS AND PAYMENT SERVICES LTD,SBICARD,543066,Financials,Financial Services
+AU SMALL FINANCE BANK LTD,AUBANK,540611,Financials,Banking
+THE FEDERAL BANK LTD,FEDERALBNK,500469,Financials,Banking
+L&T FINANCE LTD,LTF,533519,Financials,Financial Services
+ALKEM LABORATORIES LTD,ALKEM,539523,Healthcare,Pharmaceuticals
+INDUSIND BANK LTD,INDUSINDBK,532187,Financials,Banking
+FORTIS HEALTHCARE LTD,FORTIS,532843,Healthcare,Healthcare Services
+GENERAL INSURANCE CORPORATION OF INDIA LTD,GICRE,540755,Insurance - Reinsurance,Insurance - Reinsurance
+DIXON TECHNOLOGIES (INDIA) LTD,DIXON,540699,Consumer Durables,Consumer Electronics
+INDIAN OVERSEAS BANK,IOB,532388,Banks - Public Sector,Banks - Public Sector
+ONE97 COMMUNICATIONS LTD,PAYTM,543396,Financial Services,Software - Infrastructure
+BIOCON LTD,BIOCON,532523,Pharmaceuticals,Biotechnology & Medical Research
+ADANI TOTAL GAS LTD,ATGL,542066,"Oil, Gas & Consumable Fuels",Gas Distribution
+STEEL AUTHORITY OF INDIA LTD,SAIL,500113,Iron & Steel,Metals - Ferrous
+INFO EDGE (INDIA) LTD,NAUKRI,532777,Consumer Services,Information Technology
+GLENMARK PHARMACEUTICALS LTD,GLENMARK,532296,Pharmaceuticals,Pharmaceuticals & Drugs
+SCHAEFFLER INDIA LTD,SCHAEFFLER,505790,Industrial Consumables,Bearings
+LINDE INDIA LTD,LINDEINDIA,523457,Chemicals,Industrial Gases
+YES BANK LTD,YESBANK,532648,Financial Services,Banking
+UNO MINDA LTD,UNOMINDA,539268,Auto Components,Auto Ancillaries
+JINDAL STAINLESS LTD,JSL,532508,Metals & Mining,Steel & Iron Products
+MRF LTD,MRF,500290,Tyres,Automobile & Ancillaries
+COFORGE LIMITED,COFORGE,532541,Information Technology,Information Technology
+Colgate Palmolive (India) Ltd,COLPAL,500830,FMCG,Personal Care
+Eternal Limited,ETERNAL,543320,Financial Services,Financial Services
+GRASIM INDUSTRIES LTD,GRASIM,500300,Diversified,Diversified
+Indus Towers Ltd,INDUSTOWER,534816,Telecom,Telecom Infrastructure
+LTM Ltd,LTM,540005,Information Technology,IT Software
+TATA MOTORS PASSENGER VEHICLES,TMPV,500570,Automobiles,Auto Manufacturers
+Tata Steel Ltd,TATASTEEL,500470,Materials,Steel
+Tube Investments of India Ltd,TIINDIA,540762,Auto Components,Auto Ancillaries
+ABBOTT INDIA LTD,ABBOTINDIA,500488,Healthcare,Pharmaceuticals
+SUZLON ENERGY LTD,SUZLON,532667,Power,Wind Power
+ORACLE FINANCIAL SERVICES SOFTWARE LTD,OFSS,532466,IT Software,IT Consulting & Software
+RAIL VIKAS NIGAM LTD,RVNL,542649,Construction,Construction & Contracting
+MAX FINANCIAL SERVICES LTD,MFSL,500271,Financial Services,Financial Services
+PHOENIX MILLS LTD,PHOENIXLTD,503100,Consumer Discretinary,Realty
+LAURUS LABS LTD,LAURUSLABS,540222,Pharmaceuticals,Pharmaceuticals & Drugs
+PRESTIGE ESTATE PROJECTS LTD,PRESTIGE,533274,Consumer Discretinary,Realty
+IDFC FIRST BANK LTD,IDFCFIRSTB,539437,Financial Services,Banks - Private Sector
+APL APOLLO TUBES LTD,APLAPOLLO,533758,Capital Goods,Steel
+COLGATEPALMOLIVE (INDIA) LTD,COLPAL,500830,FMCG,Personal Care
+JSW INFRASTRUCTURE LTD,JSWINFRA,543283,Infrastructure,Infrastructure - Ports & Terminals
+OBEROI REALTY LTD,OBEROIRLTY,533273,Real Estate,"Residential, Commercial Projects"
+NIPPON LIFE INDIA ASSET MANAGEMENT LTD,NAM-INDIA,540767,Financial Services,Financial Services
+PATANJALI FOODS LTD,PATANJALI,500368,FMCG,FMCG
+UPL LTD,UPL,512070,Chemicals,Pesticides & Agrochemicals
+SUPREME INDUSTRIES LTD,SUPREMEIND,509930,Plastics,Plastic Products
+BANK OF MAHARASHTRA,MAHABANK,532525,Banks,Public Sector Bank
+BHARAT DYNAMICS LTD,BDL,541143,Defence,Aerospace & Defence
+HINDUSTAN COPPER LTD,HINDCOPPER,513599,Commodities ,Metals & Mining
+BERGER PAINTS INDIA LTD,BERGEPAINT,509480,Materials,Paints/Varnishes
+TUBE INVESTMENTS OF INDIA LTD,TIINDIA,540762,Auto Components,Auto Ancillaries
+GODREJ PROPERTIES LTD,GODREJPROP,533150,Real Estate,Real Estate
+VOLTAS LTD,VOLTAS,500575,Consumer Durables,Air Conditioners
+MAHINDRA & MAHINDRA FINANCIAL SERVICES LTD,M&MFIN,532720,Financial Services,NBFC - Consumer
+PI INDUSTRIES LTD,PIIND,523642,Agro Chemicals,Agro Chemicals & Fertilizers
+UNITED BREWERIES LTD,UBL,532478,Beverages,Breweries & Distilleries
+ASTRAL POLY TECHNIK LTD,ASTRAL,532830, Industrials,Capital Goods
+BALKRISHNA INDUSTRIES LTD,BALKRISIND,502355,Tyres,Tyres & Tubes
+PETRONET LNG LTD,PETRONET,532522,Oil & Gas,Gas Transmission & Distribution
+INDIAN RAILWAY CATERING & TOURISM CORPN LTD,IRCTC,543277,Services,Travel & Tourism
+360 ONE WAM LTD,360ONE,542772,Finance,Asset Management
+GLAXOSMITHKLINE PHARMACEUTICALS LTD,GLAXO,500660,Healthcare,Pharmaceuticals
+MOTILAL OSWAL FINANCIAL SERVICES LTD,MOTILALOFS,532892,Financial Services,Financial Services
+AUTHUM INVESTMENT & INFRASTRUCTURE LTD,AUTHUM,539177,Diversified Financials,Non-Banking Financial Company (NBFC)
+MPHASIS LTD,MPHASIS,543025,IT Software,Software - Application
+TATA COMMUNICATIONS LTD,TATACOMM,500483,Telecommunication,Telecommunications
+KEI INDUSTRIES LTD,KEI,532659,Electricals,Cables & Wires
+IPCA LABORATORIES LTD,IPCALAB,524494,Pharmaceuticals,Pharmaceuticals
+KALYAN JEWELLERS INDIA LTD,KALYANKJIL,543278,Gems & Jewellery,Diamond & Jewellery
+JK CEMENT LTD,JKCEMENT,532644,Construction Materials,Cement
+THERMAX LTD,THERMAX,500411,Manufacturing,Heavy Electrical Equipment
+AJANTA PHARMA LTD,AJANTPHARM,532331,Pharmaceuticals,Pharmaceuticals & Biotechnology
+BLUE STAR LTD,BLUESTARCO,500067,Capital Goods,Building Products
+RADICO KHAITAN LTD,RADICO,532497,FMCG,Beverages & Distilleries
+3M INDIA LTD,3MINDIA,523395,Diversified,Diversified
+COFORGE LTD,COFORGE,543259,Information Technology,Software Services
+COCHIN SHIPYARD LTD,COCHINSHIP,540678,Capital Goods,Ship Building
+L&T TECHNOLOGY SERVICES LTD,LTTS,540115,Information Technology,IT Software
+APAR INDUSTRIES LTD,APARINDS,532259,Industrials ,Capital Goods
+NLC INDIA LTD,NLCINDIA,513683,Utilities,Power Generation & Distribution
+PREMIER ENERGIES LTD,PREMIERENE,544238,Electricals,Electrical Components
+ESCORTS LTD,ESCORTS,500495,Industrials ,Capital Goods
+HOUSING & URBAN DEVELOPMENT CORPORATION LTD,HUDCO,540530,Financial Services,Finance - Housing
+ASTER DM HEALTHCARE LTD,ASTERDM,540975,Hospitals & Allied Services,Healthcare
+CONTAINER CORPORATION OF INDIA LTD,CONCOR,531344,Logistics,Transportation & Logistics
+DALMIA BHARAT LTD,DALBHARAT,542216,Construction Materials,Cement - South
+AIA ENGINEERING LTD,AIAENG,532683,Engineering,Heavy & Capital Goods
+PROCTER & GAMBLE HYGIENE & HEALTH CARE LTD,PGHH,500459,FMCG,Household & Personal Products
+NARAYANA HRUDAYALAYA LTD,NH,539551,Healthcare,Healthcare
+JB CHEMICALS & PHARMACEUTICALS LTD,JBCHEPHARM,506943,Healthcare,Pharmaceuticals
+ENDURANCE TECHNOLOGIES LTD,ENDURANCE,540153,Auto Ancillaries,Auto and Auto Components
+PAGE INDUSTRIES LTD,PAGEIND,532827,Consumer Durables,Textile - Readymade Garments
+GUJARAT FLUOROCHEMICALS LTD,FLUOROCHEM,542812,Chemicals,Specialty Chemicals
+POONAWALLA FINCORP LTD,POONAWALLA,524000,Finance,NBFC - Diversified
+INDIAN RENEWABLE ENERGY DEVELOPMENT AGENCY LTD,IREDA,540709,Financial Services,Finance - Specialized
+CENTRAL BANK OF INDIA,CENTRALBK,532885,Banks,Financial Services
+UCO BANK,UCOBANK,532505,Financial Services,Banks - Public Sector
+NAVIN FLUORINE INTERNATIONAL LTD,NAVINFLUOR,532504,Chemicals,Specialty Chemicals
+GODFREY PHILLIPS INDIA LTD,GODFRYPHLP,500163,FMCG,Fast Moving Consumer Goods
+TATA INVESTMENT CORPORATION LTD,TATAINVEST,501301,Financial Services,Financial Services
+MANGALORE REFINERY & PETROCHEMICALS LTD,MRPL,500109,Oil & Gas,Petroleum Refining
+GO DIGIT GENERAL INSURANCE LTD,GODIGIT,544179,Financial Services,Non-Life Insurance
+CRISIL LTD,CRISIL,500092,Financial Services,Rating Agency
+JUBILANT FOODWORKS LTD,JUBLFOOD,533155,Consumer Discretinary,Consumer Services
+SONA BLW PRECISION FORGINGS LTD,SONACOMS,543300,Auto Ancillaries,Auto Ancillaries - Castings/Forgings
+DELHIVERY LTD,DELHIVERY,543529,Logistics,Integrated Freight & Logistics Solutions
+CHOLAMANDALAM FINANCIAL HOLDINGS LTD,CHOLAHLDNG,504973,Financial Services,Financial Services
+GLOBAL HEALTH LTD,MEDANTA,543654,Healthcare,Hospitals & Medical Services
+KPR MILL LTD,KPRMILL,532889,Textile,Ready-made Garments
+BANDHAN BANK LTD,BANDHANBNK,541153,Bank - Private Sector,Private Sector Bank
+GODREJ INDUSTRIES LTD,GODREJIND,500164,Diversified,Diversified
+TVS HOLDINGS LTD,TVSHLTD,520056,Financial Services,Financial Services
+SJVN LTD,SJVN,533206,Power,Power Generation & Distribution
+STAR HEALTH AND ALLIED INSURANCE COMPANY LTD,STARHEALTH,543412,Financial Services,Financial Services
+LIC HOUSING FINANCE LTD,LICHSGFIN,500253,Financial Services,NBFC - Housing
+EMCURE PHARMACEUTICALS LTD,EMCURE,544210,Pharmaceuticals,Healthcare
+ADITYA BIRLA SUN LIFE AMC LTD,ABSLAMC,543374,Financial Services,Financial Services
+GLAND PHARMA LTD,GLAND,543245,Pharmaceuticals,Pharmaceuticals & Drugs
+FORCE MOTORS LTD,FORCEMOT,500033,Consumer Discretinary,Automobiles
+HONEYWELL AUTOMATION INDIA LTD,HONAUT,517174,Industrials ,Capital Goods
+TATA ELXSI LTD,TATAELXSI,540051,Information Technology,Software Services
+GARDEN REACH SHIPBUILDERS & ENGINEERS LTD,GRSE,541016,Defence,Shipbuilding & Engineering
+TIMKEN INDIA LTD,TIMKEN,522113,Capital Goods,Bearings
+MOTHERSON SUMI WIRING INDIA LTD,MSUMI,543498,Auto Ancillaries,Automobiles
+ACC LTD,ACC,500410,Construction Materials,Cement
+GILLETTE INDIA LTD,GILLETTE,532834,FMCG,Personal Products
+ZF COMMERCIAL VEHICLE CONTROL SYSTEMS INDIA LTD,ZFCVINDIA,533023,Automobiles,Auto Ancillaries
+GUJARAT GAS LTD,GUJGASLTD,539336,"Oil, Gas & Consumable Fuels",Gas Transmission/Marketing
+PTC INDUSTRIES LTD,PTCIL,539006,Capital Goods,Castings/Foundry
+APOLLO TYRES LTD,APOLLOTYRE,500877,Automobile & Auto Components,Tyres & Allied
+KRISHNA INSTITUTE OF MEDICAL SCIENCES LTD,KIMS,543308,Healthcare,Hospital & Healthcare Services
+EXIDE INDUSTRIES LTD,EXIDEIND,500086,Auto Ancillaries,Batteries
+ANAND RATHI WEALTH LTD,ANANDRATHI,543415,Financial Services,Wealth Management
+IRB INFRASTRUCTURE DEVELOPERS LTD,IRB,532947,Infrastructure,Construction
+KAYNES TECHNOLOGY INDIA LTD,KAYNES,543664,Consumer Durables,Capital Goods
+THE RAMCO CEMENTS LTD,RAMCOCEM,500260,Basic Materials,Building Materials
+DR LAL PATHLABS LTD,LALPATHLAB,539524,Hospitals & Allied Services,Healthcare
+AMBER ENTERPRISES INDIA LTD,AMBER,540902,Consumer Discretinary,Consumer Durables
+AWL AGRI BUSINESS LTD ,AWL,543458,Fast Moving Consumer Goods,Fast Moving Consumer Goods
+NBCC (INDIA) LTD,NBCC,534309,Construction,Construction & Contracting
+SUN TV NETWORK LTD,SUNTV,532733,Media & Entertainment,"Media, Entertainment & Publication"
+THE NEW INDIA ASSURANCE CO LTD,NIACL,540769,Financial Services,General Insurance
+HIMADRI SPECIALITY CHEMICAL LTD,HSCL,533292,Chemicals,Specialty Chemicals
+TATA TECHNOLOGIES LTD,TTML,543529,Automotive & Engineering,Product Development & Digital Services
+INDRAPRASTHA GAS LTD,IGL,532514,Gas,Gas Distribution
+MANAPPURAM FINANCE LTD,MANAPPURAM,936490,Financial Services,NBFC - Gold
+SHYAM METALICS AND ENERGY LTD,SHYAMMETL,543299,Metals - Ferrous,Capital Goods
+CESC LTD,CESC,500084,Power,Power - Integrated Utilities
+SCHNEIDER ELECTRIC INFRASTRUCTURE LTD,SCHNEIDER,534139,Electric Equipment,Electric Equipment - General
+ASAHI INDIA GLASS LTD,ASAHIINDIA,515030,Automobiles,Glass - Auto
+AEGIS LOGISTICS LTD,AEGISLOG,500003,"Oil, Gas & Consumable Fuels",Trading
+NUVAMA WEALTH MANAGEMENT LTD,NUVAMA,543988,Diversified Financials,Wealth Management
+KIRLOSKAR OIL ENGINES LTD,KIRLOSENG,505255,Engineering,Engines & Generators
+PFIZER LTD,PFIZER,500680,Pharmaceuticals,Pharmaceuticals
+WELSPUN CORP LTD,WELCORP,532144,Capital Goods,Pipes & Tubes
+ASTRAZENECA PHARMA INDIA LTD,ASTRAZEN,506820,Pharmaceuticals,Pharmaceuticals
+THE GREAT EASTERN SHIPPING COMPANY LTD,GESHIP,500620,Logistics,Shipping
+BAYER CROPSCIENCE LTD,BAYERCROP,524691,Agriculture,Agro Chemicals
+IIFL FINANCE LTD,IIFL,532636,Finance,Non Banking Financial Company
+AADHAR HOUSING FINANCE LTD,AADHARHFC,544176,Finance,Housing Finance Company
+PNB HOUSING FINANCE LTD,PNBHOUSING,540173,Diversified Financials,Financial Services
+EIH LTD,EIHOTEL,500840,Consumer Services,Hospitality
+DEEPAK NITRITE LTD,DEEPAKNTR,506401,Chemicals,Commodity Chemicals
+WOCKHARDT LTD,WOCKPHARMA,532300,Healthcare,Pharmaceuticals
+ANGEL ONE LTD,ANGELONE,543233,Financial Services,Brokerage & Securities
+ATUL LTD,ATUL,500027,Chemicals,Chemicals - Diversified
+SUMITOMO CHEMICAL INDIA LTD,SUMICHEM,542920,Chemicals,Pesticides/Agro Chemicals
+KALPATARU PROJECTS INTERNATIONAL LTD,KPIL,522287,Power - Infrastructure,Construction
+AFFLE (INDIA) LTD,AFFLE,542752,Services,Services - Others
+SARDA ENERGY & MINERALS LTD,SARDAEN,504614,Metals & Mining,Steel
+PIRAMAL PHARMA LTD,PPLPHARMA,543635,Pharmaceuticals,Pharmaceuticals
+CREDITACCESS GRAMEEN LTD,CREDITACC,541770,Financial Services,Financial Services
+CASTROL INDIA LTD,CASTROLIND,500870,Petrochemicals,"Oil, Gas & Consumable Fuels"
+REDINGTON (INDIA) LTD,REDINGTON,532805,Services,IT Networking Equipment
+ERIS LIFESCIENCES LTD,ERIS,540596,Pharmaceuticals,Pharma
+HBL ENGINEERING LTD,HBLENGINE,517271,Capital Goods,Auto Ancillary
+RBL BANK LTD,RBLBANK,540065,Banks,Banks - Private Sector
+EMAMI LTD,EMAMILTD,532720,FMCG,Personal Products
+KPIT TECHNOLOGIES LTD,KPITTECH,542651,IT Services,IT Services & Consulting
+NETWEB TECHNOLOGIES INDIA LTD,NETWEB,543344,Information Technology,IT Services and Solutions
+DATA PATTERNS (INDIA) LTD,DATAPATTNS,543428,Defence,Capital Goods
+SAGILITY INDIA LTD,SAGILITY,544282,Information Technology,IT Enabled Services
+CITY UNION BANK LTD,CUB,532210,Banks,Financial Services
+NATCO PHARMA LTD,NATCOPHARM,524816,Healthcare,Pharmaceuticals
+TATA CHEMICALS LTD,TATACHEM,500770,Chemicals,Inorganic Chemicals
+ONESOURCE SPECIALTY PHARMA LTD,ONESOURCE,544292,Pharmaceuticals,Pharmaceuticals
+SYNGENE INTERNATIONAL LTD,SYNGENE,539268,Pharmaceuticals,Pharmaceuticals
+GODAWARI POWER & ISPAT LTD,GPIL,532734,Metals - Ferrous,Capital Goods
+GUJARAT MINERAL DEVELOPMENT CORPORATION LTD,GMDCLTD,532181,Mining,Metals & Mining
+CHAMBAL FERTILISERS & CHEMICALS LTD,CHAMBLFERT,500085,Chemicals,Fertilisers
+CAPRI GLOBAL CAPITAL LTD,CGCL,531595,Diversified Financials,NBFC
+JYOTI CNC AUTOMATION LTD,JYOTICNC,544081,Industrials,Capital Goods
+ANANT RAJ LTD,ANANTRAJ,515055,Real Estate,Real Estate
+CHALET HOTELS LTD,CHALET,542399,Hotels & Resorts,Hotels & Resorts
+BRIGADE ENTERPRISES LTD,BRIGADE,532929,Real Estate,Real Estate
+COMPUTER AGE MANAGEMENT SERVICES LTD,CAMS,543232,Financial Services,Depository Services
+FIRSTSOURCE SOLUTIONS LTD,FSL,532809,IT Enabled Services,IT Enabled Services
+CRAFTSMAN AUTOMATION LTD,CRAFTSMAN,543276,Auto Ancillaries,Automobile & Auto Components
+DCM SHRIRAM LTD,DCMSHRIRAM,523367,Diversified,Diversified
+,NULL,NULL,NULL,NULL

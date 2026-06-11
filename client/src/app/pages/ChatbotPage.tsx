@@ -26,7 +26,7 @@ const suggestions = [
   { icon: Sparkles, text: "Generate report for Asian Paints", color: "purple" },
   { icon: Building2, text: "Show HDFC Bank key metrics", color: "orange" },
   { icon: TrendingUp, text: "What is WIPRO's 5Y PAT CAGR?", color: "blue" },
-  { icon: FileText, text: "Compare HDFC and Reliance", color: "rose" },
+  { icon: FileText, text: "Compare HDFC and ICICI", color: "rose" },
 ];
 
 export default function ChatbotPage() {

@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Search, TrendingUp, BarChart3, MessageSquare, Sparkles,
+  Search, MessageSquare, Sparkles, BarChart3,
   ArrowRight, Building2, ChevronRight,
-  Database, Shield, Zap, TrendingDown
+  Shield, Zap
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { apiClient, type CompanySuggestion } from "../../api/apiClient";
 import { companies as localCompanies } from "../data/companies";
+import logo from "../../assets/logo.jpg";
 
 const tickerItems = [
   { symbol: "RELIANCE", price: "₹2,945", change: "+2.5%", up: true },
@@ -73,7 +74,6 @@ export default function LandingPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<CompanySuggestion[]>([]);
   const [companies, setCompanies] = useState<any[]>([]);
-  const [tickerPos, setTickerPos] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const tickerRef = useRef<number | null>(null);
 
@@ -88,7 +88,6 @@ export default function LandingPage() {
       pos -= 0.5;
       const width = tickerItems.length * 180;
       if (Math.abs(pos) > width) pos = 0;
-      setTickerPos(pos);
       tickerRef.current = requestAnimationFrame(animate);
     };
     tickerRef.current = requestAnimationFrame(animate);
@@ -119,9 +118,7 @@ export default function LandingPage() {
       <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-sm border-b border-gray-100 shadow-sm">
         <div className="max-w-7xl mx-auto px-6 py-3.5 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="size-9 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-700 flex items-center justify-center shadow-md shadow-indigo-200">
-              <BarChart3 className="size-5 text-white" />
-            </div>
+            <img src={logo} alt="FinBot Logo" className="h-9 w-9 rounded-lg shadow-md" />
             <div>
               <span className="text-gray-900 font-semibold">FinBot</span>
               <p className="text-xs text-gray-400 leading-none">Financial Intelligence Platform</p>
@@ -450,9 +447,7 @@ export default function LandingPage() {
       <footer className="border-t bg-white px-6 py-8">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="size-8 rounded-lg bg-indigo-600 flex items-center justify-center">
-              <BarChart3 className="size-4 text-white" />
-            </div>
+            <img src={logo} alt="FinBot Logo" className="h-8 w-8 rounded-lg" />
             <div>
               <div className="text-gray-900 font-semibold text-sm">FinBot</div>
               <div className="text-gray-400 text-xs">Financial Intelligence Platform</div>

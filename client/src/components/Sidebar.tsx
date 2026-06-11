@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useSidebarContext } from "../context/SidebarContext";
+import logo from "../assets/logo.jpg";
 
 interface SidebarNavItem {
   path: string;
@@ -53,9 +54,11 @@ export function Sidebar({
           onClick={() => navigate("/")}
           className="flex items-center gap-3 w-full hover:opacity-90 transition-opacity"
         >
-          <div className="size-9 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-700 flex items-center justify-center shadow-lg shadow-indigo-900/40 flex-shrink-0">
-            <div className="size-5 text-white font-semibold">F</div>
-          </div>
+          <img
+            src={logo}
+            alt="Logo"
+            className={`transition-all duration-200 ${isCollapsed ? 'h-8 w-8' : 'h-10 w-10'}`}
+          />
           {!isCollapsed && (
             <div className="text-left min-w-0">
               <div className="text-white font-semibold tracking-tight">FinBot</div>

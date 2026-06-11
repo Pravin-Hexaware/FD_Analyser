@@ -18,16 +18,27 @@ from markdownify import markdownify as md
 import os
 import json
 import re
+from datetime import datetime
+from pathlib import Path
 import trafilatura
 
-OUTPUT_DIR = "outputs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+MARKDOWN_BASE = Path(__file__).resolve().parents[2] / "markdown"
+MARKDOWN_BASE.mkdir(parents=True, exist_ok=True)
 
 def _sanitize_filename(name: str) -> str:
     # remove invalid filename characters
     name = re.sub(r'[\\/*?:"<>|]', "", name)
     name = name.strip()
     return name[:150] if len(name) > 150 else name
+
+
+def _normalize_company_folder_name(company_name: Optional[str]) -> str:
+    if not company_name:
+        return "UNKNOWN_COMPANY"
+    normalized = company_name.strip().upper().replace("&", "AND")
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or "UNKNOWN_COMPANY"
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -155,10 +166,16 @@ def save_article_markdown(url: str, title: Optional[str] = None, company: Option
     filename = _sanitize_filename(page_title or final_url)
     if not filename:
         filename = "article"
-    filepath = os.path.join(OUTPUT_DIR, f"{filename}.md")
+
+    safe_company_name = _normalize_company_folder_name(company)
+    today = datetime.now().strftime("%Y%m%d")
+    company_dir = MARKDOWN_BASE / safe_company_name / today
+    company_dir.mkdir(parents=True, exist_ok=True)
+
+    filepath = company_dir / f"{filename}.md"
     with open(filepath, "w", encoding="utf-8") as handle:
         handle.write(md_text)
-    return filepath
+    return str(filepath)
 
 
 def parse_agent_json(message_content: str) -> dict:
@@ -171,9 +188,9 @@ def parse_agent_json(message_content: str) -> dict:
         raise
 
 
-def process_results(message_content: str) -> list[str]:
+def process_results(message_content: str, company: Optional[str] = None) -> list[str]:
     parsed = parse_agent_json(message_content)
-    results = parsed.get("results", [])
+    results = parsed.get("results", [])[:4]
     file_paths = []
     for idx, item in enumerate(results, start=1):
         url = item.get("url")
@@ -183,7 +200,7 @@ def process_results(message_content: str) -> list[str]:
 
         print(f"Scraping {idx}/{len(results)}: {url}")
         try:
-            saved_path = save_article_markdown(url, title=None, company=None, published=None)
+            saved_path = save_article_markdown(url, title=None, company=company, published=None)
             file_paths.append(saved_path)
             print(f"Saved markdown: {saved_path}")
         except Exception as exc:
@@ -213,7 +230,7 @@ def get_azure_chat_openai():
     return llm
 
 
-llm = get_azure_chat_openai()
+_llm_client = get_azure_chat_openai()
 
 
 @tool
@@ -234,7 +251,7 @@ def fetch_news(query: str, limit: int = 50):
 
 
 tools = [fetch_news]
-llm = get_azure_chat_openai().bind_tools(tools)
+llm = _llm_client.bind_tools(tools)
 
 
 class State(TypedDict):
@@ -267,7 +284,8 @@ def agent_node(state: State):
     }
 
     Rules:
-    - Include ONLY relevant articles.
+    - Return AT MOST 4 results.
+    - Include ONLY the top 4 most relevant articles.
     - If no relevant articles are found, return:
       { "results": [] }
     - Ensure valid JSON (no trailing commas, proper quotes).

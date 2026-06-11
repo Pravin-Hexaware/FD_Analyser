@@ -169,7 +169,7 @@ async def _fetch_news_using_agent(company_name: str, max_results: int = 10) -> O
         return None
 
     try:
-        query = f"Collect recent news articles for {company_name}. Return only relevant article URLs and reasons in strict JSON."
+        query = f"Collect recent news articles for {company_name}. Return only the top {max_results} most relevant article URLs and reasons in strict JSON."
         result = news_agent_app.invoke(
             {"messages": [HumanMessage(content=query)]},
             config={"configurable": {"thread_id": f"news-agent-{uuid.uuid4()}"}}
@@ -180,7 +180,7 @@ async def _fetch_news_using_agent(company_name: str, max_results: int = 10) -> O
             return None
 
         output_message = result["messages"][-1].content
-        article_paths = process_results(output_message)
+        article_paths = process_results(output_message, company=company_name)
         if not article_paths:
             print(f"[WARN] Agent returned no article paths for {company_name}")
             return None
@@ -225,7 +225,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
             article_files = [
                 path for path in sorted(company_date_folder.glob("*.md"))
                 if path.name.lower() != "summary.md"
-            ][:3]
+            ][:4]
             if article_files:
                 contents = []
                 for path in article_files:
@@ -244,7 +244,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
         print(f"[INFO] No cached markdown articles for {company_name}, attempting agent-based collection...")
 
         # Only agent-based news collection is allowed here.
-        agent_news = await _fetch_news_using_agent(company_name, max_results=3)
+        agent_news = await _fetch_news_using_agent(company_name, max_results=4)
         if agent_news:
             print(f"[INFO] Agent news collection succeeded for {company_name}")
             return agent_news

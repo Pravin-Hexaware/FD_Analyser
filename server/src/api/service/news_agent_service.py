@@ -1,9 +1,12 @@
 import urllib.parse
+from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import TypedDict, Annotated, List, Optional
 
 import feedparser
 import requests
+import time
 import urllib3
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
@@ -20,14 +23,26 @@ import json
 import re
 import trafilatura
 
-OUTPUT_DIR = "outputs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+MARKDOWN_ROOT = Path(__file__).resolve().parents[2] / "markdown"
+MARKDOWN_ROOT.mkdir(parents=True, exist_ok=True)
+
 
 def _sanitize_filename(name: str) -> str:
     # remove invalid filename characters
     name = re.sub(r'[\\/*?:"<>|]', "", name)
     name = name.strip()
     return name[:150] if len(name) > 150 else name
+
+
+def _get_company_markdown_folder(company: Optional[str], date_str: Optional[str] = None) -> Path:
+    if not date_str:
+        date_str = datetime.now().strftime("%Y%m%d")
+
+    company_name = company or "UNKNOWN_COMPANY"
+    folder_name = _sanitize_filename(company_name) or "UNKNOWN_COMPANY"
+    folder = MARKDOWN_ROOT / folder_name / date_str
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -132,6 +147,22 @@ def extract_fallback(html: str) -> Optional[str]:
 def scrape_article(url: str, title: Optional[str] = None, company: Optional[str] = None, published: Optional[str] = None) -> tuple[str, str, str]:
     html, final_url = get_html(url)
     page_title = title or _get_page_title(html, fallback=url)
+
+    if not published:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            date_meta = None
+            for meta in soup.find_all("meta"):
+                name = (meta.get("name") or "").lower()
+                prop = (meta.get("property") or "").lower()
+                if prop in ["article:published_time", "og:published_time", "og:updated_time"] or name in ["pubdate", "publishdate", "published_time", "date", "dc.date", "dc.date.issued"]:
+                    date_meta = meta.get("content") or meta.get("value")
+                    if date_meta:
+                        published = date_meta.strip()
+                        break
+        except Exception:
+            pass
+
     content = extract_trafilatura(html, final_url)
     if not content:
         content = extract_fallback(html)
@@ -155,10 +186,11 @@ def save_article_markdown(url: str, title: Optional[str] = None, company: Option
     filename = _sanitize_filename(page_title or final_url)
     if not filename:
         filename = "article"
-    filepath = os.path.join(OUTPUT_DIR, f"{filename}.md")
+    company_folder = _get_company_markdown_folder(company)
+    filepath = company_folder / f"{filename}.md"
     with open(filepath, "w", encoding="utf-8") as handle:
         handle.write(md_text)
-    return filepath
+    return str(filepath)
 
 
 def parse_agent_json(message_content: str) -> dict:
@@ -171,19 +203,20 @@ def parse_agent_json(message_content: str) -> dict:
         raise
 
 
-def process_results(message_content: str) -> list[str]:
+def process_results(message_content: str, company_name: Optional[str] = None) -> list[str]:
     parsed = parse_agent_json(message_content)
-    results = parsed.get("results", [])
+    results = parsed.get("results", [])[:3]
     file_paths = []
     for idx, item in enumerate(results, start=1):
         url = item.get("url")
-        reason = item.get("reason")
+        title = item.get("title")
+        published = item.get("published")
         if not url:
             continue
 
         print(f"Scraping {idx}/{len(results)}: {url}")
         try:
-            saved_path = save_article_markdown(url, title=None, company=None, published=None)
+            saved_path = save_article_markdown(url, title=title, company=company_name, published=published)
             file_paths.append(saved_path)
             print(f"Saved markdown: {saved_path}")
         except Exception as exc:
@@ -216,10 +249,23 @@ def get_azure_chat_openai():
 llm = get_azure_chat_openai()
 
 
+def _parse_entry_published(entry: dict) -> str:
+    published = entry.get("published") or entry.get("updated") or ""
+    if not published:
+        parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+        if parsed:
+            try:
+                published = datetime.fromtimestamp(time.mktime(parsed)).isoformat()
+            except Exception:
+                published = ""
+    return published
+
+
 @tool
 def fetch_news(query: str, limit: int = 50):
     """Fetch relevant news articles for a query from Google News RSS."""
 
+    limit = min(limit, 3)
     url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(url)
 
@@ -228,7 +274,8 @@ def fetch_news(query: str, limit: int = 50):
         results.append({
             "title": entry.get("title", ""),
             "summary": entry.get("summary", ""),
-            "url": entry.get("link", "")
+            "url": entry.get("link", ""),
+            "published": _parse_entry_published(entry)
         })
     return results
 
@@ -248,7 +295,7 @@ def agent_node(state: State):
 
     Instructions:
     1. When the user provides a query, ALWAYS use the `fetch_news` tool.
-    2. Analyze the 'title' and 'summary' of EACH retrieved article against the user's query.
+    2. Analyze the 'title', 'summary', and 'published' values of EACH retrieved article against the user's query.
     3. Filter out all irrelevant articles.
     4. Return ONLY the relevant articles.
 
@@ -261,6 +308,8 @@ def agent_node(state: State):
       "results": [
         {
           "url": "<article_url>",
+          "title": "<article_title>",
+          "published": "<published_date_or_empty>",
           "reason": "<short reason why it is relevant>"
         }
       ]
@@ -268,6 +317,7 @@ def agent_node(state: State):
 
     Rules:
     - Include ONLY relevant articles.
+    - Include the article title and published date if available.
     - If no relevant articles are found, return:
       { "results": [] }
     - Ensure valid JSON (no trailing commas, proper quotes).
@@ -281,7 +331,7 @@ def tool_node(state: State):
     tool_results = []
     for tc in msg.tool_calls:
         result = fetch_news.invoke(tc["args"])
-        tool_results.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+        tool_results.append(ToolMessage(content=json.dumps(result), tool_call_id=tc["id"]))
     return {"messages": tool_results}
 
 

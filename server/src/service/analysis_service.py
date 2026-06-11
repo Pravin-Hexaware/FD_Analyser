@@ -113,9 +113,11 @@ def _get_company_info_by_symbol(repo: SqliteRepository, symbol: str) -> Dict[str
 def _normalize_company_folder_name(company_name: str) -> str:
     if not company_name:
         return "UNKNOWN_COMPANY"
-    normalized = company_name.strip().upper().replace("&", "AND")
-    normalized = re.sub(r"[^A-Z0-9_]", "_", normalized)
-    normalized = re.sub(r"_+", "_", normalized).strip("_")
+
+    normalized = company_name.strip()
+    normalized = normalized.replace("&", "AND")
+    normalized = re.sub(r'[\\/*?:"<>|]', "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
     return normalized or "UNKNOWN_COMPANY"
 
 def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
@@ -159,7 +161,7 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
     return None
 
 
-async def _fetch_news_using_agent(company_name: str, max_results: int = 10) -> Optional[str]:
+async def _fetch_news_using_agent(company_name: str, max_results: int = 3) -> Optional[str]:
     """Fetch recent company news URLs with the agent and convert them to markdown text."""
     try:
         from api.service.news_agent_service import app as news_agent_app, process_results
@@ -169,7 +171,10 @@ async def _fetch_news_using_agent(company_name: str, max_results: int = 10) -> O
         return None
 
     try:
-        query = f"Collect recent news articles for {company_name}. Return only relevant article URLs and reasons in strict JSON."
+        query = (
+            f"Collect up to 3 recent news articles for {company_name}. "
+            "Return only relevant article URLs, titles, published dates if available, and reasons in strict JSON."
+        )
         result = news_agent_app.invoke(
             {"messages": [HumanMessage(content=query)]},
             config={"configurable": {"thread_id": f"news-agent-{uuid.uuid4()}"}}
@@ -180,7 +185,7 @@ async def _fetch_news_using_agent(company_name: str, max_results: int = 10) -> O
             return None
 
         output_message = result["messages"][-1].content
-        article_paths = process_results(output_message)
+        article_paths = process_results(output_message, company_name=company_name)
         if not article_paths:
             print(f"[WARN] Agent returned no article paths for {company_name}")
             return None

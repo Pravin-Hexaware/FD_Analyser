@@ -38,9 +38,9 @@ const stageSubsteps: Record<string, string[]> = {
 const stageDurations: Record<string, number> = {
   "Extracting user intent": 5500,
   "Identifying the companies": 10200,
-  "Fetching relevant data": 12045,
-  "Collecting the latest news": 17000,
-  "Generating the response": 10045
+  "Fetching relevant data": 15045,
+  "Collecting the latest news": 27000,
+  "Generating the response": 40045
 };
 
 export function ProgressMessages({ messages, isLoading = false }: ProgressMessagesProps) {

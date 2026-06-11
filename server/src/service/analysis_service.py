@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import asyncio
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,7 +13,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from repository.sqlite_repository import SqliteRepository
 from utils.llm_testing import get_azure_chat_openai
 from service.nlp_company_extractor import parse_query_and_get_companies_nlp
-from service.news_service import NewsService
 
 _LLM: Any = None
 
@@ -159,6 +159,48 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
     return None
 
 
+async def _fetch_news_using_agent(company_name: str, max_results: int = 10) -> Optional[str]:
+    """Fetch recent company news URLs with the agent and convert them to markdown text."""
+    try:
+        from api.service.news_agent_service import app as news_agent_app, process_results
+        from langchain_core.messages import HumanMessage
+    except Exception as e:
+        print(f"[WARN] Agent news fetch unavailable: {e}")
+        return None
+
+    try:
+        query = f"Collect recent news articles for {company_name}. Return only relevant article URLs and reasons in strict JSON."
+        result = news_agent_app.invoke(
+            {"messages": [HumanMessage(content=query)]},
+            config={"configurable": {"thread_id": f"news-agent-{uuid.uuid4()}"}}
+        )
+
+        if not result or "messages" not in result:
+            print(f"[WARN] Agent did not return messages for {company_name}")
+            return None
+
+        output_message = result["messages"][-1].content
+        article_paths = process_results(output_message)
+        if not article_paths:
+            print(f"[WARN] Agent returned no article paths for {company_name}")
+            return None
+
+        contents = []
+        for path in article_paths:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    contents.append(f.read().strip())
+            except Exception as read_exc:
+                print(f"[WARN] Failed to read scraped article {path}: {read_exc}")
+                continue
+
+        return "\n\n".join(contents) if contents else None
+
+    except Exception as e:
+        print(f"[WARN] Agent news fetch failed for {company_name}: {e}")
+        return None
+
+
 async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_code: Optional[str] = None) -> Optional[str]:
     """
     Fetch today's raw news markdown from the cache or scrape it on-demand.
@@ -199,53 +241,15 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
                     print(f"[INFO] Using fallback cached summary for {company_name}")
                     return content
 
-        print(f"[INFO] No cached markdown articles for {company_name}, fetching news on-demand...")
+        print(f"[INFO] No cached markdown articles for {company_name}, attempting agent-based collection...")
 
-        try:
-            news_data = NewsService.get_company_news(company_name, max_results=3, days_back=7)
-            if not news_data.get("articles"):
-                print(f"[INFO] No articles found in last 7 days for {company_name}, trying last 30 days...")
-                news_data = NewsService.get_company_news(company_name, max_results=3, days_back=30)
+        # Only agent-based news collection is allowed here.
+        agent_news = await _fetch_news_using_agent(company_name, max_results=3)
+        if agent_news:
+            print(f"[INFO] Agent news collection succeeded for {company_name}")
+            return agent_news
 
-            if not news_data.get("articles"):
-                print(f"[WARN] No news articles found for {company_name} even after trying 30 days")
-                return None
-
-            print(f"[INFO] Fetched {len(news_data['articles'])} articles, scraping raw markdown...")
-            articles_with_urls = [
-                {
-                  "title": a.get("title", ""),
-                  "url": a.get("link", ""),
-                  "published": a.get("published", "")
-                }
-                for a in news_data["articles"]
-            ]
-
-            from service.news_scraper_service import NewsScraperService
-
-            article_folder = await NewsScraperService.scrape_articles_to_markdown(
-                company_name,
-                articles_with_urls,
-                max_articles=3,
-                date_str=today,
-            )
-
-            if article_folder.exists():
-                article_files = [
-                    path for path in sorted(article_folder.glob("*.md"))
-                    if path.name.lower() != "summary.md"
-                ][:3]
-                if article_files:
-                    contents = []
-                    for path in article_files:
-                        with open(path, 'r', encoding='utf-8') as f:
-                            contents.append(f.read().strip())
-                    print(f"[INFO] Scraped and cached {len(article_files)} markdown articles for {company_name}")
-                    return "\n\n".join(contents)
-
-        except Exception as e:
-            print(f"[WARN] Failed to fetch news on-demand for {company_name}: {str(e)}")
-
+        print(f"[WARN] Agent news collection failed or returned no articles for {company_name}. No legacy NewsService fallback will be used.")
         return None
 
     except Exception as e:

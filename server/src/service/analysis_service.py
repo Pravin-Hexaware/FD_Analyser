@@ -113,11 +113,9 @@ def _get_company_info_by_symbol(repo: SqliteRepository, symbol: str) -> Dict[str
 def _normalize_company_folder_name(company_name: str) -> str:
     if not company_name:
         return "UNKNOWN_COMPANY"
-
-    normalized = company_name.strip()
-    normalized = normalized.replace("&", "AND")
-    normalized = re.sub(r'[\\/*?:"<>|]', "", normalized)
-    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = company_name.strip().upper().replace("&", "AND")
+    normalized = re.sub(r"[^A-Z0-9_]", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
     return normalized or "UNKNOWN_COMPANY"
 
 def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
@@ -230,7 +228,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
             article_files = [
                 path for path in sorted(company_date_folder.glob("*.md"))
                 if path.name.lower() != "summary.md"
-            ][:3]
+            ][:4]
             if article_files:
                 contents = []
                 for path in article_files:
@@ -249,7 +247,7 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
         print(f"[INFO] No cached markdown articles for {company_name}, attempting agent-based collection...")
 
         # Only agent-based news collection is allowed here.
-        agent_news = await _fetch_news_using_agent(company_name, max_results=3)
+        agent_news = await _fetch_news_using_agent(company_name, max_results=4)
         if agent_news:
             print(f"[INFO] Agent news collection succeeded for {company_name}")
             return agent_news

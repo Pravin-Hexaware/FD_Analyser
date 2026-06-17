@@ -206,9 +206,9 @@ def parse_agent_json(message_content: str) -> dict:
         raise
 
 
-def process_results(message_content: str, company: Optional[str] = None) -> list[str]:
+def process_results(message_content: str, company_name: Optional[str] = None) -> list[str]:
     parsed = parse_agent_json(message_content)
-    results = parsed.get("results", [])[:4]
+    results = parsed.get("results", [])[:3]
     file_paths = []
     for idx, item in enumerate(results, start=1):
         url = item.get("url")
@@ -219,7 +219,7 @@ def process_results(message_content: str, company: Optional[str] = None) -> list
 
         print(f"Scraping {idx}/{len(results)}: {url}")
         try:
-            saved_path = save_article_markdown(url, title=None, company=company, published=None)
+            saved_path = save_article_markdown(url, title=title, company=company_name, published=published)
             file_paths.append(saved_path)
             print(f"Saved markdown: {saved_path}")
         except Exception as exc:

@@ -3,8 +3,11 @@ import {
   CheckCircle, RefreshCw, Plus,
   Play, XCircle,
   Clock, Check, X, Upload, ChevronDown, Edit2, Trash2,
-  AlertCircle, Zap
+  AlertCircle, Zap,
+  ChevronLeft,
+  ChevronRight
 } from "lucide-react";
+
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import type { CompanyData } from "../data/companies";
@@ -42,6 +45,17 @@ export default function AdminPage() {
   const [showMissingDropdown, setShowMissingDropdown] = useState(true);
 
   const [newCompany, setNewCompany] = useState({ name: "", symbol: "", bseCode: "", sector: "" });
+  const [companyPage, setCompanyPage] = useState(1);
+  const COMPANY_PAGE_SIZE = 10;
+
+  const totalCompanyPages = Math.max(1, Math.ceil(companies.length / COMPANY_PAGE_SIZE));
+  const paginatedCompanies = companies.slice((companyPage - 1) * COMPANY_PAGE_SIZE, companyPage * COMPANY_PAGE_SIZE);
+
+  useEffect(() => {
+    if (companyPage > totalCompanyPages) {
+      setCompanyPage(totalCompanyPages);
+    }
+  }, [companyPage, totalCompanyPages]);
 
   // Fetch companies from database on mount
   useEffect(() => {
@@ -672,14 +686,14 @@ export default function AdminPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {companies.length === 0 ? (
+                {paginatedCompanies.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="px-4 py-6 text-center text-gray-400 text-sm">
                       No companies found. Add one to get started.
                     </td>
                   </tr>
                 ) : (
-                  companies.map((company) => (
+                  paginatedCompanies.map((company) => (
                     <tr key={company.id} className="hover:bg-blue-50/40 transition-colors">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
@@ -705,6 +719,33 @@ export default function AdminPage() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="px-6 py-4 border-t border-gray-100 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="text-xs text-gray-500">
+              Showing {paginatedCompanies.length} of {companies.length} companies
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => setCompanyPage((prev) => Math.max(1, prev - 1))}
+                disabled={companyPage === 1}
+                className="text-xs text-white"
+                ><ChevronLeft className="size-3.5" />
+                Previous
+              </Button>
+              <span className="text-xs text-gray-600">
+                Page {companyPage} of {totalCompanyPages}
+              </span>
+              <Button
+                size="sm"
+                onClick={() => setCompanyPage((prev) => Math.min(totalCompanyPages, prev + 1))}
+                disabled={companyPage === totalCompanyPages}
+                className="text-xs text-white"
+                ><ChevronRight className="size-3.5" />
+                Next
+              </Button>
+            </div>
           </div>
         </div>
 

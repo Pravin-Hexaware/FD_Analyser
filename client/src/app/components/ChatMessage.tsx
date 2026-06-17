@@ -212,7 +212,7 @@ function parseTextWithFormatting(text: string): any[] {
   return parts;
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+function ChatMessageComponent({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
 
   const normalizeFileName = (text: string) => {
@@ -366,3 +366,10 @@ export function ChatMessage({ message }: ChatMessageProps) {
     </div>
   );
 }
+
+export const ChatMessage = React.memo(ChatMessageComponent, (prevProps, nextProps) => {
+  return prevProps.message.id === nextProps.message.id
+    && prevProps.message.content === nextProps.message.content
+    && prevProps.message.role === nextProps.message.role
+    && prevProps.message.timestamp.getTime() === nextProps.message.timestamp.getTime();
+});

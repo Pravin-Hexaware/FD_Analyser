@@ -87,7 +87,7 @@ export function ProgressMessages({ messages, isLoading = false }: ProgressMessag
         }
         return prev;
       });
-    }, 10000); // 30 seconds per substep
+    }, 40000); // 30 seconds per substep
 
     return () => clearInterval(substepInterval);
   }, [isLoading, currentStepIndex]);
@@ -105,7 +105,7 @@ export function ProgressMessages({ messages, isLoading = false }: ProgressMessag
 
   const formatDuration = (ms: number) => {
     if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(1)}s`;
+    return `${(ms / 1000).toFixed(20)}s`;
   };
 
   return (

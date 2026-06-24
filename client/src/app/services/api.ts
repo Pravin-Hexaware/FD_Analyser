@@ -129,6 +129,49 @@ export async function sendLLMQuery(query: string, conversationId?: number): Prom
   }
 }
 
+export interface LLMQueryStreamOptions {
+  onMessage: (chunk: string) => void;
+  onMetadata?: (metadata: { chat_id: string; conversation_id: number }) => void;
+  onDone?: () => void;
+  onError?: (error: any) => void;
+}
+
+export function streamLLMQuery(query: string, options: LLMQueryStreamOptions, conversationId?: number): EventSource {
+  const endpoint = API_BASE_URL.replace(/\/$/, '') + '/llm/target_companies/stream';
+  const url = new URL(endpoint, window.location.origin);
+  url.searchParams.set('query', query);
+  if (conversationId !== undefined) {
+    url.searchParams.set('conversation_id', conversationId.toString());
+  }
+
+  const eventSource = new EventSource(url.toString());
+
+  eventSource.onmessage = (event) => {
+    options.onMessage(event.data);
+  };
+
+  eventSource.addEventListener('metadata', (event: MessageEvent) => {
+    try {
+      const data = JSON.parse(event.data);
+      options.onMetadata?.(data);
+    } catch (err) {
+      console.warn('Failed to parse metadata event:', err);
+    }
+  });
+
+  eventSource.addEventListener('done', () => {
+    eventSource.close();
+    options.onDone?.();
+  });
+
+  eventSource.addEventListener('error', (event) => {
+    eventSource.close();
+    options.onError?.(event);
+  });
+
+  return eventSource;
+}
+
 /**
  * Fetch chat history from backend
  * @returns List of chat history items

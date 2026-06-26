@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeSanitize from 'rehype-sanitize';
 import pdfMake from 'pdfmake/build/pdfmake';
 import 'pdfmake/build/vfs_fonts';
+import { toast } from 'react-hot-toast';
 import type { ChatMessage as ChatMessageType } from "../data/chatbot";
 import { CompanyInfoCard } from "./CompanyInfoCard";
 import { FinancialTable } from "./FinancialTable";
@@ -212,7 +213,7 @@ function parseTextWithFormatting(text: string): any[] {
   return parts;
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+function ChatMessageComponent({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
 
   const normalizeFileName = (text: string) => {
@@ -263,8 +264,14 @@ export function ChatMessage({ message }: ChatMessageProps) {
     pdfMake.createPdf(docDefinition).download(`${fileName}.pdf`);
   };
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(message.content);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      toast.success("Response Copied");
+    } catch (error) {
+      toast.error("Copy failed");
+      console.error("Copy failed", error);
+    }
   };
 
   const markdownComponents = {
@@ -315,16 +322,18 @@ export function ChatMessage({ message }: ChatMessageProps) {
               <div className="flex items-center gap-3 mt-3 pt-2 border-t border-gray-100">
                 <button
                   onClick={handleCopy}
-                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors bg-transparent border-none p-0 outline-none focus:outline-none"
                   title="Copy response"
+                  type="button"
                 >
                   <Copy className="size-3" />
                   Copy
                 </button>
                 <button
                   onClick={handleDownload}
-                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors bg-transparent border-none p-0 outline-none focus:outline-none"
                   title="Download as PDF"
+                  type="button"
                 >
                   <Download className="size-3" />
                   Download
@@ -366,3 +375,10 @@ export function ChatMessage({ message }: ChatMessageProps) {
     </div>
   );
 }
+
+export const ChatMessage = React.memo(ChatMessageComponent, (prevProps, nextProps) => {
+  return prevProps.message.id === nextProps.message.id
+    && prevProps.message.content === nextProps.message.content
+    && prevProps.message.role === nextProps.message.role
+    && prevProps.message.timestamp.getTime() === nextProps.message.timestamp.getTime();
+});

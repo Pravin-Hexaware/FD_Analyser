@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 from datetime import datetime
 import asyncio
 import threading
@@ -11,7 +12,12 @@ import re
 import csv
 from pathlib import Path
 
-from service.analysis_service import parse_query_and_get_companies, generate_answer_from_data, _get_or_fetch_today_news_summary
+from service.analysis_service import (
+    parse_query_and_get_companies,
+    generate_answer_from_data,
+    stream_answer_from_data,
+    _get_or_fetch_today_news_summary,
+)
 from service.news_service import NewsService
 from repository.sqlite_repository import SqliteRepository
 
@@ -87,6 +93,13 @@ def _append_missing_company(
 
     if background_tasks is not None and schedule_processing:
         background_tasks.add_task(_schedule_missing_company_processing)
+
+
+def _format_sse_event(event_name: str, data: str) -> bytes:
+    """Format a single Server-Sent Event message."""
+    sanitized = data.replace("\r", "").split("\n")
+    formatted = "".join(f"data: {line}\n" for line in sanitized)
+    return f"event: {event_name}\n{formatted}\n".encode("utf-8")
 
 
 _validation_companies_cache: Optional[List[Dict[str, str]]] = None
@@ -975,6 +988,218 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         raise
     except Exception as e:
         print("Error:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/llm/target_companies/stream")
+async def stream_llm_target_companies(query: str, background_tasks: BackgroundTasks, conversation_id: Optional[int] = None):
+    """Stream a chat response as Server-Sent Events."""
+    try:
+        repo = SqliteRepository()
+
+        # Create or validate conversation
+        if conversation_id is None:
+            conversation_id = repo.create_conversation()
+        else:
+            if not repo.conversation_exists(conversation_id):
+                repo.close()
+                raise HTTPException(status_code=404, detail="Conversation not found")
+
+        chat_id = str(conversation_id)
+
+        # Save the incoming user message inside the conversation
+        repo.save_message(conversation_id, "user", query)
+
+        # Initialize log variables
+        user_query = query
+        initial_llm_prompt = get_actual_initial_prompt()
+        initial_llm_response = ""
+        db_fetched_data = {}
+        data_passed_to_llm = {}
+        final_llm_prompt = ""
+        peer_extraction_log = ""
+
+        progress_messages: List[Dict[str, str]] = []
+        all_data: Dict[str, Any] = {}
+        tracked_missing = set()
+
+        # Step 1: Parse user query
+        parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(query)
+        initial_llm_response = json.dumps(parsed)
+
+        if parsed.get("error"):
+            repo.close()
+            raise HTTPException(status_code=500, detail=parsed.get("error"))
+
+        intent = parsed.get("intent", {})
+        statement_type = intent.get("statement_type", "unspecified")
+        statement_frequency = intent.get("statement_frequency", "unspecified")
+        period = intent.get("period", "unspecified")
+        time_horizon = intent.get("time_horizon", "unspecified")
+        get_peer = intent.get("get_peer", False)
+        frequency = _determine_frequency(statement_frequency, statement_type, period)
+
+        target_companies = parsed.get("target_companies", {})
+        validation_results: Dict[str, Dict[str, Any]] = {}
+        invalid_companies = []
+
+        for key, company in target_companies.items():
+            company_name = company.get("company", key)
+            validation_results[company_name] = _resolve_company_validation(company_name, company.get("symbol"))
+            if not validation_results[company_name]["valid"]:
+                invalid_companies.append(company_name)
+
+        if invalid_companies:
+            repo.save_message(conversation_id, "llm", f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company.")
+            repo.close()
+            return StreamingResponse(
+                iter([_format_sse_event("message", f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."), _format_sse_event("done", "true")]),
+                media_type="text/event-stream"
+            )
+
+        # Step 2: Fetch data for target companies and peers
+        missing_processing_scheduled = False
+        for key, company in target_companies.items():
+            company_name = company.get("company", key)
+            validation_info = validation_results[company_name]
+            resolved_scrip_code = validation_info["resolved_scrip_code"]
+            company["scrip_code"] = resolved_scrip_code
+
+            data = _fetch_company_data(repo, resolved_scrip_code, frequency, statement_type, period, time_horizon, query)
+            all_data[company_name] = data
+            if not data:
+                missing_key = (company_name, resolved_scrip_code, frequency, period, time_horizon, False)
+                if missing_key not in tracked_missing:
+                    _append_missing_company(
+                        company_name=company_name,
+                        symbol=company.get("symbol"),
+                        scrip_code=resolved_scrip_code,
+                        frequency=frequency,
+                        period=period,
+                        time_horizon=time_horizon,
+                        is_peer=False,
+                        query=query,
+                        background_tasks=background_tasks,
+                        schedule_processing=not missing_processing_scheduled,
+                    )
+                    tracked_missing.add(missing_key)
+                    missing_processing_scheduled = True
+
+            if get_peer:
+                peers = company.get("peers", {})
+                for p_key, peer in peers.items():
+                    p_scrip = peer.get("scrip_code")
+                    peer_name = peer.get("company", p_key)
+                    if p_scrip:
+                        p_data = _fetch_company_data(repo, p_scrip, frequency, statement_type, period, time_horizon, query)
+                        all_data[peer_name] = p_data
+                        if not p_data:
+                            missing_key = (peer_name, p_scrip, frequency, period, time_horizon, True)
+                            if missing_key not in tracked_missing:
+                                _append_missing_company(
+                                    company_name=peer_name,
+                                    symbol=peer.get("symbol"),
+                                    scrip_code=p_scrip,
+                                    frequency=frequency,
+                                    period=period,
+                                    time_horizon=time_horizon,
+                                    is_peer=True,
+                                    query=query,
+                                    background_tasks=background_tasks,
+                                    schedule_processing=not missing_processing_scheduled,
+                                )
+                                tracked_missing.add(missing_key)
+                                missing_processing_scheduled = True
+
+        has_data = bool(all_data) and any(all_data.values())
+
+        if not has_data:
+            background_note = "Background XBRL fetch has been scheduled and will continue quietly. Please try again after 10 minutes."
+            answer = (
+                "Company data for the selected period is temporarily unavailable, possibly due to processing delays.Please try again after 10 minutes. "
+                ""
+            )
+            repo.save_message(conversation_id, "llm", answer)
+            repo.close()
+            return StreamingResponse(
+                iter([_format_sse_event("message", answer), _format_sse_event("done", "true")]),
+                media_type="text/event-stream",
+                background=background_tasks,
+            )
+
+        # Step 3: Fetch news context
+        news_context_parts = []
+        all_companies_to_fetch_news = list(validation_results.keys())
+        if get_peer:
+            for company_name, company_info in target_companies.items():
+                actual_company_name = company_info.get("company", company_name)
+                if actual_company_name in all_data:
+                    peers = company_info.get("peers", {})
+                    for p_key, peer in peers.items():
+                        peer_name = peer.get("company", p_key)
+                        if peer_name not in all_companies_to_fetch_news:
+                            all_companies_to_fetch_news.append(peer_name)
+
+        for company_name in all_companies_to_fetch_news:
+            validation_info = validation_results.get(company_name)
+            if validation_info is None:
+                normalized_key = company_name.strip()
+                resolved_symbol = normalized_key if re.fullmatch(r"[A-Za-z]{2,10}", normalized_key) else None
+                validation_info = _resolve_company_validation(company_name, resolved_symbol)
+                validation_results[company_name] = validation_info
+
+            scrip_code = validation_info.get("resolved_scrip_code") if validation_info.get("valid") else None
+            news_company_name = validation_info.get("resolved_issuer_name") or company_name
+            if scrip_code:
+                markdown_news = await _get_or_fetch_today_news_summary(news_company_name, scrip_code)
+                if markdown_news:
+                    company_news_str = f"\n### {company_name} - Today's News Content\n"
+                    company_news_str += markdown_news
+                    company_news_str += "\n"
+                    news_context_parts.append(company_news_str)
+
+        news_context = "\n".join(news_context_parts) if news_context_parts else None
+
+        # Send metadata event to client
+        def event_generator() -> Iterator[bytes]:
+            metadata = {
+                "chat_id": chat_id,
+                "conversation_id": conversation_id,
+            }
+            yield _format_sse_event("metadata", json.dumps(metadata))
+
+            answer_parts: List[str] = []
+            for chunk in stream_answer_from_data(query, all_data, statement_type, frequency, news_context=news_context):
+                answer_parts.append(chunk)
+                yield _format_sse_event("message", chunk)
+
+            yield _format_sse_event("done", "true")
+
+            answer = "".join(answer_parts)
+            try:
+                # Save assistant message inside chat after streaming completes
+                repo.save_message(conversation_id, "llm", answer)
+                repo.close()
+                write_llm_log(
+                    user_query=user_query,
+                    llm_prompt=initial_llm_prompt,
+                    llm_response=initial_llm_response,
+                    db_data=db_fetched_data,
+                    data_passed_to_llm=all_data,
+                    final_prompt=final_llm_prompt,
+                    final_response=answer,
+                    peer_extraction_log=peer_extraction_log if peer_extraction_log else "",
+                    token_usage={},
+                )
+            except Exception:
+                pass
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("Stream error:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 

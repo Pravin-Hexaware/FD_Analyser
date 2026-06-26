@@ -10,8 +10,7 @@ import { CompactProgressCard } from "../components/CompactProgressCard";
 import { Sidebar } from "../../components/Sidebar";
 import { useSidebarContext } from "../../context/SidebarContext";
 import type { ChatMessage as ChatMessageType } from "../data/chatbot";
-import { processChatQuery } from "../data/chatbot";
-import { companies } from "../data/companies";
+import { processChatQueryStream } from "../data/chatbot";
 import { fetchChatHistory, fetchChat, type ChatHistoryItem } from "../services/api";
 
 const navItems = [
@@ -45,12 +44,17 @@ export default function ChatbotPage() {
   const [isResponseComplete, setIsResponseComplete] = useState(false);
   const [currentChatId, setCurrentChatId] = useState<number | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
+  const [streamingStarted, setStreamingStarted] = useState(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Load chat history on component mount
   useEffect(() => {
     loadChatHistory();
+    return () => {
+      eventSourceRef.current?.close();
+    };
   }, []);
 
   const loadChatHistory = async () => {
@@ -89,34 +93,60 @@ export default function ChatbotPage() {
     const text = content || inputValue;
     if (!text.trim()) return;
 
+    const assistantId = `msg-${Date.now()}-assistant`;
     const userMessage: ChatMessageType = {
       id: `msg-${Date.now()}-user`,
       role: "user",
       content: text,
       timestamp: new Date(),
     };
+
     setMessages(prev => [...prev, userMessage]);
+    setStreamingStarted(false);
     setInputValue("");
     setIsTyping(true);
     setIsResponseComplete(false);
 
-    // Call the async function to process the query
-    processChatQuery(text, companies, currentChatId ?? undefined)
-      .then((response) => {
-        setIsTyping(false);
-        setIsResponseComplete(true);
-        setMessages(prev => [...prev, response.message]);
-        if (response.conversationId) {
-          setCurrentChatId(response.conversationId);
+    eventSourceRef.current?.close();
+    eventSourceRef.current = processChatQueryStream(
+      text,
+      currentChatId,
+      (chunk) => {
+        setStreamingStarted(true);
+        setMessages((prev) => {
+          const hasAssistant = prev.some((msg) => msg.id === assistantId);
+          if (hasAssistant) {
+            return prev.map((msg) =>
+              msg.id === assistantId ? { ...msg, content: msg.content + chunk } : msg
+            );
+          }
+          const assistantMessage: ChatMessageType = {
+            id: assistantId,
+            role: "assistant",
+            content: chunk,
+            timestamp: new Date(),
+          };
+          return [...prev, assistantMessage];
+        });
+      },
+      (metadata) => {
+        if (metadata.conversation_id) {
+          setCurrentChatId(metadata.conversation_id);
         }
-        loadChatHistory();
-      })
-      .catch(error => {
-        console.error("Error processing chat query:", error);
+      },
+      () => {
         setIsTyping(false);
         setIsResponseComplete(true);
-        // Don't show error message, just log the error
-      });
+        setStreamingStarted(false);
+        loadChatHistory();
+      },
+      (error) => {
+        console.error("SSE chat error:", error);
+        setIsTyping(false);
+        setIsResponseComplete(true);
+        setStreamingStarted(false);
+      }
+    );
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -240,7 +270,7 @@ export default function ChatbotPage() {
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} />
             ))}
-            {isTyping && !isResponseComplete && (
+            {isTyping && !isResponseComplete && !streamingStarted && (
               <CompactProgressCard 
                 isLoading={isTyping} 
                 isResponseComplete={isResponseComplete}
@@ -306,12 +336,13 @@ export default function ChatbotPage() {
               />
               <button
                 onClick={() => handleSendMessage()}
-                disabled={!inputValue.trim() || isTyping}
+                disabled={inputValue.trim().length < 15 || isTyping}
                 className={`size-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-all ${
-                  inputValue.trim() && !isTyping
+                  inputValue.trim().length >= 15 && !isTyping
                     ? "bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm shadow-indigo-200"
                     : "bg-gray-100 text-gray-400 cursor-not-allowed"
                 }`}
+                title={inputValue.trim().length < 15 ? `Minimum 15 characters required (${inputValue.trim().length}/15)` : "Send message"}
               >
                 <Send className="size-4" />
               </button>

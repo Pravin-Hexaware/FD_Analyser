@@ -1,7 +1,6 @@
 // Mock chatbot responses and AI report generation
 import type { CompanyData } from "./companies";
-import { companies } from "./companies";
-import { sendLLMQuery } from "../services/api";
+import { sendLLMQuery, streamLLMQuery } from "../services/api";
 
 export interface ProgressMessage {
   stage: string;
@@ -158,7 +157,7 @@ export interface ChatResponse {
   conversationId?: number;
 }
  
-export async function processChatQuery(query: string, companiesList: CompanyData[], conversationId?: number): Promise<ChatResponse> {
+export async function processChatQuery(query: string, conversationId?: number): Promise<ChatResponse> {
   // Send query to backend LLM endpoint
   const response = await sendLLMQuery(query, conversationId);
  
@@ -172,4 +171,20 @@ export async function processChatQuery(query: string, companiesList: CompanyData
     },
     conversationId: Number(response.chat_id),
   };
+}
+
+export function processChatQueryStream(
+  query: string,
+  conversationId: number | null,
+  onMessage: (chunk: string) => void,
+  onMetadata: (metadata: { chat_id: string; conversation_id: number }) => void,
+  onDone: () => void,
+  onError: (error: any) => void,
+): EventSource {
+  return streamLLMQuery(query, {
+    onMessage,
+    onMetadata,
+    onDone,
+    onError,
+  }, conversationId ?? undefined);
 }

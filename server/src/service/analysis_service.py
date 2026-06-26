@@ -862,10 +862,6 @@ def _find_value_by_keywords(data: Any, keywords: List[str]) -> Optional[float]:
     return None
 
 
-def _extract_sales_from_json(parsed_json: Any) -> Optional[float]:
-    return _find_value_by_keywords(parsed_json, ["sales", "revenue", "net sales", "total revenue"])
-
-
 def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> Tuple[Dict[str, List[Dict[str, Any]]], str]:
     """Get peers for each input request based on symbol or company name.
 

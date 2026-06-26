@@ -129,7 +129,7 @@ class CompanyExtractor:
         potential_names = self._extract_potential_company_names(query)
         
         # Determine if this is a multi-company/comparison query
-        multi_company = any(word in query.lower() for word in [" and ", " vs ", " versus ", " between ", "compare "])
+        multi_company = any(word in query.lower() for word in [" and ","&","across"," vs ", " versus ", " between ", "compare "])
 
         results = []
         seen_symbols = set()

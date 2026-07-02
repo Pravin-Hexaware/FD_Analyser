@@ -159,8 +159,12 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
     return None
 
 
-async def _fetch_news_using_agent(company_name: str, max_results: int = 3) -> Optional[str]:
-    """Fetch recent company news URLs with the agent and convert them to markdown text."""
+def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Optional[str]:
+    """Fetch recent company news URLs with the agent and convert them to markdown text.
+
+    This is a blocking helper that combines agent URL collection and scraper markdown generation
+    in a single node for parallel execution with the LLM request.
+    """
     try:
         from api.service.news_agent_service import app as news_agent_app, process_results
         from langchain_core.messages import HumanMessage
@@ -202,6 +206,11 @@ async def _fetch_news_using_agent(company_name: str, max_results: int = 3) -> Op
     except Exception as e:
         print(f"[WARN] Agent news fetch failed for {company_name}: {e}")
         return None
+
+
+async def _fetch_news_using_agent(company_name: str, max_results: int = 3) -> Optional[str]:
+    """Offload the blocking agent + scraper node to a thread so it can run truly parallel."""
+    return await asyncio.to_thread(_fetch_news_using_agent_sync, company_name, max_results)
 
 
 async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_code: Optional[str] = None) -> Optional[str]:
@@ -412,9 +421,42 @@ def _extract_chunk_text(chunk: Any) -> str:
     return str(content)
 
 
-def _build_llm_prompts(query: str, formatted_data: Any, statement_type: str, frequency: str, news_context: Optional[str] = None) -> tuple[str, str]:
-    """Build system and user prompts for the LLM."""
-    system_prompt = f"""
+def _build_llm_prompts(query: str, formatted_data: Any, statement_type: str, frequency: str, news_context: Optional[str] = None, report_mode: str = "single") -> tuple[str, str]:
+    """Build system and user prompts for the LLM.
+    
+    Args:
+        report_mode: "single" for complete single-LLM report, "multi-first" for first part of two-LLM analysis
+    """
+    if report_mode == "multi-first":
+        # For CASE 2: First LLM request - generate the core report body without any phase markers
+        system_prompt = f"""You are a Senior Financial Analyst providing structured, data-driven analysis.
+
+Using only the financial data provided, generate a complete, polished report body for the user. Use a single title and the following sections in a seamless final-report style:
+Provide a comprehensive, board-Level Title and include the following sections:
+## I. Executive Summary
+## II. Company Overview and Strategic Context
+## III. Comprehensive Financial Performance Analysis
+## IV. Audit Findings, Qualifications & Management Disclosures
+## V. Trend Analysis and Forecasting Insights
+## VI. Risk Assessment and Mitigation
+## VII. Strategic Implications and Recommendations
+## VIII. Appendices
+
+Focus on:
+
+- Use tables whenever numerical comparison helps readability.
+- Present financial metrics in tabular format.
+- Include KPI summaries in tables.
+- Key findings from the financial data
+- Revenue, profitability, cash flow and balance sheet analysis
+- Trend analysis and ratio insights
+- Operational drivers, risks, and financial strengths/weaknesses
+- Any data limitations or gaps
+
+Do not mention that this is a draft, phase 1, Conclusion, Summary or a preliminary version. Do not add separator text, end-of-report markers, or repeated titles."""
+    else:
+        # For CASE 1: Single LLM request - comprehensive report with all sections
+        system_prompt = f"""
 You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
 
 Generate a complete, exhaustive financial analysis report in Markdown format WITHOUT ANY TRUNCATION OR LENGTH RESTRICTIONS. The report should comprehensively analyze ALL available financial data, metrics, parameters, textual information, AND RECENT NEWS PROVIDED in the input - not just a subset.
@@ -546,14 +588,8 @@ CRITICAL SECTION - Include ALL:
 - Forward-looking indicators from historical trends
 - Sustainability of observed trends
 
-## VI. Comparative Analysis
-- Peer group comparisons across all metrics
-- Industry benchmarking and positioning
-- Competitive advantages and disadvantages
-- Market share and growth relative to peers
-- Relative financial health assessment
 
-## VII. Risk Assessment and Mitigation
+## VI. Risk Assessment and Mitigation
 - Financial risk factors: Liquidity, solvency, currency, interest rate
 - Operational risks: Cost pressures, margin compression, supply chain
 - Market risks: Competition, demand fluctuations, regulatory changes
@@ -561,7 +597,7 @@ CRITICAL SECTION - Include ALL:
 - Quantitative risk metrics and stress testing insights
 - Disclosed management concerns and risk factors
 
-## VIII. Strategic Implications and Recommendations
+## VII. Strategic Implications and Recommendations
 - Strategic opportunities identified from financial trends
 - Areas requiring management intervention
 - Capital allocation recommendations
@@ -569,14 +605,7 @@ CRITICAL SECTION - Include ALL:
 - Governance and compliance considerations
 - Long-term value creation strategies
 
-## IX. Data Quality and Limitations
-- Assessment of data completeness and reliability
-- Missing data impacts on analysis
-- Assumptions and estimation methodologies used
-- Audit qualifications or any hedges on financial reliability
-- Recommendations for improved financial reporting
-
-## X. Appendices
+## VIII. Appendices
 - Detailed financial statements and schedules
 - Ratio calculations and trend charts
 - Peer comparison tables
@@ -607,17 +636,26 @@ CRITICAL SECTION - Include ALL:
         f"\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
     ]
     
-    if news_context:
-        user_prompt_parts.append(f"\n\n## RECENT NEWS AND MARKET DEVELOPMENTS (PRIMARY ANALYTICAL INPUT)\n\nUse this recent news to contextualize and explain financial metrics. These developments ARE the key drivers behind the observed financial performance:\n\n{news_context}\n\n**INSTRUCTIONS**: \n1. For each major news item, identify its expected financial impact\n2. Correlate news timing with financial metric changes\n3. Assess how news affects risk profile, growth trajectory, and valuation\n4. Explain whether financial results align with news-driven expectations\n5. Use news to project future financial performance and identify leading indicators\n6. Integrate news insights throughout the analysis, not in a separate section")
+    if report_mode == "multi-first":
+        # For CASE 2 first request: Create the main report body only
+        user_prompt_parts.append("\n\nProvide a comprehensive and detailed analysis of the financial data. Include the requested sections in a polished, user-facing report format. Keep the output self-contained and ready to be enhanced with news context later.")
     else:
-        user_prompt_parts.append("\n\nNOTE: No recent news data available for this analysis. Proceed with financial data analysis only.")
+        # For CASE 1: Single request with news if available
+        if news_context:
+            user_prompt_parts.append(f"\n\n## RECENT NEWS AND MARKET DEVELOPMENTS (PRIMARY ANALYTICAL INPUT)\n\nUse this recent news to contextualize and explain financial metrics. These developments ARE the key drivers behind the observed financial performance:\n\n{news_context}\n\n**INSTRUCTIONS**: \n1. For each major news item, identify its expected financial impact\n2. Correlate news timing with financial metric changes\n3. Assess how news affects risk profile, growth trajectory, and valuation\n4. Explain whether financial results align with news-driven expectations\n5. Use news to project future financial performance and identify leading indicators\n6. Integrate news insights throughout the analysis, not in a separate section")
+        else:
+            user_prompt_parts.append("\n\nNOTE: No recent news data available for this analysis. Proceed with financial data analysis only.")
     
     user_prompt = "\n".join(user_prompt_parts)
     return system_prompt, user_prompt
 
 
-def stream_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str, news_context: Optional[str] = None) -> Iterator[str]:
-    """Stream answer chunks from the LLM using AzureChatOpenAI streaming."""
+def stream_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str, news_context: Optional[str] = None, report_mode: str = "single") -> Iterator[str]:
+    """Stream answer chunks from the LLM using AzureChatOpenAI streaming.
+    
+    Args:
+        report_mode: "single" for complete report, "multi-first" for main analysis without conclusions
+    """
     formatted_data = data
     if isinstance(data, list):
         formatted_data = []
@@ -635,7 +673,7 @@ def stream_answer_from_data(query: str, data: Dict[str, Any], statement_type: st
                 formatted_data.get("publication_date")
             )
 
-    system_prompt, user_prompt = _build_llm_prompts(query, formatted_data, statement_type, frequency, news_context)
+    system_prompt, user_prompt = _build_llm_prompts(query, formatted_data, statement_type, frequency, news_context, report_mode=report_mode)
     llm = _get_llm()
 
     for chunk in llm.stream(

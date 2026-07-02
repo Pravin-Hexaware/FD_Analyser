@@ -265,7 +265,7 @@ def _parse_entry_published(entry: dict) -> str:
 
 
 @tool
-def fetch_news(query: str, limit: int = 50):
+def fetch_news(query: str, limit: int = 5):
     """Fetch relevant news articles for a query from Google News RSS."""
 
     limit = min(limit, 3)
@@ -319,8 +319,8 @@ def agent_node(state: State):
     }
 
     Rules:
-    - Return AT MOST 4 results.
-    - Include ONLY the top 4 most relevant articles.
+    - Return AT MOST 3 results.
+    - Include ONLY the top 3 most relevant articles.
     - If no relevant articles are found, return:
       { "results": [] }
     - Ensure valid JSON (no trailing commas, proper quotes).

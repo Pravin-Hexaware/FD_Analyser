@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple
 from datetime import datetime
 import asyncio
 import threading
+import queue
 import uuid
 import json
 import os
@@ -17,11 +18,158 @@ from service.analysis_service import (
     generate_answer_from_data,
     stream_answer_from_data,
     _get_or_fetch_today_news_summary,
+    _normalize_company_folder_name,
+    _get_today_news_summary,
 )
 from service.news_service import NewsService
 from repository.sqlite_repository import SqliteRepository
 
 router = APIRouter()
+
+# ============================================================================
+# LOW-LATENCY PIPELINE: Helper Functions for Parallel News Handling
+# ============================================================================
+
+def _news_cache_path(company_name: str, scrip_code: str) -> Path:
+    """Return the path where cached news for a company should be stored."""
+    src_dir = Path(__file__).resolve().parents[1]
+    markdown_base = src_dir / "markdown"
+    safe_name = _normalize_company_folder_name(company_name)
+    today = datetime.now().strftime("%Y%m%d")
+    return markdown_base / safe_name / today
+
+
+def _get_latest_cached_news_summary(company_name: str, require_today_only: bool = False) -> Optional[str]:
+    """Return cached news from the latest available date folder.
+
+    When require_today_only is True, only the current date folder is considered.
+    This is used for news availability checks so old cached news does not count.
+    """
+    if not company_name:
+        return None
+
+    src_dir = Path(__file__).resolve().parents[1]
+    markdown_base = src_dir / "markdown"
+    safe_name = _normalize_company_folder_name(company_name)
+    company_folder = markdown_base / safe_name
+    if not company_folder.exists():
+        return None
+
+    today = datetime.now().strftime("%Y%m%d")
+    date_folders = sorted(
+        [p for p in company_folder.iterdir() if p.is_dir() and p.name.isdigit()],
+        reverse=True,
+    )
+    if require_today_only:
+        date_folders = [p for p in date_folders if p.name == today]
+
+    for folder in date_folders:
+        article_files = [
+            path for path in sorted(folder.glob("*.md"))
+            if path.name.lower() != "summary.md"
+        ]
+        if article_files:
+            contents = []
+            for path in article_files:
+                try:
+                    contents.append(path.read_text(encoding="utf-8").strip())
+                except Exception:
+                    continue
+            if contents:
+                return "\n\n".join(contents)
+
+        summary_file = folder / "summary.md"
+        if summary_file.exists() and summary_file.is_file():
+            try:
+                return summary_file.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+
+    return None
+
+
+async def _check_news_exists(company_name: str, scrip_code: str, resolved_name: Optional[str] = None) -> bool:
+    """Check if cached news articles exist for the company.
+
+    This checks both the original query company name and the validated issuer name,
+    since markdown news folders may be created under either.
+    """
+    try:
+        if _get_latest_cached_news_summary(company_name, require_today_only=True) is not None:
+            return True
+        if resolved_name and resolved_name != company_name:
+            if _get_latest_cached_news_summary(resolved_name, require_today_only=True) is not None:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+async def _fetch_news_for_company(
+    company_name: str, 
+    scrip_code: str, 
+    validated_name: Optional[str] = None
+) -> Optional[str]:
+    """Fetch news for a single company (background task for PROCESS B)."""
+    try:
+        resolved_name = validated_name or company_name
+        return await _get_or_fetch_today_news_summary(resolved_name, scrip_code)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch news for {company_name}: {str(e)}")
+        return None
+
+
+async def _generate_news_impact_section(
+    original_report: str,
+    query: str,
+    company_data: Dict[str, Any],
+    news_context: str,
+    statement_type: str,
+    frequency: str
+) -> str:
+    """
+    Generate a new section: "Impact of Recent News on the Company"
+    This is called after news collection completes (STEP 4).
+    """
+    from service.analysis_service import _invoke_llm
+    
+    system_prompt = """You are a Senior Financial Analyst providing strategic insights.
+
+You will receive an existing report body plus recent news context. Generate one concise, polished section that integrates the news into the analysis without repeating the title or reprinting the entire report.
+
+Requirements:
+- Keep the report seamless and professional
+- Add a clear section such as '## IX. News-Driven Assessment and Outlook' or similar
+- Explain how recent news changes the interpretation of financial performance, risk, and outlook
+- Include implications for revenue, margin, cash flow, balance sheet, and strategic positioning
+- Must include a dedicated final conclusion or overall assessment section at the end of the response
+- The conclusion must clearly summarize the overall report and provide a final recommendation or takeaway
+
+Do not repeat the full title, do not add 'phase 1'/'phase 2' markers, and do not include any separator text like 'END OF REPORT'."""
+
+    user_prompt = f"""Original Query: {query}
+
+Recent News Articles and Market Developments:
+{news_context}
+
+Company Financial Data:
+{json.dumps(company_data, indent=2)}
+
+Existing Report Body:
+---
+{original_report}
+---
+
+Generate one seamless section that integrates the recent news into the report and improves the final analysis. The output should be only the new section content, ready to be appended to the existing report."""
+
+    try:
+        response = _invoke_llm(system_prompt, user_prompt, max_tokens=2000)
+        from service.analysis_service import _normalize_llm_response
+        normalized = _normalize_llm_response(response)
+        return normalized.get("content", "")
+    except Exception as e:
+        print(f"[ERROR] Failed to generate news impact section: {str(e)}")
+        return ""
 
 def _missing_tracker_csv_path() -> Path:
     src_dir = Path(__file__).resolve().parents[1]   # points to src/
@@ -993,7 +1141,19 @@ Provide a clear, concise answer to the query. If data is missing for some compan
 
 @router.get("/llm/target_companies/stream")
 async def stream_llm_target_companies(query: str, background_tasks: BackgroundTasks, conversation_id: Optional[int] = None):
-    """Stream a chat response as Server-Sent Events."""
+    """
+    LOW-LATENCY STREAMING ENDPOINT: Implements progressive report enhancement.
+    
+    STEP 1: Parse query and validate companies (sync)
+    STEP 2: Fetch financial data from database (sync)
+    STEP 3: Check for cached news + parallel execution
+        - CASE 1: News exists → Generate full report with news → Stream it
+        - CASE 2: News missing → 
+            - PROCESS A: Generate fast report (no news) → Stream immediately
+            - PROCESS B: Fetch news in background (async)
+    STEP 4: Once PROCESS B completes → Generate news impact section
+    STEP 5: Stream the news impact section and append to UI
+    """
     try:
         repo = SqliteRepository()
 
@@ -1006,8 +1166,6 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 raise HTTPException(status_code=404, detail="Conversation not found")
 
         chat_id = str(conversation_id)
-
-        # Save the incoming user message inside the conversation
         repo.save_message(conversation_id, "user", query)
 
         # Initialize log variables
@@ -1015,15 +1173,19 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         initial_llm_prompt = get_actual_initial_prompt()
         initial_llm_response = ""
         db_fetched_data = {}
-        data_passed_to_llm = {}
-        final_llm_prompt = ""
         peer_extraction_log = ""
 
         progress_messages: List[Dict[str, str]] = []
         all_data: Dict[str, Any] = {}
         tracked_missing = set()
 
-        # Step 1: Parse user query
+        # ====== STEP 1: Parse user query ======
+        print("[STEP 1] Parsing user query with NLP")
+        progress_messages.append({
+            "stage": "Extracting user intent",
+            "timestamp": datetime.now().isoformat()
+        })
+
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(query)
         initial_llm_response = json.dumps(parsed)
 
@@ -1057,7 +1219,13 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 media_type="text/event-stream"
             )
 
-        # Step 2: Fetch data for target companies and peers
+        # ====== STEP 2: Fetch financial data ======
+        print("[STEP 2] Fetching financial data for target companies" + (" + peers" if get_peer else ""))
+        progress_messages.append({
+            "stage": "Fetching relevant data",
+            "timestamp": datetime.now().isoformat()
+        })
+
         missing_processing_scheduled = False
         for key, company in target_companies.items():
             company_name = company.get("company", key)
@@ -1116,8 +1284,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         if not has_data:
             background_note = "Background XBRL fetch has been scheduled and will continue quietly. Please try again after 10 minutes."
             answer = (
-                "Company data for the selected period is temporarily unavailable, possibly due to processing delays.Please try again after 10 minutes. "
-                ""
+                "Company data for the selected period is temporarily unavailable, possibly due to processing delays. Please try again after 10 minutes."
             )
             repo.save_message(conversation_id, "llm", answer)
             repo.close()
@@ -1127,74 +1294,202 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 background=background_tasks,
             )
 
-        # Step 3: Fetch news context
-        news_context_parts = []
-        all_companies_to_fetch_news = list(validation_results.keys())
-        if get_peer:
-            for company_name, company_info in target_companies.items():
-                actual_company_name = company_info.get("company", company_name)
-                if actual_company_name in all_data:
-                    peers = company_info.get("peers", {})
-                    for p_key, peer in peers.items():
-                        peer_name = peer.get("company", p_key)
-                        if peer_name not in all_companies_to_fetch_news:
-                            all_companies_to_fetch_news.append(peer_name)
+        # ====== STEP 3: News check + Parallel Execution ======
+        print("[STEP 3] Checking for cached news and preparing parallel execution")
+        progress_messages.append({
+            "stage": "Checking for news",
+            "timestamp": datetime.now().isoformat()
+        })
 
-        for company_name in all_companies_to_fetch_news:
-            validation_info = validation_results.get(company_name)
-            if validation_info is None:
-                normalized_key = company_name.strip()
-                resolved_symbol = normalized_key if re.fullmatch(r"[A-Za-z]{2,10}", normalized_key) else None
-                validation_info = _resolve_company_validation(company_name, resolved_symbol)
-                validation_results[company_name] = validation_info
+        # Build list of companies to check for news
+        news_check_companies: List[Tuple[str, str, str]] = []  # (company_name, scrip_code, validated_name)
+        for company_name in validation_results.keys():
+            validation_info = validation_results[company_name]
+            if validation_info.get("valid"):
+                scrip_code = validation_info["resolved_scrip_code"]
+                resolved_name = validation_info["resolved_issuer_name"]
+                news_check_companies.append((company_name, scrip_code, resolved_name))
 
-            scrip_code = validation_info.get("resolved_scrip_code") if validation_info.get("valid") else None
-            news_company_name = validation_info.get("resolved_issuer_name") or company_name
-            if scrip_code:
-                markdown_news = await _get_or_fetch_today_news_summary(news_company_name, scrip_code)
-                if markdown_news:
-                    company_news_str = f"\n### {company_name} - Today's News Content\n"
-                    company_news_str += markdown_news
-                    company_news_str += "\n"
-                    news_context_parts.append(company_news_str)
+        # Check which companies have cached news
+        news_exists_map: Dict[str, bool] = {}
+        for company_name, scrip_code, resolved_name in news_check_companies:
+            news_exists_map[company_name] = await _check_news_exists(company_name, scrip_code, resolved_name)
 
-        news_context = "\n".join(news_context_parts) if news_context_parts else None
+        has_any_news = any(news_exists_map.values())
+        needs_news_fetch = any(not v for v in news_exists_map.values())
 
-        # Send metadata event to client
-        def event_generator() -> Iterator[bytes]:
-            metadata = {
-                "chat_id": chat_id,
-                "conversation_id": conversation_id,
-            }
+        print(f"News status: {has_any_news=}, {needs_news_fetch=}")
+        print(f"News exists map: {news_exists_map}")
+
+        # Prepare async task variables
+        news_collection_task: Optional[asyncio.Task] = None
+        collected_news: Dict[str, Optional[str]] = {}
+
+        # ====== CASE 1: All news exists ======
+        if has_any_news and not needs_news_fetch:
+            print("[CASE 1] All news exists - generating full report with news")
+            progress_messages.append({
+                "stage": "Generating response with news context",
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Fetch all news summaries from the latest available cached folder.
+            news_context_parts = []
+            for company_name, scrip_code, resolved_name in news_check_companies:
+                if news_exists_map[company_name]:
+                    markdown_news = _get_latest_cached_news_summary(company_name, require_today_only=True)
+                    if not markdown_news and resolved_name and resolved_name != company_name:
+                        markdown_news = _get_latest_cached_news_summary(resolved_name, require_today_only=True)
+                    if markdown_news:
+                        news_context_parts.append(f"\n### {company_name} - Recent News\n{markdown_news}")
+
+            news_context = "\n".join(news_context_parts) if news_context_parts else None
+
+            # Generate and stream full report with news
+            def event_generator_case1() -> Iterator[bytes]:
+                metadata = {"chat_id": chat_id, "conversation_id": conversation_id}
+                yield _format_sse_event("metadata", json.dumps(metadata))
+
+                answer_parts: List[str] = []
+                for chunk in stream_answer_from_data(query, all_data, statement_type, frequency, news_context=news_context):
+                    answer_parts.append(chunk)
+                    yield _format_sse_event("message", chunk)
+
+                yield _format_sse_event("done", "true")
+
+                # Save answer after streaming
+                try:
+                    answer = "".join(answer_parts)
+                    repo.save_message(conversation_id, "llm", answer)
+                    repo.close()
+                except Exception:
+                    pass
+
+            return StreamingResponse(event_generator_case1(), media_type="text/event-stream")
+
+        # ====== CASE 2: News missing - Parallel execution ======
+        print("[CASE 2] News missing - launching parallel processes")
+        progress_messages.append({
+            "stage": "Generating response (news will follow)",
+            "timestamp": datetime.now().isoformat()
+        })
+
+        cached_news_parts: List[str] = []
+        for company_name, scrip_code, resolved_name in news_check_companies:
+            if news_exists_map.get(company_name):
+                cached_text = _get_latest_cached_news_summary(company_name, require_today_only=True)
+                if not cached_text and resolved_name and resolved_name != company_name:
+                    cached_text = _get_latest_cached_news_summary(resolved_name, require_today_only=True)
+                if cached_text:
+                    cached_news_parts.append(f"\n### {company_name} - Cached News\n{cached_text}")
+
+        async def collect_all_news() -> Dict[str, Optional[str]]:
+            """Async function to collect news for missing companies."""
+            tasks = []
+            missing_companies = [c for c in news_check_companies if not news_exists_map.get(c[0])]
+            for company_name, scrip_code, resolved_name in missing_companies:
+                tasks.append(asyncio.create_task(_fetch_news_for_company(company_name, scrip_code, resolved_name)))
+
+            results: Dict[str, Optional[str]] = {}
+            if tasks:
+                completed = await asyncio.gather(*tasks, return_exceptions=True)
+                for idx, (company_name, scrip_code, resolved_name) in enumerate(missing_companies):
+                    result = completed[idx]
+                    if isinstance(result, Exception):
+                        print(f"[PROCESS B] News fetch failed for {company_name}: {result}")
+                        results[company_name] = None
+                    else:
+                        results[company_name] = result
+            return results
+
+        def _produce_report_chunks(report_queue: queue.Queue) -> None:
+            try:
+                for chunk in stream_answer_from_data(query, all_data, statement_type, frequency, news_context=None, report_mode="multi-first"):
+                    report_queue.put(chunk)
+            except Exception as e:
+                print(f"[PROCESS A] Report generation error: {e}")
+            finally:
+                report_queue.put(None)
+
+        async def event_generator_case2() -> AsyncIterator[bytes]:
+            """Event generator for CASE 2: Fast path + background news collection."""
+            metadata = {"chat_id": chat_id, "conversation_id": conversation_id}
             yield _format_sse_event("metadata", json.dumps(metadata))
 
+            print("[PROCESS B] Starting background news collection")
+            news_task = asyncio.create_task(collect_all_news())
+
+            yield _format_sse_event("status", "Started initial report generation while news collection runs in background.")
+            print("[PROCESS A] Generating report without news (fast path)")
             answer_parts: List[str] = []
-            for chunk in stream_answer_from_data(query, all_data, statement_type, frequency, news_context=news_context):
+            report_queue: queue.Queue = queue.Queue()
+            producer_thread = threading.Thread(target=_produce_report_chunks, args=(report_queue,), daemon=True)
+            producer_thread.start()
+
+            while True:
+                chunk = await asyncio.to_thread(report_queue.get)
+                if chunk is None:
+                    break
                 answer_parts.append(chunk)
                 yield _format_sse_event("message", chunk)
 
+            fast_report = "".join(answer_parts)
+            print(f"[PROCESS A] Fast report generated ({len(fast_report)} chars)")
+
+            collected_news_result = {}
+            try:
+                collected_news_result = await news_task
+                print(f"[PROCESS B] News collection completed: {list(collected_news_result.keys())}")
+            except Exception as e:
+                print(f"[PROCESS B] News collection failed: {e}")
+
+            combined_news_parts = list(cached_news_parts)
+            for company_name, news_text in collected_news_result.items():
+                if news_text:
+                    combined_news_parts.append(f"\n### {company_name} - Recent News\n{news_text}")
+
+            complete_report = fast_report
+            if combined_news_parts:
+                news_context = "\n".join(combined_news_parts)
+                print("[STEP 4] Generating news impact section")
+                try:
+                    news_impact = await _generate_news_impact_section(
+                        original_report=fast_report,
+                        query=query,
+                        company_data=all_data,
+                        news_context=news_context,
+                        statement_type=statement_type,
+                        frequency=frequency
+                    )
+
+                    if news_impact:
+                        complete_report = fast_report + "\n\n" + news_impact.strip()
+                        print(f"[STEP 5] Streaming final combined report ({len(complete_report)} chars)")
+                    else:
+                        print("[STEP 5] Streaming base report without news enhancement")
+                except Exception as e:
+                    print(f"[ERROR] Failed to generate news impact section: {e}")
+
+            if complete_report != fast_report:
+                chunk_size = 80
+                for i in range(0, len(complete_report[len(fast_report):]), chunk_size):
+                    chunk = complete_report[len(fast_report):][i:i+chunk_size]
+                    yield _format_sse_event("message", chunk)
+                    await asyncio.sleep(0)
+
+            try:
+                repo.save_message(conversation_id, "llm", complete_report)
+            except Exception as e:
+                print(f"[ERROR] Failed to save complete report: {e}")
+
             yield _format_sse_event("done", "true")
 
-            answer = "".join(answer_parts)
             try:
-                # Save assistant message inside chat after streaming completes
-                repo.save_message(conversation_id, "llm", answer)
                 repo.close()
-                write_llm_log(
-                    user_query=user_query,
-                    llm_prompt=initial_llm_prompt,
-                    llm_response=initial_llm_response,
-                    db_data=db_fetched_data,
-                    data_passed_to_llm=all_data,
-                    final_prompt=final_llm_prompt,
-                    final_response=answer,
-                    peer_extraction_log=peer_extraction_log if peer_extraction_log else "",
-                    token_usage={},
-                )
             except Exception:
                 pass
 
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
+        return StreamingResponse(event_generator_case2(), media_type="text/event-stream")
 
     except HTTPException:
         raise

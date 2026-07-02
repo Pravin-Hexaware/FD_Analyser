@@ -67,6 +67,7 @@ class CompanyExtractor:
             'latest', 'recent', 'previous', 'current', 'last', 'quarter', 'year',
             'earnings', 'income', 'revenue', 'profit', 'loss', 'cash', 'flow',
             'available', 'data', 'question', 'comparative', 'comparitive', 'analysis',
+            'investment', 'thesis', 'review', 'ratings', 'outlook', 'update',
         }
         if any(word in generic_terms for word in words):
             return True
@@ -131,8 +132,9 @@ class CompanyExtractor:
         # Determine if this is a multi-company/comparison query
         multi_company = any(word in query.lower() for word in [" and ","&","across"," vs ", " versus ", " between ", "compare "])
 
-        results = []
+        candidate_matches = []
         seen_symbols = set()
+
         for name in potential_names:
             if self._is_generic_candidate(name):
                 continue
@@ -142,31 +144,82 @@ class CompanyExtractor:
             threshold = 0.5 if is_simple_query else 0.6
 
             match = self._find_best_match(name, threshold=threshold)
-
+            score = 0.0
             if match:
-                symbol = match["security_id"]
-                if symbol in seen_symbols:
-                    continue
-                seen_symbols.add(symbol)
-                results.append({
-                    "company": name,
-                    "matched": True,
-                    "issuer_name": match["issuer_name"],
-                    "security_code": match["security_code"],
-                    "security_id": match["security_id"],
-                })
-            else:
-                results.append({
-                    "company": name,
-                    "matched": False,
-                    "issuer_name": None,
-                    "security_code": None,
-                    "security_id": None,
-                })
+                normalized_query = self._normalize_text(name)
+                issuer_normalized = self._normalize_text(match["issuer_name"])
+                security_normalized = self._normalize_text(match["security_name"])
+                code_normalized = self._normalize_text(match["security_id"])
 
-            # If not a multi-company query, only return the first valid match
-            if not multi_company and results:
-                break
+                issuer_score = self._similarity_ratio(normalized_query, issuer_normalized)
+                security_score = self._similarity_ratio(normalized_query, security_normalized)
+                code_score = self._similarity_ratio(normalized_query, code_normalized)
+                if normalized_query in issuer_normalized or issuer_normalized in normalized_query:
+                    issuer_score = min(issuer_score + 0.15, 1.0)
+                if normalized_query in security_normalized or security_normalized in normalized_query:
+                    security_score = min(security_score + 0.15, 1.0)
+                if normalized_query in code_normalized or code_normalized in normalized_query:
+                    code_score = min(code_score + 0.15, 1.0)
+
+                score = max(issuer_score, security_score, code_score)
+
+            candidate_matches.append({
+                "company": name,
+                "matched": bool(match),
+                "issuer_name": match["issuer_name"] if match else None,
+                "security_code": match["security_code"] if match else None,
+                "security_id": match["security_id"] if match else None,
+                "score": score,
+            })
+
+        if not multi_company and candidate_matches:
+            best_match = None
+            for item in candidate_matches:
+                if not item["matched"]:
+                    continue
+                if item["security_id"] in seen_symbols:
+                    continue
+                if best_match is None:
+                    best_match = item
+                else:
+                    if item["score"] > best_match["score"]:
+                        best_match = item
+                    elif item["score"] == best_match["score"]:
+                        if len(item["company"]) > len(best_match["company"]):
+                            best_match = item
+            if best_match:
+                return [{
+                    "company": best_match["company"],
+                    "matched": True,
+                    "issuer_name": best_match["issuer_name"],
+                    "security_code": best_match["security_code"],
+                    "security_id": best_match["security_id"],
+                }]
+            # Fallback to first candidate if none matched
+            first_candidate = candidate_matches[0]
+            return [{
+                "company": first_candidate["company"],
+                "matched": first_candidate["matched"],
+                "issuer_name": first_candidate["issuer_name"],
+                "security_code": first_candidate["security_code"],
+                "security_id": first_candidate["security_id"],
+            }]
+
+        for item in candidate_matches:
+            if item["matched"]:
+                if item["security_id"] in seen_symbols:
+                    continue
+                seen_symbols.add(item["security_id"])
+
+        results = []
+        for item in candidate_matches:
+            results.append({
+                "company": item["company"],
+                "matched": item["matched"],
+                "issuer_name": item["issuer_name"],
+                "security_code": item["security_code"],
+                "security_id": item["security_id"],
+            })
 
         return results
     

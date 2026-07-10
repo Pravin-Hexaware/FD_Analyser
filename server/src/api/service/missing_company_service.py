@@ -422,17 +422,17 @@ class MissingCompanyService:
             try:
                 if 'ctx' in locals() and ctx is not None:
                     await ctx.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error closing websocket: {e}")
             try:
                 if browser is not None:
                     await browser.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error closing browser: {e}")
             try:
                 repo.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error closing repository: {e}")
 
     @staticmethod
     async def process_missing_companies_batch(

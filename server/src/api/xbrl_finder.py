@@ -5,8 +5,6 @@ Option C: Keep Smart Search UX but fix CORS by routing the SmartSearch XHR via P
 This version fixes the `javascript:__doPostBack(...)` case by capturing the popup instead of resolving the href.
 """
 
-import asyncio
-import json
 import re
 from typing import Optional
 
@@ -73,8 +71,8 @@ async def _dispatch_input_keyup(page, selector: str) -> None:
             }""",
             selector
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error dispatching input: {e}")
 
 async def _find_company_input(page) -> Optional[str]:
     """
@@ -93,7 +91,8 @@ async def _find_company_input(page) -> Optional[str]:
             box = await loc.bounding_box()
             if box and box["width"] > 0 and box["height"] > 0:
                 return sel
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] Smart Search input NOT found: {e}")
             continue
     return None
 
@@ -133,8 +132,8 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
         try:
             await page.type(input_sel, " ", delay=10)
             await page.keyboard.press("Backspace")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Smart Search input NOT found: {e}")
         await _dispatch_input_keyup(page, input_sel)
         has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=600)
 
@@ -143,8 +142,8 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
             await page.focus(input_sel)
             await page.keyboard.press("ArrowDown")
             has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=500)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Failed to select suggestion: {e}")
 
     clicked = False
     if has_suggestions:
@@ -162,7 +161,8 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
                     await el.click()
                     clicked = True
                     break
-                except Exception:
+                except Exception as e:
+                    print(f"[ERROR] Smart Search input NOT found: {e}")
                     continue
         except PWTimeoutError:
             pass
@@ -306,13 +306,13 @@ async def get_first_xbrl_url(page) -> Optional[str]:
             pop = await pop_info.value
             try:
                 await pop.wait_for_load_state("domcontentloaded", timeout=1200)
-            except Exception:
-                pass
+            except Exception as e:
+                print("[WARN] Popup load state wait failed:", e)
             url = pop.url
             try:
                 await pop.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print("[ERROR] Close popup",e)
             if url and not url.startswith(("about:", "javascript:")):
                 return url
         except Exception:
@@ -325,8 +325,8 @@ async def get_first_xbrl_url(page) -> Optional[str]:
                     href2 = (await direct2.get_attribute("href")) or ""
                     if href2 and not href2.lower().startswith("javascript:"):
                         return await resolve_absolute_url(page, href2)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error collecting xbrl",e)
 
     print("[INFO] No XBRL link found via fast selectors.")
     return None
@@ -451,7 +451,8 @@ async def run(company: str) -> Optional[str]:
                 if await loc.is_visible():
                     await loc.click()
                     break
-            except Exception:
+            except Exception as e:
+                print(f"[DEBUG] Consent button not found for selector '{sel}': {e}")
                 continue
 
         # 1) Smart Search -> pick first suggestion (backed by our route proxy)

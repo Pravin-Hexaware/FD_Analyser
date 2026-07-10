@@ -15,7 +15,7 @@ import urllib3
 from googlenewsdecoder import gnewsdecoder
 
 from service.analysis_service import _get_llm
-from service.news_service import NewsService, get_company_domains, is_trusted_source_url, BLACKLIST
+from service.news_service import get_company_domains, is_trusted_source_url, BLACKLIST
 from langchain_core.messages import HumanMessage
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -157,7 +157,8 @@ def _load_markdown_contents_from_files(article_files: List[Path]) -> Optional[st
             text = path.read_text(encoding="utf-8").strip()
             if text:
                 contents.append(f"---\nFile: {path.name}\n---\n{text}")
-        except Exception:
+        except Exception as e:
+            print("Error reading markdown file {}: {}".format(path, str(e)))
             continue
     return "\n\n".join(contents) if contents else None
  

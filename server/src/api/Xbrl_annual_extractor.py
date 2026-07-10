@@ -7,8 +7,7 @@ from decimal import Decimal, InvalidOperation
 from service.html_extraction_service import extract_html_data
 from service.xml_extraction_service import extract_xbrl_data
 from repository.html_data_repository import HTMLDataRepository
-from repository.xml_data_repository import XMLDataRepository
-from api.xbrl_route import calculate_metrics, _convert_xml_grouped_to_list
+from api.xbrl_route import _convert_xml_grouped_to_list
 
 # (router already defined above)
 router = APIRouter()
@@ -599,7 +598,6 @@ async def extract_annual(report: ExtractAnnualRequest) -> List[dict]:
             response.append(result)
 
         except Exception as e:
-            import traceback
             response.append({
                 "url": url,
                 "type": "error",

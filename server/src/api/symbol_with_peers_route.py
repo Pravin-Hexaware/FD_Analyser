@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import json
 
 from service.symbol_extraction_service import extract_company_symbol
@@ -112,7 +112,7 @@ async def extract_symbol_with_peers(request: SymbolWithPeersRequest):
                     peers=peers_json
                 )
                 
-            except Exception as e:
+            except Exception:
                 # If peer lookup fails, still include the extracted company with empty peers
                 company_info = CompanyInfo(
                     symbol=symbol,

@@ -1,13 +1,12 @@
 # server/src/routers/extract.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from decimal import Decimal, InvalidOperation
 
 from service.html_extraction_service import extract_html_data
 from service.xml_extraction_service import extract_xbrl_data
 from repository.html_data_repository import HTMLDataRepository
-from repository.xml_data_repository import XMLDataRepository
 
 router = APIRouter()
 

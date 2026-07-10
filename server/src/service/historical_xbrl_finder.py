@@ -13,14 +13,11 @@ Endpoints:
 - POST /get-xbrl-link
 - POST /get-xbrl-links
 """
-
-import asyncio
-import json
 import re
 import time
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field, validator
 from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError, APIResponse
 
@@ -145,8 +142,8 @@ async def prepare_page(ctx):
         try:
             if req.resource_type in ["image", "font", "stylesheet"]:
                 return await route.abort()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Failed to prepare page: {e}")
         return await route.continue_()
 
     await page.route("**/*", _router)
@@ -186,9 +183,9 @@ async def prepare_page(ctx):
                 status = resp.status
                 await route.fulfill(status=status, body=body, headers={"content-type": "application/json"})
                 return
-            except Exception:
+            except Exception as e:
                 # let it pass through (may CORS-fail, but we tried)
-                pass
+                print(f"[WARN] SmartSearch proxy failed: {e}")
         await route.continue_()
 
     await page.route("**/BseIndiaAPI/api/PeerSmartSearch/**", smartsearch_proxy)
@@ -200,8 +197,8 @@ async def prepare_page(ctx):
                 if not hasattr(page, "__xbrl_requests__"):
                     page.__xbrl_requests__ = []
                 page.__xbrl_requests__.append(req.url)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
     page.on("request", _record_request)
     page.__xbrl_requests__ = []
@@ -216,16 +213,16 @@ async def navigate_and_prepare(page):
     status = 0
     try:
         status = await goto_with_status(BSE_URL)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] {e}")
 
     if status == 403:
         try:
             await goto_with_status(BSE_HOME)
             await page.wait_for_timeout(1200)
             await goto_with_status(BSE_URL)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
     # Dismiss popups (best effort)
     for sel in [
@@ -242,7 +239,8 @@ async def navigate_and_prepare(page):
             if await loc.is_visible():
                 await loc.click()
                 break
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] {e}")
             continue
 
 # -------------------- Field helpers --------------------
@@ -328,7 +326,8 @@ async def smartsearch_fill(page, text: str) -> None:
             if box and box["width"] > 0 and box["height"] > 0:
                 input_sel = sel
                 break
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] Failed to fill input: {e}")
             continue
     if not input_sel:
         raise RuntimeError("Smart Search input not found; selectors may need refresh.")
@@ -357,8 +356,8 @@ async def smartsearch_fill(page, text: str) -> None:
         try:
             await page.type(input_sel, " ", delay=10)
             await page.keyboard.press("Backspace")
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
 
     # try click first viable suggestion
     clicked = False
@@ -376,7 +375,8 @@ async def smartsearch_fill(page, text: str) -> None:
                 await el.click()
                 clicked = True
                 break
-            except Exception:
+            except Exception as e:
+                print(e)
                 continue
     except PWTimeoutError:
         pass
@@ -521,8 +521,8 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Optional[str]:
     # Clear previous window.open captures
     try:
         await page.evaluate("() => { try { window.__openedWindows__ = []; } catch(e){} }")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] {e}")
 
     # 3A) Try popup first
     popup_url = None
@@ -532,19 +532,19 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Optional[str]:
         pop = await pop_info.value
         try:
             await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
         popup_url = pop.url
         try:
             await pop.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Failed to close popup: {e}")
     except Exception:
         # 3B) No popup; click normally (postback/same-tab)
         try:
             await candidate.click()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
     # 4) small settle
     await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
@@ -561,8 +561,8 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Optional[str]:
         url = await _resolve(opened)
         if url:
             return url
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] Failed to get XBRLFILES: {e}")
 
     # 6) same-tab navigation recognition: wait URL containing XBRLFILES
     try:
@@ -570,8 +570,8 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Optional[str]:
         url = await _resolve(page.url)
         if url:
             return url
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] Failed to get XBRLFILES: {e}")
 
     # 7) Network sniffer fallback
     try:
@@ -580,8 +580,8 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Optional[str]:
             url = await _resolve(candidates[-1])
             if url:
                 return url
-    except Exception:
-        pass
+    except Exception as e:
+        print("[ERROR] Failed to get XBRLFILES")
 
     # 8) Re-scan direct anchors after postback
     try:
@@ -592,8 +592,8 @@ async def get_first_xbrl_url(page, prefer: str = "any") -> Optional[str]:
                 url = await _resolve(href2)
                 if url:
                     return url
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] {e}")
 
     return None
 
@@ -655,8 +655,8 @@ async def get_latest_std_xbrl_urls(page, max_urls: int = 5) -> List[str]:
         # Reset captured sources
         try:
             await page.evaluate("() => { window.__openedWindows__ = []; }")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
         initial_url = page.url
         popup_url = None
@@ -668,19 +668,19 @@ async def get_latest_std_xbrl_urls(page, max_urls: int = 5) -> List[str]:
             pop = await pop_info.value
             try:
                 await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] {e}")
             popup_url = pop.url
             try:
                 await pop.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] {e}")
         except Exception:
             # Fallback: click normally
             try:
                 await anchor.click()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] {e}")
 
         await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
 
@@ -696,8 +696,8 @@ async def get_latest_std_xbrl_urls(page, max_urls: int = 5) -> List[str]:
             resolved = await _resolve(opened)
             if resolved:
                 return resolved
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
         # 3) Network sniff
         try:
@@ -706,8 +706,8 @@ async def get_latest_std_xbrl_urls(page, max_urls: int = 5) -> List[str]:
                 resolved = await _resolve(candidates[-1])
                 if resolved:
                     return resolved
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
         # 4) Same-tab navigation (unlikely for Std XBRL, but safe)
         try:
@@ -715,16 +715,16 @@ async def get_latest_std_xbrl_urls(page, max_urls: int = 5) -> List[str]:
                 resolved = await _resolve(page.url)
                 if resolved:
                     return resolved
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
         # Try to return to previous results page if we navigated away
         try:
             if page.url != initial_url and "XBRLFILES" not in page.url.upper():
                 await page.go_back()
                 await page.wait_for_timeout(500)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {e}")
 
         return None
 
@@ -758,7 +758,8 @@ async def get_latest_std_xbrl_urls(page, max_urls: int = 5) -> List[str]:
                 resolved = await _capture_from_click(anchor)
                 if resolved and resolved not in urls:
                     urls.append(resolved)
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] {e}")
             continue
 
     return urls[:max_urls]
@@ -770,7 +771,6 @@ async def fetch_hist_xbrl_for_company(ctx, company: str, prefer: str = "any") ->
     Returns (url, attempts_used). Tries multiple broadcast periods and multiple attempts until found.
     """
     attempts = 0
-    start_t = time.perf_counter()
 
     # Outer attempt loop
     while attempts < MAX_ATTEMPTS_PER_COMPANY:
@@ -813,8 +813,8 @@ async def fetch_hist_xbrl_for_company(ctx, company: str, prefer: str = "any") ->
                     # success
                     try:
                         await page.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print("Error while closing page: {}".format(e))
                     return url, attempts
 
             # no url; next attempt after cooldown
@@ -823,13 +823,13 @@ async def fetch_hist_xbrl_for_company(ctx, company: str, prefer: str = "any") ->
         except Exception:
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error while waiting for cooldown: {}".format(e))
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error while closing page: {}".format(e))
 
     # All attempts exhausted
     return None, attempts
@@ -882,8 +882,8 @@ async def fetch_hist_xbrl_for_company_multi(
                 if urls:
                     try:
                         await page.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print("Error closing page: {}".format(str(e)))
                     return urls, attempts
 
             # no urls; next attempt after cooldown
@@ -892,13 +892,13 @@ async def fetch_hist_xbrl_for_company_multi(
         except Exception:
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error reading HTML file: {}".format(str(e)))
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error reading HTML file: {}".format(str(e)))
 
     # All attempts exhausted
     return [], attempts

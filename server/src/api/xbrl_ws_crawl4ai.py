@@ -10,18 +10,13 @@ import csv
 import asyncio
 import logging
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from repository.sqlite_repository import SqliteRepository
 from api.crawl4ai_wrapper import fetch_xbrl_with_crawl4ai
-from service.html_extraction_service import extract_html_data
-from service.xml_extraction_service import extract_xbrl_data
-from api.xbrl_route import calculate_metrics
-from api.Xbrl_annual_extractor import calculate_metrics_fourd
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -63,7 +58,6 @@ async def websocket_xbrl_fetch_crawl4ai(websocket: WebSocket) -> None:
 
         # Determine resume point based on recent (<=10 days) xbrl filing entries
         start_idx = 0
-        now = datetime.utcnow()
         for idx, row in enumerate(records):
             scrip_code = (row.get("Scrip-code") or "").strip()
             if not scrip_code:
@@ -260,8 +254,8 @@ async def websocket_xbrl_fetch_crawl4ai(websocket: WebSocket) -> None:
         )
         try:
             await websocket.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print("WebSocket closed",e)
 
     finally:
         try:
@@ -358,5 +352,5 @@ async def websocket_xbrl_fetch_batch(websocket: WebSocket) -> None:
         )
         try:
             await websocket.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error in batch WebSocket: {e}")

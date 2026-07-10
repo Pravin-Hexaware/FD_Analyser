@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict
 from lxml import html as LXML_HTML
 from lxml.etree import _Element, _ElementTree
 
@@ -52,7 +52,6 @@ def extract_table(table: _Element) -> Any:
                 return rows
 
         normalized_rows = []
-        previous_len = len(headers)
 
         for row in data_rows:
             last_cell_empty = bool(row) and row[-1].strip() == ''
@@ -78,8 +77,6 @@ def extract_table(table: _Element) -> Any:
                     for j in range(1, len(headers)):
                         mapped[headers[j]] = row[extra + j] if extra + j < len(row) else ''
                     normalized_rows.append(mapped)
-
-            previous_len = len(row)
 
         if len(headers) == 2:
             result = {}

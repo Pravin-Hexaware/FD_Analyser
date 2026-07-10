@@ -4,7 +4,6 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import csv
 from pathlib import Path
-from datetime import datetime
 from repository.sqlite_repository import SqliteRepository
 
 router = APIRouter()

@@ -6,9 +6,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-import pandas as pd  # type: ignore
 import requests
-from requests.exceptions import SSLError
 from urllib3.exceptions import InsecureRequestWarning
 
 # Hard-require lxml (prefix-aware parsing + robust HTML/iXBRL handling)

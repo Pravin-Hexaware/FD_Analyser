@@ -2,9 +2,8 @@ import asyncio
 import csv
 import json
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -14,10 +13,7 @@ from api.batch_xbrl_finder import (
     fetch_xbrl_for_company,
     get_all_std_xbrl_urls,
 )
-from api.xbrl_route import calculate_metrics
-from service.html_extraction_service import extract_html_data
 from service.xml_extraction_service import (
-    extract_xbrl_data,
     extract_xbrl_data_from_bytes,
 )
 
@@ -60,7 +56,6 @@ def _is_within_5year_range(period: str) -> bool:
         return False
     
     try:
-        fy_start = int(match.group(1))
         fy_end = int(match.group(2))
         start_fy, end_fy = _calculate_5year_fiscal_range()
         
@@ -97,7 +92,6 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
 
         # Determine restart/resume point based on recent (<=10 days) xbrl filing entries.
         start_idx = 1
-        now = datetime.utcnow()
         for idx, row in enumerate(records, start=1):
             scrip_code = (row.get("Scrip-code") or "").strip()
             if not scrip_code:
@@ -266,8 +260,8 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
             finally:
                 try:
                     await browser.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[ERROR] Smart Search input NOT found: {e}")
 
         await websocket.send_json({"status": "complete"})
 
@@ -280,8 +274,8 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
     finally:
         try:
             repo.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Smart Search input NOT found: {e}")
 
 
 
@@ -495,8 +489,8 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
     finally:
         try:
             repo.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Smart Search input NOT found: {e}")
 
 
 
@@ -527,7 +521,6 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
 
         # Determine restart/resume point based on recent (<=10 days) xbrl filing entries.
         start_idx = 1
-        now = datetime.utcnow()
         for idx, row in enumerate(records, start=1):
             scrip_code = (row.get("Scrip-code") or "").strip()
             if not scrip_code:
@@ -745,8 +738,8 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
             finally:
                 try:
                     await browser.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[ERROR] Failed to close browser: {e}")
 
         await websocket.send_json({"status": "complete"})
 
@@ -759,5 +752,5 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
     finally:
         try:
             repo.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Smart Search input NOT found: {e}")

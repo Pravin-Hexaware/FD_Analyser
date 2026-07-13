@@ -6,8 +6,6 @@ Option C: Keep Smart Search UX but fix CORS by routing the SmartSearch XHR via P
 Page: https://www.bseindia.com/corporates/Comp_Resultsnew.aspx
 """
 
-import asyncio
-import json
 import re
 from typing import Optional
 
@@ -74,8 +72,8 @@ async def _dispatch_input_keyup(page, selector: str) -> None:
             }""",
             selector
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] Smart Search input NOT found: {e}")
 
 async def _find_company_input(page) -> Optional[str]:
     """
@@ -94,7 +92,8 @@ async def _find_company_input(page) -> Optional[str]:
             box = await loc.bounding_box()
             if box and box["width"] > 0 and box["height"] > 0:
                 return sel
-        except Exception:
+        except Exception as e:
+            print("Error finding Smart Search input",e)
             continue
     return None
 
@@ -114,20 +113,6 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
             print(f"[DEBUG] Failed saving diagnostics: {e}")
         print(f"[DEBUG] Current URL: {page.url}")
 
-        # Probe visible inputs
-        try:
-            summary = await page.evaluate("""
-                () => {
-                    const nodes = Array.from(document.querySelectorAll('input[type="text"]'));
-                    return nodes.slice(0, 10).map(n => ({
-                        id: n.id, name: n.name, placeholder: n.placeholder, cls: n.className
-                    }));
-                }
-            """)
-        except Exception:
-            pass
-        raise RuntimeError("Smart Search input not found; see debug artifacts.")
-
     print(f"[OK] Smart Search input located via selector: {input_sel}")
 
     sugg_box = "#ajax_response_smart"
@@ -145,8 +130,8 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
         try:
             await page.type(input_sel, " ", delay=20)
             await page.keyboard.press("Backspace")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Typing space/backspace failed: {e}")
         await _dispatch_input_keyup(page, input_sel)
         has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=800)
 
@@ -155,8 +140,8 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
             await page.focus(input_sel)
             await page.keyboard.press("ArrowDown")
             has_suggestions = await _wait_suggestions_have_text(page, sugg_box, timeout_ms=600)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Typing space/backspace failed: {e}")
 
     clicked = False
     if has_suggestions:
@@ -174,7 +159,8 @@ async def fill_company_smart_search_and_pick_first(page, company: str) -> None:
                     await el.click()
                     clicked = True
                     break
-                except Exception:
+                except Exception as e:
+                    print(f"[ERROR] Failed to click suggestion: {e}")
                     continue
         except PWTimeoutError:
             pass
@@ -225,8 +211,8 @@ async def click_submit(page) -> None:
         #await page.wait_for_load_state("networkidle", timeout=800)
         # networkidle slows pages with background scripts
         await page.wait_for_load_state("domcontentloaded")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Failed to wait for load state: {e}")
     print("[OK] Submitted.")
 
 async def wait_for_results(page) -> None:
@@ -290,11 +276,6 @@ async def get_first_xbrl_url(page) -> Optional[str]:
         for j in range(a_count):
             a = anchors.nth(j)
 
-            try:
-                atxt = (await a.inner_text() or "").strip().lower()
-            except Exception:
-                atxt = ""
-
             href = await a.get_attribute("href")
             onclick = await a.get_attribute("onclick")
             href_l = (href or "").lower()
@@ -318,13 +299,13 @@ async def get_first_xbrl_url(page) -> Optional[str]:
                 pop = await pop_info.value
                 try:
                     await pop.wait_for_load_state("domcontentloaded", timeout=500)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[WARN] Popup load state wait failed: {e}")
                 url = pop.url
                 try:
                     await pop.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("[ERROR] Failed to close the pop up.")
                 if url and not url.startswith(("about:", "javascript:")):
                     print(f"[OK] Captured Data from popup: {url}")
                     return url
@@ -389,8 +370,8 @@ async def run(company: str) -> Optional[str]:
         page = await ctx.new_page()
 
         # Debug listeners (Python API: .type and .text are PROPERTIES)
-        page.on("console", lambda msg: print(f"[BROWSER CONSOLE]"))
-        page.on("requestfailed", lambda req: print(f"[REQ FAIL]"))
+        page.on("console", lambda msg: print("[BROWSER CONSOLE]"))
+        page.on("requestfailed", lambda req: print("[REQ FAIL]"))
         page.on("response", lambda res: print(f"[RESP] {res.status} {res.url}") if res.status >= 400 else None)
 
         # === CORS fix: route PeerSmartSearch to APIRequestContext ===
@@ -460,7 +441,8 @@ async def run(company: str) -> Optional[str]:
                 if await loc.is_visible():
                     await loc.click()
                     break
-            except Exception:
+            except Exception as e:
+                print(f"[WARN] Initial goto failed: {e}")
                 continue
 
         # 1) Smart Search -> pick first suggestion (now backed by our route proxy)

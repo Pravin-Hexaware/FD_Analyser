@@ -62,7 +62,7 @@ export function CompactProgressCard({
         }
         return prev;
       });
-    }, 5000); // 5 seconds per step
+    }, 3000); // 5 seconds per step
 
     return () => clearInterval(interval);
   }, [isLoading, isResponseComplete]);

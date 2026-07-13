@@ -144,5 +144,5 @@ async def websocket_news_fetch(websocket: WebSocket) -> None:
     finally:
         try:
             repo.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error closing websocket: {e}")

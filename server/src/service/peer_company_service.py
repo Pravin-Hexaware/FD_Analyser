@@ -3,7 +3,7 @@
 This service retrieves peer companies from the database based on sector or industry.
 """
 
-from typing import Dict, List, Any
+from typing import Dict, Any
 from repository.sqlite_repository import SqliteRepository
 
 

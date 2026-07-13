@@ -1,7 +1,5 @@
 from __future__ import annotations
 import io
-import json
-import os
 import re
 import sys
 import zipfile
@@ -9,10 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
-from requests.exceptions import SSLError
 from urllib3.exceptions import InsecureRequestWarning
-
-import pandas as pd  # type: ignore
 
 # lxml
 from lxml import etree as ET  # type: ignore
@@ -21,12 +16,12 @@ from lxml import html as LXML_HTML  # type: ignore
 # Suppress TLS warnings since we fetch with verify=False (as requested)
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
-# Try html5lib (preferred XHTML normalization)
-try:
-    import html5lib  # type: ignore
-    HAS_HTML5LIB = True
-except Exception:
-    HAS_HTML5LIB = False
+# # Try html5lib (preferred XHTML normalization)
+# try:
+#     import html5lib  # type: ignore
+#     HAS_HTML5LIB = True
+# except Exception:
+#     HAS_HTML5LIB = False
 
 # -----------------------------
 # CONSTANTS / SETTINGS
@@ -362,10 +357,16 @@ def discover_candidates(root: ET._Element, base_url: str, raw_html: bytes) -> Li
     uniq = list(dict.fromkeys(cands))
     def score(u: str) -> int:
         p = urlparse(u).path.lower()
-        if p.endswith((".xml", ".xbrl")): return 4
-        if p.endswith(".xhtml"):          return 3
-        if p.endswith((".html", ".htm")): return 2
-        if p.endswith(".zip"):            return 1
+
+        if p.endswith((".xml", ".xbrl")):
+            return 4
+        if p.endswith(".xhtml"):
+            return 3
+        if p.endswith((".html", ".htm")):
+            return 2
+        if p.endswith(".zip"):
+            return 1
+
         return 0
     uniq.sort(key=score, reverse=True)
     return uniq[:MAX_CANDIDATES]
@@ -398,7 +399,8 @@ def try_parse_zip_and_extract(data: bytes) -> List[Dict[str, Any]]:
                     rows = extract_ix_facts_from_root(t.getroot())
                     if rows:
                         return rows
-                except Exception:
+                except Exception as e:
+                    print("Error reading HTML file: {}".format(e))
                     continue
     return rows
 
@@ -442,8 +444,8 @@ def extract_html_data(url: str) -> List[Dict[str, Any]]:
                     rows = extract_ix_facts_from_root(t_xml.getroot())
                     if rows:
                         return rows
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[ERROR] Failed to extract iXBRL facts from {url}")
 
                 # Fallback to HTML parser
                 t_html = parse_html_to_tree(data)
@@ -451,7 +453,8 @@ def extract_html_data(url: str) -> List[Dict[str, Any]]:
                 if rows:
                     return rows
 
-            except Exception:
+            except Exception as e:
+                print(f"[ERROR] Failed to extract iXBRL facts from {url}")
                 continue
 
         # Nothing found

@@ -2,11 +2,6 @@
 Service to orchestrate news fetching for companies.
 Delegates scraping and summarization to dedicated services.
 """
-import asyncio
-from datetime import datetime
-from pathlib import Path
-from typing import List, Dict
-
 from service.news_scraper_service import NewsScraperService
 from service.news_service import NewsService
 

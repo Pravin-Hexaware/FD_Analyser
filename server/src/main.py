@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import sys
 import os
-import uuid
 # Add the src directory to Python path for absolute imports
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -19,12 +18,31 @@ from api.company_route import router as company_router
 from api.missing_companies_route import router as missing_companies_router
 from api.news_ws_route import router as news_ws_router
 from service.analysis_service import initialize_llm
+from service.logging_service import logging_service
 import importlib
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+import socket
 
 
 load_dotenv()
 
 app = FastAPI(title="Financial Data Extractor API")
+
+class AuditMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        try:
+            response = await call_next(request)
+            client_ip = request.client.host if request.client else "unknown"
+            logging_service.append_audit_entry(str(request.url.path), response.status_code, client_ip)
+            return response
+        except Exception:
+            client_ip = request.client.host if request.client else "unknown"
+            logging_service.append_audit_entry(str(request.url.path), 500, client_ip)
+            raise
+
+app.add_middleware(AuditMiddleware)
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -53,9 +71,11 @@ def startup_initialize_services() -> None:
         app.state.llm = initialize_llm()
         app.state.llm_id = get_llm_id()
         importlib.import_module("api.service.news_agent_service")
+        logging_service.append_audit_entry("APPLICATION STARTED", "-", socket.gethostbyname(socket.gethostname()))
         print("[startup] Azure LLM and news agent initialized.")
         print(f"✅ LLM initialized with ID: {app.state.llm_id}")
     except Exception as exc:
+        logging_service.append_audit_entry("APPLICATION STARTED", "-", socket.gethostbyname(socket.gethostname()))
         print(f"[ERROR] Startup initialization failed: {exc}")
 app.include_router(companies_router, prefix="/api", tags=["companies"])
 app.include_router(company_router, prefix="/api/companies", tags=["company_financials"])

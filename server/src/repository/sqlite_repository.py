@@ -3,7 +3,7 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 
 class SqliteRepository:
@@ -490,44 +490,44 @@ class SqliteRepository:
         row = cur.fetchone()
         return row[0] if row else None
 
-    def get_extraction_records(
-        self,
-        scrip_code: str,
-        extraction_type: str = "annual",
-        limit: int = 10
-    ) -> list[dict]:
-        """
-        Get extraction records (annual or quarterly) for a company.
-        Returns list of records with company_name and publication_date.
-        extraction_type: "annual" or "quarterly"
-        """
-        if extraction_type.lower() not in {"annual", "quarterly"}:
-            extraction_type = "annual"
-        
-        table_name = f"{extraction_type.lower()}_extractions"
-        cur = self._conn.cursor()
-        
-        # Query extraction records ordered by publication_date (newest first)
-        cur.execute(
-            f"""
-            SELECT 
-                id,
-                scrip_code,
-                company_name,
-                xbrl_link,
-                publication_date,
-                report_type,
-                parsed_json
-            FROM {table_name}
-            WHERE scrip_code = ?
-            ORDER BY publication_date DESC
-            LIMIT ?
-            """,
-            (scrip_code, limit),
-        )
-        
-        rows = cur.fetchall()
-        return [dict(row) for row in rows]
+    # def get_extraction_records(
+    #     self,
+    #     scrip_code: str,
+    #     extraction_type: str = "annual",
+    #     limit: int = 10
+    # ) -> list[dict]:
+    #     """
+    #     Get extraction records (annual or quarterly) for a company.
+    #     Returns list of records with company_name and publication_date.
+    #     extraction_type: "annual" or "quarterly"
+    #     """
+    #     if extraction_type.lower() not in {"annual", "quarterly"}:
+    #         extraction_type = "annual"
+    #
+    #     table_name = f"{extraction_type.lower()}_extractions"
+    #     cur = self._conn.cursor()
+    #
+    #     # Query extraction records ordered by publication_date (newest first)
+    #     cur.execute(
+    #         f"""
+    #         SELECT
+    #             id,
+    #             scrip_code,
+    #             company_name,
+    #             xbrl_link,
+    #             publication_date,
+    #             report_type,
+    #             parsed_json
+    #         FROM {table_name}
+    #         WHERE scrip_code = ?
+    #         ORDER BY publication_date DESC
+    #         LIMIT ?
+    #         """,
+    #         (scrip_code, limit),
+    #     )
+    #
+    #     rows = cur.fetchall()
+    #     return [dict(row) for row in rows]
 
     def _load_parsed_json_row(self, row: sqlite3.Row) -> dict:
         if not row:
@@ -1233,8 +1233,8 @@ class SqliteRepository:
     def close(self) -> None:
         try:
             self._conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Failed to close connection: {e}")
 
     def delete_companies_by_sector(self, sector: str) -> int:
         """Deletes all company records that belong to the specified sector."""

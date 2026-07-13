@@ -16,11 +16,10 @@ Endpoints:
 """
 
 import asyncio
-import json
 import re
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Tuple
 
 import requests
 import urllib3
@@ -227,8 +226,8 @@ async def fetch_xbrl_content(ctx, url: str) -> Optional[str]:
         if page:
             try:
                 await page.close()
-            except:
-                pass
+            except Exception as e:
+                print(f"Error closing page {page}: {e}")
 
 # -------------------- Browser/context helpers --------------------
 async def create_browser_and_context(p):
@@ -277,8 +276,8 @@ async def prepare_page(ctx):
                 if not hasattr(page, "__xbrl_requests__"):
                     page.__xbrl_requests__ = []
                 page.__xbrl_requests__.append(req.url)
-        except Exception:
-            pass
+        except Exception as e:
+            print("XBRLFILES: ", e)
 
     page.on("request", _record_request)
     page.__xbrl_requests__ = []
@@ -293,27 +292,27 @@ async def navigate_and_prepare(page):
     try:
         resp = await page.goto(BSE_URL, timeout=NAV_TIMEOUT)
         status = resp.status if resp else 0
-    except Exception:
-        pass
+    except Exception as e:
+        print(e)
 
     if status == 403:
         try:
             await page.goto(BSE_HOME, timeout=NAV_TIMEOUT)
             await page.wait_for_timeout(1200)
             await page.goto(BSE_URL, timeout=NAV_TIMEOUT)
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
 
     try:
         await page.wait_for_load_state("networkidle", timeout=60_000)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Warning: networkidle wait failed after navigation:", e)
 
     try:
         await page.mouse.move(300, 300)
         await page.mouse.click(300, 300)
-    except Exception:
-        pass
+    except Exception as e:
+        print(e)
 
     # Dismiss popups (best effort)
     for sel in [
@@ -330,7 +329,8 @@ async def navigate_and_prepare(page):
             if await loc.is_visible():
                 await loc.click()
                 break
-        except Exception:
+        except Exception as e:
+            print(e)
             continue
 
 
@@ -345,9 +345,8 @@ async def apply_results_filters_new(page) -> None:
     try:
         await page.wait_for_selector("#ddlBrodCastPeriod", timeout=10_000)
         await page.select_option("#ddlBrodCastPeriod", label="Beyond last 1 year")
-    except Exception:
-        pass
-
+    except Exception as e:
+        print(f"Warning: failed to set broadcast period 'Beyond last 1 year': {e}")
 
 async def fill_company_search_new(page, company: str) -> None:
     """
@@ -381,8 +380,8 @@ async def fill_company_search_new(page, company: str) -> None:
 
     try:
         await page.wait_for_selector("li.quotemenu", state="visible", timeout=10_000)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: no suggestions visible for {needle}: {e}")
 
     items = page.locator("li.quotemenu")
     suggestions: List[str] = []
@@ -444,14 +443,14 @@ async def fill_company_search_new(page, company: str) -> None:
                         [code_to_bind],
                     )
                     await inject_scrip_code(page, code_to_bind, display_name=code_to_bind)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Warning: failed to select first suggestion for {needle}: {e}")
             else:
                 try:
                     await input_box.press("ArrowDown")
                     await input_box.press("Enter")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Warning: failed to select first suggestion for {needle}: {e}")
 
     await page.wait_for_timeout(400)
     if looks_like_scrip(needle):
@@ -495,8 +494,8 @@ async def set_broadcast_period(page, value: str):
         try:
             await page.select_option(new_sel, value=value)
             return
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: failed to set broadcast period {value} via value= on new selector: {e}")
         # Common label fallbacks when value= does not match redesigned options
         label_by_value = {
             "7": "Beyond last 1 year",
@@ -521,15 +520,16 @@ async def set_broadcast_period(page, value: str):
                     try:
                         await page.select_option(new_sel, label=alt)
                         return
-                    except Exception:
+                    except Exception as e:
+                        print(f"Warning: failed to set broadcast period {value} via label '{alt}': {e}")
                         continue
     except PWTimeoutError:
         pass
     try:
         await page.wait_for_selector(legacy_sel, timeout=5_000)
         await page.select_option(legacy_sel, value=value)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: failed to set broadcast period {value}: {e}")
 
 
 async def submit_form(page):
@@ -573,8 +573,8 @@ async def submit_form(page):
 
     try:
         await page.wait_for_load_state("networkidle", timeout=60_000)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Warning: networkidle wait failed after submit:", e)
 
 # -------------------- SmartSearch & Scrip handling --------------------
 async def inject_scrip_code(page, scrip_code: str, display_name: Optional[str] = None) -> None:
@@ -653,7 +653,8 @@ async def smartsearch_fill(page, text: str) -> None:
             if box and box["width"] > 0 and box["height"] > 0:
                 input_sel = sel
                 break
-        except Exception:
+        except Exception as e:
+            print("Error finding Smart Search input:", e)
             continue
     if not input_sel:
         raise RuntimeError("Smart Search input not found; selectors may need refresh.")
@@ -682,8 +683,8 @@ async def smartsearch_fill(page, text: str) -> None:
         try:
             await page.type(input_sel, " ", delay=10)
             await page.keyboard.press("Backspace")
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error clicking suggestion:", e)
 
     # try click first viable suggestion
     clicked = False
@@ -701,7 +702,8 @@ async def smartsearch_fill(page, text: str) -> None:
                 await el.click()
                 clicked = True
                 break
-            except Exception:
+            except Exception as e:
+                print("Error clicking suggestion:", e)
                 continue
     except PWTimeoutError:
         pass
@@ -823,8 +825,8 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
             txt = (await td.inner_text() or "").strip()
             if txt:
                 return txt.strip().splitlines()[0]
-    except Exception:
-        pass
+    except Exception as e:
+        print(e)
     return None
 
 
@@ -852,7 +854,7 @@ async def get_first_xbrl_url(
         m = _PERIOD_RE.match(period_text)
         if not m:
             return {"type": "other", "fy_end": -1, "q_order": None}
-        first, second, fy_start, fy_end = m.group(1).upper(), m.group(2).upper(), int(m.group(3)), int(m.group(4))
+        first, second,  fy_end = m.group(1).upper(), m.group(2).upper(), int(m.group(4))
         if second == "Q":
             return {"type": "quarterly", "fy_end": fy_end, "q_order": _Q_ORDER.get(first, 0)}
         if second == "C":
@@ -889,8 +891,8 @@ async def get_first_xbrl_url(
         # Clear previous window.open captures
         try:
             await page.evaluate("() => { try { window.__openedWindows__ = []; } catch(e){} }")
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
 
         popup_url = None
         try:
@@ -899,19 +901,19 @@ async def get_first_xbrl_url(
             pop = await pop_info.value
             try:
                 await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error clicking popup:", e)
             popup_url = pop.url
             try:
                 await pop.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error clicking anchor:", e)
         except Exception:
             # no popup -> click same tab
             try:
                 await a_locator.first.click()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error clicking anchor:", e)
 
         # settle
         await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
@@ -927,8 +929,8 @@ async def get_first_xbrl_url(
             url = await _resolve(opened)
             if url:
                 return url
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error getting window.open URL:", e)
 
         # same-tab navigation recognition
         try:
@@ -936,8 +938,8 @@ async def get_first_xbrl_url(
             url = await _resolve(page.url)
             if url:
                 return url
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error waiting for same-tab XBRLFILES navigation:", e)
 
         # network sniffer fallback
         try:
@@ -946,8 +948,8 @@ async def get_first_xbrl_url(
                 url = await _resolve(candidates[-1])
                 if url:
                     return url
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error getting XBRL files:", e)
 
         return None
 
@@ -990,7 +992,13 @@ async def get_first_xbrl_url(
     prefer_mode = strip_lower(prefer)
     if prefer_mode in {"quarterly", "annual"}:
         # try to detect header indices (robust to column order)
-        idx_code = 0; idx_name = 1; idx_industry = 2; idx_period = 3; idx_aud = 4; idx_std = 5; idx_con = 6
+        idx_code = 0
+        idx_name = 1
+        idx_industry = 2
+        idx_period = 3
+        idx_aud = 4
+        idx_std = 5
+        idx_con = 6
         try:
             header = grid.locator("thead tr").first
             ths = header.locator("th")
@@ -1012,8 +1020,8 @@ async def get_first_xbrl_url(
             idx_aud = _idx("a/u", idx_aud)
             idx_std = _idx("std xbrl", idx_std)
             idx_con = _idx("con xbrl", idx_con)
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
 
         # collect all rows (GridView may omit tbody — match sample.py tr walk)
         rows_meta: List[dict] = []
@@ -1029,7 +1037,8 @@ async def get_first_xbrl_url(
                 aud  = (await tds.nth(idx_aud).inner_text()).strip() if await tds.count() > idx_aud else ""
                 std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
                 con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
-            except Exception:
+            except Exception as e:
+                print(e)
                 continue
 
             if not _row_belongs_to_scrip(code, name, expected_scrip):
@@ -1129,8 +1138,8 @@ async def get_first_xbrl_url(
     # Clear previous window.open captures
     try:
         await page.evaluate("() => { try { window.__openedWindows__ = []; } catch(e){} }")
-    except Exception:
-        pass
+    except Exception as e:
+        print("Error visiting page:", e)
 
     # 3A) Try popup first
     popup_url = None
@@ -1140,19 +1149,19 @@ async def get_first_xbrl_url(
         pop = await pop_info.value
         try:
             await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error waiting for popup load:", e)
         popup_url = pop.url
         try:
             await pop.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error clicking popup:", e)
     except Exception:
         # 3B) No popup; click normally (postback/same-tab)
         try:
             await candidate.click()
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error clicking candidate anchor:", e)
 
     # 4) small settle
     await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
@@ -1169,8 +1178,8 @@ async def get_first_xbrl_url(
         url = await _resolve(opened)
         if url:
             return url, await _extract_period_from_anchor(candidate)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Error checking window.__openedWindows__:", e)
 
     # 6) same-tab navigation recognition: wait URL containing XBRLFILES
     try:
@@ -1178,8 +1187,8 @@ async def get_first_xbrl_url(
         url = await _resolve(page.url)
         if url:
             return url, await _extract_period_from_anchor(candidate)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Error waiting for same-tab navigation:", e)
 
     # 7) Network sniffer fallback
     try:
@@ -1188,8 +1197,8 @@ async def get_first_xbrl_url(
             url = await _resolve(candidates[-1])
             if url:
                 return url, await _extract_period_from_anchor(candidate)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Error visiting page:", e)
 
     # 8) Re-scan direct anchors after postback
     try:
@@ -1200,8 +1209,8 @@ async def get_first_xbrl_url(
                 url = await _resolve(href2)
                 if url:
                     return url, await _extract_period_from_anchor(direct2)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Error re-scanning direct anchors:", e)
 
     return None, None
 
@@ -1212,7 +1221,6 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
     One BSE results load per attempt (sample.py-style submit); retries up to MAX_ATTEMPTS_PER_COMPANY.
     """
     attempts = 0
-    start_t = time.perf_counter()
 
     # Outer attempt loop
     while attempts < MAX_ATTEMPTS_PER_COMPANY:
@@ -1284,8 +1292,8 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
             if url:
                 try:
                     await page.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Warning: failed to close page:", e)
                 return url, period, attempts, annual_url, annual_period, quarterly_url, quarterly_period
 
             # no url; next attempt after cooldown
@@ -1294,13 +1302,13 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
         except Exception:
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Warning: failed to wait for cooldown:", e)
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Warning: failed to close page:", e)
 
     # All attempts exhausted
     return None, None, attempts, None, None, None, None
@@ -1341,8 +1349,8 @@ async def get_all_std_xbrl_urls(ctx, company: str):
         # Clear previous window.open captures
         try:
             await page.evaluate("() => { try { window.__openedWindows__ = []; } catch(e){} }")
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error resolving url:", e)
 
         popup_url = None
         try:
@@ -1351,19 +1359,19 @@ async def get_all_std_xbrl_urls(ctx, company: str):
             pop = await pop_info.value
             try:
                 await pop.wait_for_load_state("domcontentloaded", timeout=POPUP_TIMEOUT)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error clicking popup:", e)
             popup_url = pop.url
             try:
                 await pop.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error clicking anchor:", e)
         except Exception:
             # no popup -> click same tab
             try:
                 await a_locator.first.click()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error clicking anchor:", e)
 
         # settle
         await page.wait_for_timeout(POST_CLICK_SETTLE_MS)
@@ -1379,8 +1387,8 @@ async def get_all_std_xbrl_urls(ctx, company: str):
             url = await _resolve(opened)
             if url:
                 return url
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
 
         # same-tab navigation recognition
         try:
@@ -1388,8 +1396,8 @@ async def get_all_std_xbrl_urls(ctx, company: str):
             url = await _resolve(page.url)
             if url:
                 return url
-        except Exception:
-            pass
+        except Exception as e:
+            print("Error waiting for same-tab navigation:", e)
 
         # network sniffer fallback
         try:
@@ -1398,13 +1406,12 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                 url = await _resolve(candidates[-1])
                 if url:
                     return url
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
 
         return None
 
     attempts = 0
-    start_t = time.perf_counter()
 
     yielded = set()  # to deduplicate by (period, report_type)
 
@@ -1441,7 +1448,10 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                 # detect header indices
                 idx_code = 0
                 idx_name = 1
-                idx_period = 3; idx_industry = 2; idx_std = 5; idx_con = 6
+                idx_period = 3
+                idx_industry = 2
+                idx_std = 5
+                idx_con = 6
                 try:
                     header = grid.locator("thead tr").first
                     ths = header.locator("th")
@@ -1462,8 +1472,8 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                     idx_industry = _idx("industry", idx_industry)
                     idx_std = _idx("std xbrl", idx_std)
                     idx_con = _idx("con xbrl", idx_con)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Error clicking anchor:", e)
 
                 # collect all rows (GridView may omit <tbody>)
                 body_rows = await _grid_data_rows_locator(grid)
@@ -1485,11 +1495,6 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                         std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
                         con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
 
-                        # Capture page source once per row to store with filing
-                        try:
-                            raw_content = await page.content()
-                        except Exception:
-                            raw_content = None
 
                         # Yield Std XBRL
                         if std_a and await std_a.count():
@@ -1522,15 +1527,16 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                                 yield url, per, "con", xbrl_content, ind
                                 await asyncio.sleep(2)  # Delay to avoid rate limiting
 
-                    except Exception:
+                    except Exception as e:
+                        print("Error clicking anchor:", e)
                         continue
 
             # If we yielded any, success
             if yielded_any:
                 try:
                     await page.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Error clicking anchor:", e)
                 return
 
             # no links; next attempt after cooldown
@@ -1539,13 +1545,13 @@ async def get_all_std_xbrl_urls(ctx, company: str):
         except Exception:
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Warning: failed to wait for cooldown:", e)
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print("Error closing page:", e)
 
     # All attempts exhausted, yield nothing
 

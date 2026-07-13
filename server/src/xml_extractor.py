@@ -1,7 +1,6 @@
 from __future__ import annotations
-import argparse
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import  Optional, Tuple
 
 from service.xml_extraction_service import extract_xbrl_data
 from repository.xml_data_repository import XMLDataRepository

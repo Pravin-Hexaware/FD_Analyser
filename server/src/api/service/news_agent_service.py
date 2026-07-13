@@ -18,7 +18,6 @@ from langchain_openai import AzureChatOpenAI
 from langgraph.graph import StateGraph, END, add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from markdownify import markdownify as md
-import os
 import json
 import re
 
@@ -52,8 +51,8 @@ def _get_page_title(html: str, fallback: Optional[str] = None) -> str:
             title_text = soup.title.string.strip()
             if title_text:
                 return title_text
-    except Exception:
-        pass
+    except Exception as e:
+        print(e)
 
     if fallback:
         return fallback
@@ -158,8 +157,8 @@ def scrape_article(url: str, title: Optional[str] = None, company: Optional[str]
                     if date_meta:
                         published = date_meta.strip()
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error scraping article: {e}")
 
     content = extract_trafilatura(html, final_url)
     if not content:

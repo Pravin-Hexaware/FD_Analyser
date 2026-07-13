@@ -429,7 +429,7 @@ def _build_llm_prompts(query: str, formatted_data: Any, statement_type: str, fre
     """
     if report_mode == "multi-first":
         # For CASE 2: First LLM request - generate the core report body without any phase markers
-        system_prompt = f"""You are a Senior Financial Analyst providing structured, data-driven analysis.
+        system_prompt = """You are a Senior Financial Analyst providing structured, data-driven analysis.
 
 Using only the financial data provided, generate a complete, polished report body for the user. Use a single title and the following sections in a seamless final-report style:
 Provide a comprehensive, board-Level Title and include the following sections:
@@ -587,7 +587,6 @@ CRITICAL SECTION - Include ALL:
 - Cyclical vs. structural performance changes
 - Forward-looking indicators from historical trends
 - Sustainability of observed trends
-
 
 ## VI. Risk Assessment and Mitigation
 - Financial risk factors: Liquidity, solvency, currency, interest rate
@@ -944,7 +943,6 @@ def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> T
 
             target_symbol = company_info["symbol"]
             target_scrip_code = company_info["scrip_code"]
-            target_sector = company_info.get("industry") or company_info.get("company")
             log_messages.append(f"LOG: Resolved company for request {request_key} to symbol {target_symbol}, scrip_code {target_scrip_code}")
 
             hardcoded_peers = _build_peer_list_from_hardcoded(repo, target_symbol)

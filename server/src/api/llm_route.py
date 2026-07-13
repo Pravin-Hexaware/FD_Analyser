@@ -6,9 +6,7 @@ from datetime import datetime
 import asyncio
 import threading
 import queue
-import uuid
 import json
-import os
 import re
 import csv
 from pathlib import Path
@@ -19,10 +17,10 @@ from service.analysis_service import (
     stream_answer_from_data,
     _get_or_fetch_today_news_summary,
     _normalize_company_folder_name,
-    _get_today_news_summary,
 )
 from service.news_service import NewsService
 from repository.sqlite_repository import SqliteRepository
+from service.logging_service import logging_service
 
 router = APIRouter()
 
@@ -73,7 +71,8 @@ def _get_latest_cached_news_summary(company_name: str, require_today_only: bool 
             for path in article_files:
                 try:
                     contents.append(path.read_text(encoding="utf-8").strip())
-                except Exception:
+                except Exception as e:
+                    print(e)
                     continue
             if contents:
                 return "\n\n".join(contents)
@@ -82,7 +81,8 @@ def _get_latest_cached_news_summary(company_name: str, require_today_only: bool 
         if summary_file.exists() and summary_file.is_file():
             try:
                 return summary_file.read_text(encoding="utf-8").strip()
-            except Exception:
+            except Exception as e:
+                print(e)
                 continue
 
     return None
@@ -722,6 +722,12 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         peer_extraction_log = ""
 
         # Step 1: Parse user query
+        logger = logging_service.create_chatbot_logger(
+            request.query,
+            conversation_id=conversation_id,
+            request_id=f"req-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+        )
+        logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies")
         print("Step 1: Parsing user query with NLP (no LLM)")
         progress_messages.append({
             "stage": "Extracting user intent",
@@ -729,6 +735,12 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         })
         
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(request.query)
+        logger.log_nlp_breakdown({
+            "intent": parsed.get("intent", {}),
+            "entities": parsed.get("target_companies", {}),
+            "keywords": parsed.get("keywords", []),
+            "classification": parsed.get("classification") or parsed.get("query_classification"),
+        })
         print("1st NLP extraction returned:", parsed)
 
         # Store initial LLM interaction for logging
@@ -823,7 +835,16 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             if validation_info.get("parsed_symbol") and validation_info.get("symbol_matched") is False:
                 print(f"Symbol mismatch for {company_name}: parsed symbol '{validation_info['parsed_symbol']}' did not match Validation.csv; using scrip code {resolved_scrip_code}")
 
+            start_time = datetime.now()
             data = _fetch_company_data(repo, resolved_scrip_code, frequency, statement_type, period, time_horizon, request.query)
+            elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+            logger.log_database_operation(
+                operation="fetch_company_data",
+                query="company_data",
+                parameters={"scrip_code": resolved_scrip_code, "frequency": frequency, "statement_type": statement_type, "period": period, "time_horizon": time_horizon},
+                records_returned=len(data) if isinstance(data, list) else (1 if data else 0),
+                execution_time_ms=round(elapsed_ms, 3),
+            )
             all_data[company_name] = data
             db_fetch_log["fetched_data"][company_name] = {
                 "parsed_symbol": validation_info.get("parsed_symbol"),
@@ -860,7 +881,16 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                     p_scrip = peer.get("scrip_code")
                     peer_name = peer.get("company", p_key)
                     if p_scrip:
+                        start_time = datetime.now()
                         p_data = _fetch_company_data(repo, p_scrip, frequency, statement_type, period, time_horizon, request.query)
+                        elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+                        logger.log_database_operation(
+                            operation="fetch_peer_data",
+                            query="peer_company_data",
+                            parameters={"scrip_code": p_scrip, "frequency": frequency, "statement_type": statement_type, "period": period, "time_horizon": time_horizon},
+                            records_returned=len(p_data) if isinstance(p_data, list) else (1 if p_data else 0),
+                            execution_time_ms=round(elapsed_ms, 3),
+                        )
                         all_data[peer_name] = p_data
                         db_fetch_log["fetched_data"][peer_name] = {
                             "scrip_code": p_scrip,
@@ -962,6 +992,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             return response
 
         # Step 3: Generate answer using LLM (with data fetched and company names resolved via NLP)
+        logger.log_phase("news_fetch", "started", mode="parallel" if len(all_companies_to_fetch_news) > 1 else "sequential")
         print("Step 3: Fetching news context for companies")
         progress_messages.append({
             "stage": "Collecting news feeds",
@@ -1022,6 +1053,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                             "date": datetime.now().strftime("%Y%m%d"),
                             "status": "found"
                         }
+                        logger.log_news_processing(company=company_name, scrip_code=scrip_code, status="used_cached_news", source="markdown_daily_articles")
                     else:
                         # No cached markdown articles for today - do not fetch from other sources
                         print(f"No cached markdown articles found for {company_name} on {datetime.now().strftime('%Y%m%d')}")
@@ -1031,6 +1063,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                             "date": datetime.now().strftime("%Y%m%d"),
                             "status": "not_found"
                         }
+                        logger.log_news_processing(company=company_name, scrip_code=scrip_code, status="fresh_news_collection_triggered", source="markdown_daily_articles")
 
                 else:
                     print(f"No scrip_code for {company_name}, skipping news fetch")
@@ -1042,6 +1075,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 news_fetch_log[company_name] = {
                     "error": str(e)
                 }
+                logger.log_error("news_fetch", e)
         
         # Combine all news context
         news_context = "\n".join(news_context_parts) if news_context_parts else None
@@ -1061,6 +1095,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             output_data=json.dumps(news_fetch_log)
         )
 
+        logger.log_phase("report_generation", "started", mode="sequential")
         print("Step 4: Generating answer with LLM")
         progress_messages.append({
             "stage": "Generating response",
@@ -1110,6 +1145,8 @@ Provide a clear, concise answer to the query. If data is missing for some compan
             })
         )
 
+        logger.log_report("phase_1", answer)
+        logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0)
         repo.close()
 
         # Write comprehensive log to file
@@ -1169,10 +1206,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         repo.save_message(conversation_id, "user", query)
 
         # Initialize log variables
-        user_query = query
         initial_llm_prompt = get_actual_initial_prompt()
-        initial_llm_response = ""
-        db_fetched_data = {}
         peer_extraction_log = ""
 
         progress_messages: List[Dict[str, str]] = []
@@ -1187,7 +1221,6 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         })
 
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(query)
-        initial_llm_response = json.dumps(parsed)
 
         if parsed.get("error"):
             repo.close()
@@ -1282,7 +1315,6 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         has_data = bool(all_data) and any(all_data.values())
 
         if not has_data:
-            background_note = "Background XBRL fetch has been scheduled and will continue quietly. Please try again after 10 minutes."
             answer = (
                 "Company data for the selected period is temporarily unavailable, possibly due to processing delays. Please try again after 10 minutes."
             )
@@ -1321,10 +1353,6 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         print(f"News status: {has_any_news=}, {needs_news_fetch=}")
         print(f"News exists map: {news_exists_map}")
 
-        # Prepare async task variables
-        news_collection_task: Optional[asyncio.Task] = None
-        collected_news: Dict[str, Optional[str]] = {}
-
         # ====== CASE 1: All news exists ======
         if has_any_news and not needs_news_fetch:
             print("[CASE 1] All news exists - generating full report with news")
@@ -1362,8 +1390,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                     answer = "".join(answer_parts)
                     repo.save_message(conversation_id, "llm", answer)
                     repo.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Error closing page:", e)
 
             return StreamingResponse(event_generator_case1(), media_type="text/event-stream")
 
@@ -1486,8 +1514,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
 
             try:
                 repo.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] Failed to close complete report: {e}")
 
         return StreamingResponse(event_generator_case2(), media_type="text/event-stream")
 

@@ -2,7 +2,6 @@
 News fetching service to get recent company news from multiple sources.
 Uses feedparser for RSS feeds and simple web scraping.
 """
-import json
 import urllib.parse
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Set
@@ -17,7 +16,6 @@ except ImportError:
     FEEDPARSER_AVAILABLE = False
     print("[WARN] feedparser not installed. News fetching will be limited.")
 
-import requests
 from googlenewsdecoder import gnewsdecoder
 
 BLACKLIST = ["youtube.com", "linkedin.com"]

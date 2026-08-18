@@ -10,6 +10,11 @@ export default defineConfig({
       '@': path.resolve(__dirname, 'src'),
     },
   },
+
+  preview: {
+    port: 8501
+  },
+
   server: {
     host: '0.0.0.0',
     port: 8501,

@@ -1,15 +1,12 @@
 from fastapi import APIRouter, Query, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-import json
-import asyncio
 import re
 from api.service.company_service import CompanyService
-from api.models.company_model import Company
 from api.Xbrl_annual_extractor import extract_annual, ExtractAnnualRequest, calculate_metrics_fourd
-from api.xbrl_route import extract_xbrl, ExtractXBRLRequest, calculate_metrics, _convert_xml_grouped_to_list
+from api.xbrl_route import calculate_metrics, _convert_xml_grouped_to_list
 from repository.sqlite_repository import SqliteRepository
-from service.html_extraction_service import extract_html_data, extract_ix_facts_from_root
+from service.html_extraction_service import extract_ix_facts_from_root
 from service.xml_extraction_service import extract_xbrl_data_from_bytes
 from lxml import html as lxml_html
 import httpx
@@ -119,7 +116,7 @@ async def extract_yearly_report(
             query_name = body.symbol or company.symbol
             async with httpx.AsyncClient(timeout=15) as client:
                 rsp = await client.get(
-                    f"https://stock.indianapi.in/stock",
+                    "https://stock.indianapi.in/stock",
                     params={"name": query_name},
                     headers={"X-Api-Key": x_api_key},
                 )
@@ -422,7 +419,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
     4. Parse raw_content and extract metrics
     """
     try:
-        print(f"[EXTRACTION_COMPARE] endpoint triggered (NEW: raw_content from DB using extraction tables)")
+        print("[EXTRACTION_COMPARE] endpoint triggered (NEW: raw_content from DB using extraction tables)")
         print(f"[EXTRACTION_COMPARE] request: frequency={request.frequency}, period={request.period}, scrip_codes={request.scrip_codes}")
 
         if not request.scrip_codes or len(request.scrip_codes) < 2:
@@ -580,7 +577,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
                                             extracted_data_grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
                                             extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
                                             print(f"[EXTRACTION_COMPARE] XML fallback succeeded - extracted {len(extracted_data)} facts for {scrip_code}")
-                                        except Exception as xml_error:
+                                        except Exception:
                                             print(f"[EXTRACTION_COMPARE] both HTML and XML parsing failed for {scrip_code}")
                                             raise html_error
 

@@ -10,9 +10,9 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from repository.sqlite_repository import SqliteRepository
+from repositories.sqlite_repository import SqliteRepository
 from utils.llm_testing import get_azure_chat_openai
-from service.nlp_company_extractor import parse_query_and_get_companies_nlp
+from services.nlp_company_extractor import parse_query_and_get_companies_nlp
 
 _LLM: Any = None
 
@@ -166,7 +166,7 @@ def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Opt
     in a single node for parallel execution with the LLM request.
     """
     try:
-        from api.service.news_agent_service import app as news_agent_app, process_results
+        from services.news_agent_service import app as news_agent_app, process_results
         from langchain_core.messages import HumanMessage
     except Exception as e:
         print(f"[WARN] Agent news fetch unavailable: {e}")

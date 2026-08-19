@@ -6,11 +6,11 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from api.batch_xbrl_finder import create_browser_and_context, get_all_std_xbrl_urls, fetch_xbrl_content
+from services.batch_xbrl_finder import create_browser_and_context, get_all_std_xbrl_urls, fetch_xbrl_content
 from playwright.async_api import async_playwright
-from repository.sqlite_repository import SqliteRepository
-from service.html_parser_service import html_dom_to_structured_json_from_content
-from service.xml_extraction_service import extract_xbrl_data_from_bytes
+from repositories.sqlite_repository import SqliteRepository
+from services.html_parser_service import html_dom_to_structured_json_from_content
+from services.xml_extraction_service import extract_xbrl_data_from_bytes
 
 
 def _missing_tracker_csv_path() -> Path:

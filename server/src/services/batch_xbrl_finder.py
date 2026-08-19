@@ -23,13 +23,11 @@ from typing import Optional, List, Tuple
 
 import requests
 import urllib3
-from fastapi import APIRouter, HTTPException
+from fastapi import HTTPException
 from pydantic import BaseModel, Field, validator
 from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-router = APIRouter()
 
 # -------------------- Request/Response Models --------------------
 class GetXBRLRequest(BaseModel):

@@ -5,10 +5,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from config.settings import DB_PATH
+
 
 class SqliteRepository:
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or str(Path(__file__).resolve().parents[1] / "data" / "financial_data.db")
+        self.db_path = db_path or str(DB_PATH)
         self._ensure_db_dir()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row

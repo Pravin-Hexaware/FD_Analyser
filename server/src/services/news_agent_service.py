@@ -23,7 +23,9 @@ import re
 
 import trafilatura
 
-MARKDOWN_BASE = Path(__file__).resolve().parents[2] / "markdown"
+from config.settings import KEY_VAULT_URL, MARKDOWN_DIR
+
+MARKDOWN_BASE = MARKDOWN_DIR
 MARKDOWN_BASE.mkdir(parents=True, exist_ok=True)
 
 def _sanitize_filename(name: str) -> str:
@@ -227,7 +229,7 @@ def process_results(message_content: str, company_name: Optional[str] = None) ->
     return file_paths
 
 def get_azure_chat_openai():
-    key_vault_url = "https://fstodevazureopenai.vault.azure.net/"
+    key_vault_url = KEY_VAULT_URL
 
     credential = DefaultAzureCredential()
     kv_client = SecretClient(vault_url=key_vault_url, credential=credential)

@@ -2,12 +2,12 @@ from fastapi import APIRouter, Query, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import re
-from api.service.company_service import CompanyService
-from api.service.comparision_service import calculate_metrics_fourd
-from api.xbrl_route import calculate_metrics, _convert_xml_grouped_to_list
-from repository.sqlite_repository import SqliteRepository
-from service.html_extraction_service import extract_ix_facts_from_root
-from service.xml_extraction_service import extract_xbrl_data_from_bytes
+from services.company_service import CompanyService
+from services.xbrl_metrics_service import calculate_metrics, calculate_metrics_fourd, convert_xml_grouped_to_list
+from repositories.sqlite_repository import SqliteRepository
+from services.html_extraction_service import extract_ix_facts_from_root
+from services.xml_extraction_service import extract_xbrl_data_from_bytes
+from services.annual_extraction_service import extract_annual, ExtractAnnualRequest
 from lxml import html as lxml_html
 import httpx
 
@@ -544,7 +544,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
                                         print(f"[EXTRACTION_COMPARE] HTML parsing failed, trying XML fallback for {scrip_code}: {str(html_error)}")
                                         try:
                                             extracted_data_grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
-                                            extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
+                                            extracted_data = convert_xml_grouped_to_list(extracted_data_grouped)
                                             print(f"[EXTRACTION_COMPARE] XML fallback succeeded - extracted {len(extracted_data)} facts for {scrip_code}")
                                         except Exception as xml_error:
                                             print(f"[EXTRACTION_COMPARE] XML fallback also failed for {scrip_code}: {str(xml_error)}")
@@ -553,7 +553,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
                                     print(f"[EXTRACTION_COMPARE] parsing XML content for {scrip_code}")
                                     try:
                                         extracted_data_grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
-                                        extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
+                                        extracted_data = convert_xml_grouped_to_list(extracted_data_grouped)
                                         print(f"[EXTRACTION_COMPARE] extracted {len(extracted_data)} facts from XML for {scrip_code}")
                                     except Exception as xml_error:
                                         print(f"[EXTRACTION_COMPARE] XML parsing failed, trying HTML fallback for {scrip_code}: {str(xml_error)}")
@@ -575,7 +575,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
                                         print(f"[EXTRACTION_COMPARE] HTML parsing failed, trying XML fallback for {scrip_code}: {str(html_error)}")
                                         try:
                                             extracted_data_grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
-                                            extracted_data = _convert_xml_grouped_to_list(extracted_data_grouped)
+                                            extracted_data = convert_xml_grouped_to_list(extracted_data_grouped)
                                             print(f"[EXTRACTION_COMPARE] XML fallback succeeded - extracted {len(extracted_data)} facts for {scrip_code}")
                                         except Exception:
                                             print(f"[EXTRACTION_COMPARE] both HTML and XML parsing failed for {scrip_code}")
@@ -635,6 +635,26 @@ async def compare_extraction(request: ExtractionCompareRequest):
         print(f"[EXTRACTION_COMPARE] ERROR: {str(e)}")
         import traceback
         print(f"[EXTRACTION_COMPARE] traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/companies/compare")
+async def compare_companies(request: dict):
+    """Compare multiple companies with their latest financials."""
+    try:
+        scrip_codes = request.get("scrip_codes", [])
+        frequency = request.get("frequency", "annual")
+
+        if not scrip_codes or len(scrip_codes) < 2:
+            raise HTTPException(status_code=400, detail="At least 2 companies required for comparison")
+
+        result = company_service.compare_companies(scrip_codes, frequency)
+        if not result["companies"]:
+            raise HTTPException(status_code=404, detail="No financial data found for companies")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -4,16 +4,16 @@ import json
 import traceback
 from datetime import datetime
 from pathlib import Path
-
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from config.settings import COMPANY_METADATA_CSV
 
-from repository.sqlite_repository import SqliteRepository
-from api.batch_xbrl_finder import (
+from repositories.sqlite_repository import SqliteRepository
+from services.batch_xbrl_finder import (
     create_browser_and_context,
     fetch_xbrl_for_company,
     get_all_std_xbrl_urls,
 )
-from service.xml_extraction_service import (
+from services.xml_extraction_service import (
     extract_xbrl_data_from_bytes,
 )
 
@@ -70,7 +70,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
     """WebSocket endpoint that reads companies from CSV, fetches XBRL URLs, and stores them in SQLite."""
     await websocket.accept()
 
-    csv_path = Path(__file__).resolve().parents[1] / "Data" / "Company_metadata.csv"
+    csv_path = COMPANY_METADATA_CSV
     if not csv_path.exists():
         await websocket.send_json({"error": f"CSV file not found: {csv_path}"})
         await websocket.close()
@@ -414,7 +414,7 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
 
                 if is_html_content:
                     # HTML / iXBRL content stored as raw HTML
-                    from service.html_parser_service import html_dom_to_structured_json_from_content
+                    from services.html_parser_service import html_dom_to_structured_json_from_content
 
                     await websocket.send_json({
                         "idx": idx,
@@ -499,7 +499,7 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
     """WebSocket endpoint that reads companies from CSV, fetches XBRL URLs, and stores them in SQLite."""
     await websocket.accept()
 
-    csv_path = Path(__file__).resolve().parents[1] / "Data" / "Company_metadata.csv"
+    csv_path = COMPANY_METADATA_CSV
     if not csv_path.exists():
         await websocket.send_json({"error": f"CSV file not found: {csv_path}"})
         await websocket.close()

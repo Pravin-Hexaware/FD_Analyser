@@ -2,8 +2,8 @@ from __future__ import annotations
 import sys
 from typing import  Optional, Tuple
 
-from service.xml_extraction_service import extract_xbrl_data
-from repository.xml_data_repository import XMLDataRepository
+from services.xml_extraction_service import extract_xbrl_data
+from repositories.xml_data_repository import XMLDataRepository
 
 # ----------------------
 # Constants / Config

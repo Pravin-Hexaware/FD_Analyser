@@ -14,8 +14,8 @@ import trafilatura
 import urllib3
 from googlenewsdecoder import gnewsdecoder
 
-from service.analysis_service import _get_llm
-from service.news_service import get_company_domains, is_trusted_source_url, BLACKLIST
+from services.analysis_service import _get_llm
+from services.news_service import get_company_domains, is_trusted_source_url, BLACKLIST
 from langchain_core.messages import HumanMessage
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

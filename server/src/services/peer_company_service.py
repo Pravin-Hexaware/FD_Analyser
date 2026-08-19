@@ -4,7 +4,7 @@ This service retrieves peer companies from the database based on sector or indus
 """
 
 from typing import Dict, Any
-from repository.sqlite_repository import SqliteRepository
+from repositories.sqlite_repository import SqliteRepository
 
 
 def get_peer_companies(symbol: str, peer_type: str = "sector") -> Dict[str, Any]:

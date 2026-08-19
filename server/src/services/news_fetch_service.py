@@ -2,8 +2,8 @@
 Service to orchestrate news fetching for companies.
 Delegates scraping and summarization to dedicated services.
 """
-from service.news_scraper_service import NewsScraperService
-from service.news_service import NewsService
+from services.news_scraper_service import NewsScraperService
+from services.news_service import NewsService
 
 
 async def fetch_and_save_news_for_company(company_name: str, scrip_code: str, websocket, idx):

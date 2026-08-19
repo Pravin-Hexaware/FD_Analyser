@@ -7,9 +7,6 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from api.xbrl_route import router as xbrl_router
-from api.xml_route import router as xml_router
-from api.html_route import router as html_router
-from api.xbrl_finder import router as inter_router
 from api.batch_xbrl_finder import router as batch_inter_router
 from api.xbrl_ws_route import router as xbrl_ws_router
 from api.llm_route import router as llm_router
@@ -54,9 +51,6 @@ app.add_middleware(
 )
 
 app.include_router(xbrl_router, prefix="/api", tags=["xbrl"])
-app.include_router(xml_router, prefix="/api", tags=["xml"])
-app.include_router(html_router, prefix="/api", tags=["html"])
-app.include_router(inter_router, prefix="/api", tags=["inter"])
 # Skip analysis_route
 # app.include_router(analysis_router, prefix="/api", tags=["analysis"])
 app.include_router(batch_inter_router, prefix="/api", tags=["batch_inter"])

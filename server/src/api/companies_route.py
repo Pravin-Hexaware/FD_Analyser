@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import re
 from api.service.company_service import CompanyService
-from api.Xbrl_annual_extractor import extract_annual, ExtractAnnualRequest, calculate_metrics_fourd
+from api.service.comparision_service import calculate_metrics_fourd
 from api.xbrl_route import calculate_metrics, _convert_xml_grouped_to_list
 from repository.sqlite_repository import SqliteRepository
 from service.html_extraction_service import extract_ix_facts_from_root

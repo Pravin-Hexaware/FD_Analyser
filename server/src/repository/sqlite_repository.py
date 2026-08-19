@@ -1080,31 +1080,6 @@ class SqliteRepository:
         )
         self._conn.commit()
 
-    def get_detailed_logs(self, chat_id: str) -> list:
-        """Get all detailed logs for a specific chat."""
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT id, chat_id, step_name, input_data, output_data, timestamp
-            FROM llm_detailed_log
-            WHERE chat_id = ?
-            ORDER BY timestamp ASC
-            """,
-            (chat_id,)
-        )
-        rows = cur.fetchall()
-        result = []
-        for row in rows:
-            result.append({
-                'id': row[0],
-                'chat_id': row[1],
-                'step_name': row[2],
-                'input_data': row[3],
-                'output_data': row[4],
-                'timestamp': row[5]
-            })
-        return result
-
     # News management methods
     def save_company_news(
         self,

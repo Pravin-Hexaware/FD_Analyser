@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List
 
+
 @dataclass
 class YearlyFinancials:
     """Financial data for a specific year"""
@@ -13,6 +14,7 @@ class YearlyFinancials:
     roce: float
     de: float
     cfo: float
+
 
 @dataclass
 class Company:

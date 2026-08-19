@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 import re
 
-from repository.sqlite_repository import SqliteRepository
-from service.news_fetch_service import fetch_and_save_news_for_company
+from repositories.sqlite_repository import SqliteRepository
+from services.news_fetch_service import fetch_and_save_news_for_company
 
 router = APIRouter()
 

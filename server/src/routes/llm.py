@@ -11,16 +11,15 @@ import re
 import csv
 from pathlib import Path
 
-from service.analysis_service import (
+from services.analysis_service import (
     parse_query_and_get_companies,
     generate_answer_from_data,
     stream_answer_from_data,
     _get_or_fetch_today_news_summary,
     _normalize_company_folder_name,
 )
-from service.news_service import NewsService
-from repository.sqlite_repository import SqliteRepository
-from service.logging_service import logging_service
+from repositories.sqlite_repository import SqliteRepository
+from services.logging_service import logging_service
 
 router = APIRouter()
 
@@ -131,7 +130,7 @@ async def _generate_news_impact_section(
     Generate a new section: "Impact of Recent News on the Company"
     This is called after news collection completes (STEP 4).
     """
-    from service.analysis_service import _invoke_llm
+    from services.analysis_service import _invoke_llm
     
     system_prompt = """You are a Senior Financial Analyst providing strategic insights.
 
@@ -164,7 +163,7 @@ Generate one seamless section that integrates the recent news into the report an
 
     try:
         response = _invoke_llm(system_prompt, user_prompt, max_tokens=2000)
-        from service.analysis_service import _normalize_llm_response
+        from services.analysis_service import _normalize_llm_response
         normalized = _normalize_llm_response(response)
         return normalized.get("content", "")
     except Exception as e:
@@ -182,7 +181,7 @@ def _missing_tracker_csv_path() -> Path:
 def _schedule_missing_company_processing() -> None:
     """Schedule background processing of missing companies."""
     try:
-        from api.service.missing_company_service import MissingCompanyService
+        from services.missing_company_service import MissingCompanyService
 
         def _run():
             try:
@@ -1184,11 +1183,11 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
     STEP 1: Parse query and validate companies (sync)
     STEP 2: Fetch financial data from database (sync)
     STEP 3: Check for cached news + parallel execution
-        - CASE 1: News exists → Generate full report with news → Stream it
-        - CASE 2: News missing → 
-            - PROCESS A: Generate fast report (no news) → Stream immediately
+        - CASE 1: News exists ��� Generate full report with news ��� Stream it
+        - CASE 2: News missing ��� 
+            - PROCESS A: Generate fast report (no news) ��� Stream immediately
             - PROCESS B: Fetch news in background (async)
-    STEP 4: Once PROCESS B completes → Generate news impact section
+    STEP 4: Once PROCESS B completes ��� Generate news impact section
     STEP 5: Stream the news impact section and append to UI
     """
     try:

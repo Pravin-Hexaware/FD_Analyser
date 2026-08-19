@@ -3,13 +3,15 @@ from azure.keyvault.secrets import SecretClient
 from langchain_openai import AzureChatOpenAI
 
 
+from config.settings import KEY_VAULT_URL
+
+
 def get_azure_chat_openai():
     """
     Returns ready-to-use AzureChatOpenAI from Key Vault.
     Supports .invoke(), agents, tools, streaming, etc.
     """
-    # 1. Key Vault Configuration (fixed URL)
-    key_vault_url = "https://fstodevazureopenai.vault.azure.net/"
+    key_vault_url = KEY_VAULT_URL
 
     # 2. Authenticate and get secrets
     credential = DefaultAzureCredential()

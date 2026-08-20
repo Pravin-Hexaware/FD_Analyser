@@ -11,7 +11,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from repositories.sqlite_repository import SqliteRepository
-from utils.llm_testing import get_azure_chat_openai
+from services.logging_service import logging_service
+from utils.llm_testing import get_shared_llm, get_llm_provider_name
 from services.nlp_company_extractor import parse_query_and_get_companies_nlp
 
 _LLM: Any = None
@@ -154,7 +155,7 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
                     return f.read().strip()
 
     except Exception as e:
-        print(f"[DEBUG] Error reading markdown news for {company_name}: {str(e)}")
+        logging_service.log_runtime(f"[DEBUG] Error reading markdown news for {company_name}: {str(e)}")
 
     return None
 
@@ -169,7 +170,7 @@ def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Opt
         from services.news_agent_service import app as news_agent_app, process_results
         from langchain_core.messages import HumanMessage
     except Exception as e:
-        print(f"[WARN] Agent news fetch unavailable: {e}")
+        logging_service.log_runtime(f"[WARN] Agent news fetch unavailable: {e}")
         return None
 
     try:
@@ -183,13 +184,13 @@ def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Opt
         )
 
         if not result or "messages" not in result:
-            print(f"[WARN] Agent did not return messages for {company_name}")
+            logging_service.log_runtime(f"[WARN] Agent did not return messages for {company_name}")
             return None
 
         output_message = result["messages"][-1].content
         article_paths = process_results(output_message, company_name=company_name)
         if not article_paths:
-            print(f"[WARN] Agent returned no article paths for {company_name}")
+            logging_service.log_runtime(f"[WARN] Agent returned no article paths for {company_name}")
             return None
 
         contents = []
@@ -198,13 +199,13 @@ def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Opt
                 with open(path, 'r', encoding='utf-8') as f:
                     contents.append(f.read().strip())
             except Exception as read_exc:
-                print(f"[WARN] Failed to read scraped article {path}: {read_exc}")
+                logging_service.log_runtime(f"[WARN] Failed to read scraped article {path}: {read_exc}")
                 continue
 
         return "\n\n".join(contents) if contents else None
 
     except Exception as e:
-        print(f"[WARN] Agent news fetch failed for {company_name}: {e}")
+        logging_service.log_runtime(f"[WARN] Agent news fetch failed for {company_name}: {e}")
         return None
 
 
@@ -243,25 +244,25 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
                 for path in article_files:
                     with open(path, 'r', encoding='utf-8') as f:
                         contents.append(f.read().strip())
-                print(f"[INFO] Using cached markdown articles for {company_name}")
+                logging_service.log_runtime(f"[INFO] Using cached markdown articles for {company_name}")
                 return "\n\n".join(contents)
 
             summary_file = company_date_folder / "summary.md"
             if summary_file.exists() and summary_file.is_file():
                 with open(summary_file, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
-                    print(f"[INFO] Using fallback cached summary for {company_name}")
+                    logging_service.log_runtime(f"[INFO] Using fallback cached summary for {company_name}")
                     return content
 
-        print(f"[INFO] No cached markdown articles for {company_name}, attempting agent-based collection...")
+        logging_service.log_runtime(f"[INFO] No cached markdown articles for {company_name}, attempting agent-based collection...")
 
         # Only agent-based news collection is allowed here.
         agent_news = await _fetch_news_using_agent(company_name, max_results=4)
         if agent_news:
-            print(f"[INFO] Agent news collection succeeded for {company_name}")
+            logging_service.log_runtime(f"[INFO] Agent news collection succeeded for {company_name}")
             return agent_news
 
-        print(f"[WARN] Agent news collection failed or returned no articles for {company_name}. No legacy NewsService fallback will be used.")
+        logging_service.log_runtime(f"[WARN] Agent news collection failed or returned no articles for {company_name}. No legacy NewsService fallback will be used.")
         return None
 
     except Exception as e:
@@ -334,28 +335,29 @@ def _build_peer_list_from_hardcoded(repo: SqliteRepository, symbol: str) -> List
 
 
 def initialize_llm() -> None:
-    """Initialize the AzureChatOpenAI instance once at application startup."""
+    """Initialize the configured LLM instance once at application startup."""
     global _LLM,_LLM_ID
     if _LLM is None:
-
-        _LLM = get_azure_chat_openai()
+        _LLM = get_shared_llm()
         _LLM_ID = str(uuid.uuid4())
-        print(f"🔥 LLM CREATED (startup) → ID: {_LLM_ID}, Memory: {id(_LLM)}")
+        provider = get_llm_provider_name()
+        logging_service.log_runtime(f"🔥 LLM CREATED (startup) → provider={provider}, ID={_LLM_ID}, Memory={id(_LLM)}")
         if _LLM is None:
-            raise RuntimeError("Failed to initialize AzureChatOpenAI from utils.llm_testing")
+            raise RuntimeError("Failed to initialize configured LLM from utils.llm_testing")
 
 
 def _get_llm() -> Any:
-    """Return a cached AzureChatOpenAI instance (or create it)."""
+    """Return a cached configured LLM instance (or create it)."""
     global _LLM,_LLM_ID
     if _LLM is None:
-        _LLM = get_azure_chat_openai()
+        _LLM = get_shared_llm()
         _LLM_ID = str(uuid.uuid4())
-        print(f"🔥 LLM CREATED (Fallback) → ID: {_LLM_ID}, Memory: {id(_LLM)}")
+        provider = get_llm_provider_name()
+        logging_service.log_runtime(f"🔥 LLM CREATED (Fallback) → provider={provider}, ID={_LLM_ID}, Memory={id(_LLM)}")
         if _LLM is None:
-            raise RuntimeError("Failed to initialize AzureChatOpenAI from utils.llm_testing")
+            raise RuntimeError("Failed to initialize configured LLM from utils.llm_testing")
     else:
-        print(f"♻️ LLM REUSED: ID: {_LLM_ID}, Memory: {id(_LLM)}")
+        logging_service.log_runtime(f"♻️ LLM REUSED: provider={get_llm_provider_name()}, ID={_LLM_ID}, Memory={id(_LLM)}")
     return _LLM
 
 

@@ -26,6 +26,9 @@ import urllib3
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, validator
 from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError
+from automation.results_portal import ResultsPortal, PlaywrightHealRequired
+from services.heal_service import classify_playwright_failure, heal_results_portal
+from services.logging_service import logging_service
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -90,6 +93,16 @@ POST_CLICK_SETTLE_MS = 600          # small delay after click to let window.open
 MAX_ATTEMPTS_PER_COMPANY = 10        # full cycles
 COOLDOWN_BETWEEN_ATTEMPTS_MS = 1500 # small pause to placate WAF
 BROADCAST_PERIODS = ["7", "6", "5", "4", "3"]  # legacy ASP.NET values; sample.py flow uses ddl "Beyond last 1 year" only
+PORTAL = ResultsPortal(
+    TARGET_URL=BSE_URL,
+    HOME_URL=BSE_HOME,
+    USER_AGENT=USER_AGENT,
+    NAV_TIMEOUT=NAV_TIMEOUT,
+    GRID_TIMEOUT=GRID_TIMEOUT,
+    XHR_TIMEOUT=XHR_TIMEOUT,
+    POPUP_TIMEOUT=POPUP_TIMEOUT,
+    POST_CLICK_SETTLE_MS=POST_CLICK_SETTLE_MS,
+)
 
 # -------------------- Small helpers --------------------
 def looks_like_scrip(text: str) -> bool:
@@ -137,14 +150,7 @@ def _row_belongs_to_scrip(code_cell: str, name_cell: str, expected: Optional[str
 
 
 async def _grid_data_rows_locator(grid):
-    """
-    BSE asp:GridView often renders <table><tr> without <tbody>. sample.py uses table.locator('tr').
-    Prefer tbody tr when present; otherwise all tr that have at least one td (skip thead-only rows).
-    """
-    tb = grid.locator("tbody tr")
-    if await tb.count() > 0:
-        return tb
-    return grid.locator("tr:has(td)")
+    return await PORTAL.data_rows(grid)
 
 def save_raw_content(scrip_code: str, xbrl_type: str, period: str, raw_content: str, url: str) -> Optional[str]:
     """
@@ -249,229 +255,17 @@ async def create_browser_and_context(p):
     return browser, ctx
 
 async def prepare_page(ctx):
-    """
-    One page per company attempt. No SmartSearch route interception — sample.py relies on
-    the browser's normal XHR/autocomplete; fulfilling PeerSmartSearch here can desync UI vs suggestions.
-    """
-    page = await ctx.new_page()
-
-    await page.add_init_script("""
-        (function(){
-          try {
-            window.__openedWindows__ = [];
-            const _oldOpen = window.open;
-            window.open = function(u, n, f){
-              try { if (u) window.__openedWindows__.push(String(u)); } catch(e){}
-              return _oldOpen ? _oldOpen.apply(this, arguments) : null;
-            };
-          } catch(e){}
-        })();
-    """)
-
-    def _record_request(req):
-        try:
-            if "XBRLFILES" in req.url.upper():
-                if not hasattr(page, "__xbrl_requests__"):
-                    page.__xbrl_requests__ = []
-                page.__xbrl_requests__.append(req.url)
-        except Exception as e:
-            print("XBRLFILES: ", e)
-
-    page.on("request", _record_request)
-    page.__xbrl_requests__ = []
-
-    return page
+    return await PORTAL.prepare_page(ctx)
 
 async def navigate_and_prepare(page):
-    """
-    Same sequence as sample.py: open comp_resultsnew, networkidle, small mouse gesture, cookies.
-    """
-    status = 0
-    try:
-        resp = await page.goto(BSE_URL, timeout=NAV_TIMEOUT)
-        status = resp.status if resp else 0
-    except Exception as e:
-        print(e)
-
-    if status == 403:
-        try:
-            await page.goto(BSE_HOME, timeout=NAV_TIMEOUT)
-            await page.wait_for_timeout(1200)
-            await page.goto(BSE_URL, timeout=NAV_TIMEOUT)
-        except Exception as e:
-            print(e)
-
-    try:
-        await page.wait_for_load_state("networkidle", timeout=60_000)
-    except Exception as e:
-        print("Warning: networkidle wait failed after navigation:", e)
-
-    try:
-        await page.mouse.move(300, 300)
-        await page.mouse.click(300, 300)
-    except Exception as e:
-        print(e)
-
-    # Dismiss popups (best effort)
-    for sel in [
-        'button:has-text("Accept")',
-        'button:has-text("I Agree")',
-        'a:has-text("Accept")',
-        'a:has-text("I Agree")',
-        '#onetrust-accept-btn-handler',
-        'button[id*="accept" i]',
-        'div[role="dialog"] button:has-text("OK")',
-    ]:
-        try:
-            loc = page.locator(sel).first
-            if await loc.is_visible():
-                await loc.click()
-                break
-        except Exception as e:
-            print(e)
-            continue
+    await PORTAL.navigate(page)
 
 
 async def apply_results_filters_new(page) -> None:
-    """
-    Matches sample.py: Result Period ALL, Industry ALL, Broadcast Beyond last 1 year (best-effort).
-    """
-    await page.wait_for_selector("#ContentPlaceHolder1_periioddd", timeout=10_000)
-    await page.select_option("#ContentPlaceHolder1_periioddd", label="ALL")
-    await page.wait_for_selector("#dllindustry", timeout=10_000)
-    await page.select_option("#dllindustry", label="ALL")
-    try:
-        await page.wait_for_selector("#ddlBrodCastPeriod", timeout=10_000)
-        await page.select_option("#ddlBrodCastPeriod", label="Beyond last 1 year")
-    except Exception as e:
-        print(f"Warning: failed to set broadcast period 'Beyond last 1 year': {e}")
+    await PORTAL.apply_filters(page)
 
 async def fill_company_search_new(page, company: str) -> None:
-    """
-    Same UX as sample.py: #scripsearchtxtbx.last, char-by-char type(delay=150),
-    visible li.quotemenu, pick row where match_key in text else first.
-    For names, resolve PeerSmartSearch API to scrip when possible so typing matches BSE suggestions.
-    """
-    ctx = page.context
-    needle = (company or "").strip()
-    if not needle:
-        raise RuntimeError("Empty company / scrip")
-
-    if looks_like_scrip(needle):
-        type_string = needle.strip()
-        match_key = type_string
-    else:
-        resolved = await resolve_scrip_via_api(ctx, needle)
-        if resolved:
-            type_string = resolved.strip()
-            match_key = type_string
-        else:
-            type_string = needle.strip()
-            match_key = needle.strip()
-
-    await page.wait_for_selector("#scripsearchtxtbx", timeout=10_000)
-    input_box = page.locator("#scripsearchtxtbx").last
-    await input_box.click()
-
-    for ch in type_string:
-        await input_box.type(str(ch), delay=150)
-
-    try:
-        await page.wait_for_selector("li.quotemenu", state="visible", timeout=10_000)
-    except Exception as e:
-        print(f"Warning: no suggestions visible for {needle}: {e}")
-
-    items = page.locator("li.quotemenu")
-    suggestions: List[str] = []
-    if await items.count() > 0:
-        suggestions = await items.all_inner_texts()
-
-    mk = match_key.lower()
-    selected = False
-    for i, text in enumerate(suggestions):
-        if mk in (text or "").lower():
-            await items.nth(i).click()
-            selected = True
-            break
-
-    if not selected:
-        await page.wait_for_timeout(2000)
-        items = page.locator("li.quotemenu")
-        if await items.count() > 0:
-            suggestions = await items.all_inner_texts()
-            for i, text in enumerate(suggestions):
-                if mk in (text or "").lower():
-                    await items.nth(i).click()
-                    selected = True
-                    break
-
-    if not selected:
-        if await items.count() > 0:
-            await items.nth(0).click()
-            selected = True
-        else:
-            # sample.py does not throw here; headless often never shows li.quotemenu. Seed the same
-            # hidden fields a real click would set so submit still filters to the intended scrip.
-            code_to_bind = type_string.strip()
-            if looks_like_scrip(needle) or looks_like_scrip(code_to_bind):
-                try:
-                    await page.evaluate(
-                        """([code]) => {
-                            code = String(code || '').trim();
-                            const inputs = Array.from(document.querySelectorAll('#scripsearchtxtbx'));
-                            const vis = inputs.length ? inputs[inputs.length - 1] : null;
-                            if (vis) {
-                                vis.value = code;
-                                vis.dispatchEvent(new Event('input', { bubbles: true }));
-                                vis.dispatchEvent(new Event('change', { bubbles: true }));
-                            }
-                            const ids = [
-                                'ContentPlaceHolder1_hf_scripcode',
-                                'ContentPlaceHolder1_SmartSearch_hdnCode',
-                                'hf_scripcode'
-                            ];
-                            for (const id of ids) {
-                                const h = document.getElementById(id);
-                                if (h) {
-                                    h.value = code;
-                                    h.dispatchEvent(new Event('change', { bubbles: true }));
-                                }
-                            }
-                        }""",
-                        [code_to_bind],
-                    )
-                    await inject_scrip_code(page, code_to_bind, display_name=code_to_bind)
-                except Exception as e:
-                    print(f"Warning: failed to select first suggestion for {needle}: {e}")
-            else:
-                try:
-                    await input_box.press("ArrowDown")
-                    await input_box.press("Enter")
-                except Exception as e:
-                    print(f"Warning: failed to select first suggestion for {needle}: {e}")
-
-    await page.wait_for_timeout(400)
-    if looks_like_scrip(needle):
-        try:
-            await page.wait_for_function(
-                """(code) => {
-                    const want = String(code).trim();
-                    const ids = [
-                      'ContentPlaceHolder1_hf_scripcode',
-                      'ContentPlaceHolder1_SmartSearch_hdnCode',
-                      'hf_scripcode'
-                    ];
-                    for (const id of ids) {
-                      const el = document.getElementById(id);
-                      if (el && String(el.value || '').trim() === want) return true;
-                    }
-                    return false;
-                }""",
-                arg=needle.strip(),
-                timeout=3_000,
-            )
-        except PWTimeoutError:
-            pass
+    await PORTAL.fill_search(page, company)
 
 
 # -------------------- Field helpers --------------------
@@ -576,63 +370,14 @@ async def submit_form(page):
 
 # -------------------- SmartSearch & Scrip handling --------------------
 async def inject_scrip_code(page, scrip_code: str, display_name: Optional[str] = None) -> None:
-    display = display_name or scrip_code
-    await page.evaluate(
-        """({ code, name }) => {
-            const inpt = document.getElementById('ContentPlaceHolder1_SmartSearch_smartSearch');
-            const h1 = document.getElementById('ContentPlaceHolder1_SmartSearch_hdnCode');
-            const h2 = document.getElementById('ContentPlaceHolder1_hf_scripcode');
-            const hn = document.getElementById('ContentPlaceHolder1_hf_scripname');
-            if (inpt) inpt.value = name || '';
-            if (h1) h1.value = code || '';
-            if (h2) h2.value = code || '';
-            if (hn) hn.value = name || '';
-        }""",
-        {"code": scrip_code.strip(), "name": display},
-    )
+    await PORTAL._inject_scrip_code(page, scrip_code, display_name=display_name)
 
 async def resolve_scrip_via_api(ctx, query: str) -> Optional[str]:
-    """Server-side SmartSearch (no CORS). Return a best scrip code or None."""
-    # Use the same API that the page uses
-    url = f"https://api.bseindia.com/BseIndiaAPI/api/PeerSmartSearch/w?Type=EQ&text={query}"
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://www.bseindia.com",
-        "Referer": BSE_URL,
-        "X-Requested-With": "XMLHttpRequest",
-    }
-    try:
-        resp = await ctx.request.get(url, headers=headers, timeout=XHR_TIMEOUT)
-        if resp.status != 200:
-            return None
-        data = await resp.json()
-        items = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
-        # Try to find a scrip code-looking field
-        for it in items:
-            # direct keys
-            for k, v in it.items():
-                if re.search(r"(scrip|security.*code|code)$", k, re.I):
-                    vs = str(v).strip()
-                    if re.fullmatch(r"\d{4,6}", vs):
-                        return vs
-            # scan numeric tokens
-            blob = " ".join(map(lambda x: str(x or ""), it.values()))
-            m = re.search(r"(?<!\d)(\d{4,6})(?!\d)", blob)
-            if m:
-                return m.group(1)
-    except Exception:
-        return None
-    return None
+    return await PORTAL.resolve_scrip_via_api(ctx, query)
 
 
 async def resolve_expected_bse_scrip(ctx, company: str) -> Optional[str]:
-    """Canonical numeric scrip for this run (CSV scrip or PeerSmartSearch for names)."""
-    s = (company or "").strip()
-    if not s:
-        return None
-    if looks_like_scrip(s):
-        return s
-    return await resolve_scrip_via_api(ctx, s)
+    return await PORTAL.resolve_expected_scrip(ctx, company)
 
 
 async def smartsearch_fill(page, text: str) -> None:
@@ -713,31 +458,11 @@ async def smartsearch_fill(page, text: str) -> None:
 
 # -------------------- Grid wait & sanity --------------------
 async def wait_grid_ready(page) -> None:
-    # Wait for grid and a second, so delayed anchors can materialize
-    try:
-        await page.wait_for_selector('#ContentPlaceHolder1_gvData', timeout=GRID_TIMEOUT)
-        await page.wait_for_timeout(1000)  # allow delayed JS to inject anchors
-    except PWTimeoutError:
-        # Potentially "No Record Found"
-        try:
-            await page.get_by_text(re.compile(r"No\s+Record\s+Found", re.I)).first.wait_for(timeout=2000)
-        except PWTimeoutError:
-            await page.screenshot(path="debug_wait_for_results.png", full_page=True)
-            raise RuntimeError("Grid not found and 'No Record Found' not visible.")
+    await PORTAL.wait_results(page)
 
 # -------------------- URL resolve helper --------------------
 async def resolve_absolute_url(page, href: str) -> str:
-    href = (href or "").strip()
-    if href.startswith("http") or href.startswith("https"):
-        return href
-    if href.startswith("//"):
-        return "https:" + href
-    if href.startswith("/"):
-        return "https://www.bseindia.com" + href
-    if href.startswith("../"):
-        return "https://www.bseindia.com/corporates/" + href.replace("../", "")
-    base = page.url.rstrip("/")
-    return base + "/" + href
+    return await PORTAL.resolve_absolute_url(page, href)
 
 # -------------------- Robust XBRL extraction --------------------
 async def pick_std_con_column_anchor(grid, prefer: str, first_data_row=None):
@@ -954,7 +679,7 @@ async def get_first_xbrl_url(
     # ---------- 0) Locate grid ----------
     grid = None
     for sel in [
-        '#ContentPlaceHolder1_gvData',
+        PORTAL.locators.results_grid,
         'table:has(th:has-text("XBRL"))',
         'table:has-text("Std XBRL"), table:has-text("Con XBRL")',
     ]:
@@ -1111,12 +836,7 @@ async def get_first_xbrl_url(
             candidate = c_anchor.first
 
     # 2) Direct anchors (fastest)
-    direct_sel = (
-        'a[href*="XBRLFILES" i], '
-        'a[href$=".xml" i], '
-        'a[href$=".html" i], '
-        'a[href$=".zip" i]'
-    )
+    direct_sel = 'a[href*="XBRLFILES" i], a[href$=".xml" i], a[href$=".html" i], a[href$=".zip" i]'
     direct = link_scope.locator(direct_sel).first
     if await direct.count():
         href = (await direct.get_attribute("href")) or ""
@@ -1219,12 +939,14 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
     One BSE results load per attempt (sample.py-style submit); retries up to MAX_ATTEMPTS_PER_COMPANY.
     """
     attempts = 0
+    healed_once = False
 
     # Outer attempt loop
     while attempts < MAX_ATTEMPTS_PER_COMPANY:
         attempts += 1
         page = await prepare_page(ctx)
         try:
+            logging_service.log_phase("xbrl_navigate", "started", company=company, attempt=attempts)
             await navigate_and_prepare(page)
 
             expected_scrip = await resolve_expected_bse_scrip(ctx, company)
@@ -1292,12 +1014,33 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                     await page.close()
                 except Exception as e:
                     print("Warning: failed to close page:", e)
+                logging_service.log_phase("xbrl_extract", "success", company=company, attempt=attempts, period=period, prefer=prefer)
                 return url, period, attempts, annual_url, annual_period, quarterly_url, quarterly_period
 
             # no url; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
 
-        except Exception:
+        except PlaywrightHealRequired as exc:
+            if not healed_once:
+                healed_once = True
+                old_module_path = Path(__file__).resolve().parents[1] / "automation" / "results_portal.py"
+                heal_results_portal(BSE_URL, old_module_path, test_input=company)
+                logging_service.log_phase("agent_swap", "success", company=company, retry_after_heal=True)
+                continue
+            logging_service.log_phase("xbrl_extract", "failed", company=company, attempt=attempts, error=str(exc), classification="ui_drift")
+            try:
+                await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
+            except Exception:
+                pass
+        except Exception as exc:
+            logging_service.log_phase(
+                "xbrl_extract",
+                "failed",
+                company=company,
+                attempt=attempts,
+                error=str(exc),
+                classification=classify_playwright_failure(exc),
+            )
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
             except Exception as e:

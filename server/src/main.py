@@ -13,6 +13,7 @@ from routes.news_ws import router as news_ws_router
 from routes.xbrl_ws import router as xbrl_ws_router
 from services.analysis_service import initialize_llm
 from services.logging_service import logging_service
+from utils.llm_testing import get_llm_provider_name
 import importlib
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -56,16 +57,27 @@ app.include_router(xbrl_ws_router, prefix="/api", tags=["xbrl_ws"])
 
 @app.on_event("startup")
 def startup_initialize_services() -> None:
+    host = socket.gethostbyname(socket.gethostname())
+    logging_service.configure_server_file_logging()
+    session_log = logging_service.start_application_session(host=host, llm_provider=get_llm_provider_name())
+    logging_service.log_application_event("startup_begin", session_log=str(session_log))
     try:
         from services.analysis_service import get_llm_id
         app.state.llm = initialize_llm()
         app.state.llm_id = get_llm_id()
         importlib.import_module("services.news_agent_service")
-        logging_service.append_audit_entry("APPLICATION STARTED", "-", socket.gethostbyname(socket.gethostname()))
+        logging_service.append_audit_entry("APPLICATION STARTED", "-", host)
+        logging_service.log_application_event(
+            "startup_success",
+            llm_provider=get_llm_provider_name(),
+            llm_id=app.state.llm_id,
+        )
         print("[startup] Azure LLM and news agent initialized.")
         print(f"✅ LLM initialized with ID: {app.state.llm_id}")
+        print(f"📝 Session log: {session_log}")
     except Exception as exc:
-        logging_service.append_audit_entry("APPLICATION STARTED", "-", socket.gethostbyname(socket.gethostname()))
+        logging_service.append_audit_entry("APPLICATION STARTED", "-", host)
+        logging_service.log_application_event("startup_failed", error=str(exc))
         print(f"[ERROR] Startup initialization failed: {exc}")
 
 

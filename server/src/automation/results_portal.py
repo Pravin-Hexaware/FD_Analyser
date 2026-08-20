@@ -14,6 +14,11 @@ from services.logging_service import logging_service
 class PlaywrightHealRequired(RuntimeError):
     """Raised when the portal UI appears to have drifted and needs healing."""
 
+    def __init__(self, reason: str, phase: Optional[str] = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.phase = phase
+
 
 @dataclass
 class ResultsPortal:
@@ -43,8 +48,14 @@ class ResultsPortal:
         logging_service.log_phase(phase, status, target_url=self.TARGET_URL, **details)
 
     def _raise_heal(self, reason: str, **details: Any) -> None:
+        phase = details.get("phase")
+        if phase:
+            fail_details = {k: v for k, v in details.items() if k != "phase"}
+            if "error" not in fail_details:
+                fail_details["error"] = reason
+            self._log_phase(phase, "failed", reason=reason, **fail_details)
         logging_service.log_heal_trigger(reason, target_url=self.TARGET_URL, **details)
-        raise PlaywrightHealRequired(reason)
+        raise PlaywrightHealRequired(reason, phase=phase)
 
     async def prepare_page(self, ctx):
         page = await ctx.new_page()
@@ -192,168 +203,192 @@ class ResultsPortal:
 
     async def fill_search(self, page, company: str) -> None:
         self._log_phase("xbrl_search", "started", company=company)
-        needle = (company or "").strip()
-        if not needle:
-            raise RuntimeError("Empty company / scrip")
-
-        input_selector = await self._search_input_selector(page)
-        input_box = page.locator(input_selector).last
-        match_key = needle
-        type_string = needle
-        if not re.fullmatch(r"\d{4,6}", needle):
-            resolved = await self.resolve_scrip_via_api(page.context, needle)
-            if resolved:
-                type_string = resolved.strip()
-                match_key = type_string
-
         try:
-            await input_box.wait_for(state="visible", timeout=10_000)
-            await input_box.click()
-            for ch in type_string:
-                await input_box.type(str(ch), delay=150)
-        except Exception as exc:
-            self._raise_heal("search_interaction_failed", phase="xbrl_search", company=company, error=str(exc))
+            needle = (company or "").strip()
+            if not needle:
+                raise RuntimeError("Empty company / scrip")
 
-        items = page.locator(self.locators.suggestion_items)
-        try:
-            await page.wait_for_selector(self.locators.suggestion_items, state="visible", timeout=10_000)
-        except Exception:
-            pass
+            input_selector = await self._search_input_selector(page)
+            input_box = page.locator(input_selector).last
+            match_key = needle
+            type_string = needle
+            if not re.fullmatch(r"\d{4,6}", needle):
+                resolved = await self.resolve_scrip_via_api(page.context, needle)
+                if resolved:
+                    type_string = resolved.strip()
+                    match_key = type_string
 
-        suggestions: List[str] = []
-        try:
-            if await items.count() > 0:
-                suggestions = await items.all_inner_texts()
-        except Exception:
-            suggestions = []
-
-        selected = False
-        lowered = match_key.lower()
-        for index, text in enumerate(suggestions):
-            if lowered in (text or "").lower():
-                await items.nth(index).click()
-                selected = True
-                break
-
-        if not selected and await items.count() > 0:
             try:
-                await items.nth(0).click()
-                selected = True
+                await input_box.wait_for(state="visible", timeout=10_000)
+                await input_box.click()
+                for ch in type_string:
+                    await input_box.type(str(ch), delay=150)
+            except Exception as exc:
+                self._raise_heal("search_interaction_failed", phase="xbrl_search", company=company, error=str(exc))
+
+            items = page.locator(self.locators.suggestion_items)
+            try:
+                await page.wait_for_selector(self.locators.suggestion_items, state="visible", timeout=10_000)
             except Exception:
-                selected = False
+                pass
 
-        if not selected:
-            if re.fullmatch(r"\d{4,6}", type_string):
+            suggestions: List[str] = []
+            try:
+                if await items.count() > 0:
+                    suggestions = await items.all_inner_texts()
+            except Exception:
+                suggestions = []
+
+            selected = False
+            lowered = match_key.lower()
+            for index, text in enumerate(suggestions):
+                if lowered in (text or "").lower():
+                    await items.nth(index).click()
+                    selected = True
+                    break
+
+            if not selected and await items.count() > 0:
                 try:
-                    await page.evaluate(
-                        """([code]) => {
-                            code = String(code || '').trim();
-                            const inputs = Array.from(document.querySelectorAll('#scripsearchtxtbx'));
-                            const vis = inputs.length ? inputs[inputs.length - 1] : null;
-                            if (vis) {
-                                vis.value = code;
-                                vis.dispatchEvent(new Event('input', { bubbles: true }));
-                                vis.dispatchEvent(new Event('change', { bubbles: true }));
-                            }
-                            const ids = ['ContentPlaceHolder1_hf_scripcode', 'ContentPlaceHolder1_SmartSearch_hdnCode', 'hf_scripcode'];
-                            for (const id of ids) {
-                                const h = document.getElementById(id);
-                                if (h) {
-                                    h.value = code;
-                                    h.dispatchEvent(new Event('change', { bubbles: true }));
+                    await items.nth(0).click()
+                    selected = True
+                except Exception:
+                    selected = False
+
+            if not selected:
+                if re.fullmatch(r"\d{4,6}", type_string):
+                    try:
+                        await page.evaluate(
+                            """([code]) => {
+                                code = String(code || '').trim();
+                                const inputs = Array.from(document.querySelectorAll('#scripsearchtxtbx'));
+                                const vis = inputs.length ? inputs[inputs.length - 1] : null;
+                                if (vis) {
+                                    vis.value = code;
+                                    vis.dispatchEvent(new Event('input', { bubbles: true }));
+                                    vis.dispatchEvent(new Event('change', { bubbles: true }));
                                 }
-                            }
-                        }""",
-                        [type_string],
-                    )
-                    await self._inject_scrip_code(page, type_string, display_name=type_string)
-                    selected = True
-                except Exception as exc:
-                    self._raise_heal("search_hidden_fields_failed", phase="xbrl_search", company=company, error=str(exc))
-            else:
-                try:
-                    await input_box.press("ArrowDown")
-                    await input_box.press("Enter")
-                    selected = True
-                except Exception as exc:
-                    self._raise_heal("search_suggestion_selection_failed", phase="xbrl_search", company=company, error=str(exc))
+                                const ids = ['ContentPlaceHolder1_hf_scripcode', 'ContentPlaceHolder1_SmartSearch_hdnCode', 'hf_scripcode'];
+                                for (const id of ids) {
+                                    const h = document.getElementById(id);
+                                    if (h) {
+                                        h.value = code;
+                                        h.dispatchEvent(new Event('change', { bubbles: true }));
+                                    }
+                                }
+                            }""",
+                            [type_string],
+                        )
+                        await self._inject_scrip_code(page, type_string, display_name=type_string)
+                        selected = True
+                    except Exception as exc:
+                        self._raise_heal("search_hidden_fields_failed", phase="xbrl_search", company=company, error=str(exc))
+                else:
+                    try:
+                        await input_box.press("ArrowDown")
+                        await input_box.press("Enter")
+                        selected = True
+                    except Exception as exc:
+                        self._raise_heal("search_suggestion_selection_failed", phase="xbrl_search", company=company, error=str(exc))
 
-        self._log_phase("xbrl_search", "success", company=company, selected=selected)
+            self._log_phase("xbrl_search", "success", company=company, selected=selected)
+        except PlaywrightHealRequired:
+            raise
+        except Exception as exc:
+            self._log_phase("xbrl_search", "failed", company=company, error=str(exc))
+            raise
 
     async def apply_filters(self, page) -> None:
         self._log_phase("xbrl_filters", "started")
         try:
-            await page.wait_for_selector(self.locators.result_period_dropdown, timeout=10_000)
-            await page.select_option(self.locators.result_period_dropdown, label="ALL")
-            await page.wait_for_selector(self.locators.industry_dropdown, timeout=10_000)
-            await page.select_option(self.locators.industry_dropdown, label="ALL")
-        except Exception as exc:
-            self._raise_heal("filters_missing_or_changed", phase="xbrl_filters", error=str(exc))
+            try:
+                await page.wait_for_selector(self.locators.result_period_dropdown, timeout=10_000)
+                await page.select_option(self.locators.result_period_dropdown, label="ALL")
+                await page.wait_for_selector(self.locators.industry_dropdown, timeout=10_000)
+                await page.select_option(self.locators.industry_dropdown, label="ALL")
+            except Exception as exc:
+                self._raise_heal("filters_missing_or_changed", phase="xbrl_filters", error=str(exc))
 
-        try:
-            await page.wait_for_selector(self.locators.broadcast_dropdown, timeout=10_000)
-            await page.select_option(self.locators.broadcast_dropdown, label="Beyond last 1 year")
+            try:
+                await page.wait_for_selector(self.locators.broadcast_dropdown, timeout=10_000)
+                await page.select_option(self.locators.broadcast_dropdown, label="Beyond last 1 year")
+            except Exception as exc:
+                self._raise_heal("broadcast_filter_missing_or_changed", phase="xbrl_filters", error=str(exc))
+            self._log_phase("xbrl_filters", "success")
+        except PlaywrightHealRequired:
+            raise
         except Exception as exc:
-            self._raise_heal("broadcast_filter_missing_or_changed", phase="xbrl_filters", error=str(exc))
-        self._log_phase("xbrl_filters", "success")
+            self._log_phase("xbrl_filters", "failed", error=str(exc))
+            raise
 
     async def submit(self, page) -> None:
         self._log_phase("xbrl_submit", "started")
         try:
-            await page.bring_to_front()
-            submit_button = page.locator(self.locators.submit_button)
-            await submit_button.wait_for(state="visible", timeout=10_000)
-            await submit_button.scroll_into_view_if_needed()
-            await submit_button.focus()
-        except Exception as exc:
-            self._raise_heal("submit_button_missing_or_changed", phase="xbrl_submit", error=str(exc))
-
-        old_table_html = None
-        if await page.locator(self.locators.results_grid).count() > 0:
             try:
-                old_table_html = await page.locator(self.locators.results_grid).first.inner_html()
-            except Exception:
-                old_table_html = None
+                await page.bring_to_front()
+                submit_button = page.locator(self.locators.submit_button)
+                await submit_button.wait_for(state="visible", timeout=10_000)
+                await submit_button.scroll_into_view_if_needed()
+                await submit_button.focus()
+            except Exception as exc:
+                self._raise_heal("submit_button_missing_or_changed", phase="xbrl_submit", error=str(exc))
 
-        try:
-            await page.evaluate(
-                f"() => {{ const b = document.querySelector('{self.locators.submit_button}'); if (b) b.click(); }}"
-            )
-            await page.wait_for_timeout(20_000)
-            if old_table_html is None:
-                await page.wait_for_selector(self.locators.results_grid, timeout=30_000)
-            else:
-                await page.wait_for_function(
-                    """([selector, oldHtml]) => {
-                        const el = document.querySelector(selector);
-                        return el && el.innerHTML !== oldHtml;
-                    }""",
-                    arg=[self.locators.results_grid, old_table_html],
-                    timeout=30_000,
+            old_table_html = None
+            if await page.locator(self.locators.results_grid).count() > 0:
+                try:
+                    old_table_html = await page.locator(self.locators.results_grid).first.inner_html()
+                except Exception:
+                    old_table_html = None
+
+            try:
+                await page.evaluate(
+                    f"() => {{ const b = document.querySelector('{self.locators.submit_button}'); if (b) b.click(); }}"
                 )
-        except Exception as exc:
-            self._raise_heal("submit_did_not_refresh_results", phase="xbrl_submit", error=str(exc))
+                await page.wait_for_timeout(20_000)
+                if old_table_html is None:
+                    await page.wait_for_selector(self.locators.results_grid, timeout=30_000)
+                else:
+                    await page.wait_for_function(
+                        """([selector, oldHtml]) => {
+                            const el = document.querySelector(selector);
+                            return el && el.innerHTML !== oldHtml;
+                        }""",
+                        arg=[self.locators.results_grid, old_table_html],
+                        timeout=30_000,
+                    )
+            except Exception as exc:
+                self._raise_heal("submit_did_not_refresh_results", phase="xbrl_submit", error=str(exc))
 
-        try:
-            await page.wait_for_load_state("networkidle", timeout=60_000)
-        except Exception:
-            pass
-        self._log_phase("xbrl_submit", "success")
+            try:
+                await page.wait_for_load_state("networkidle", timeout=60_000)
+            except Exception:
+                pass
+            self._log_phase("xbrl_submit", "success")
+        except PlaywrightHealRequired:
+            raise
+        except Exception as exc:
+            self._log_phase("xbrl_submit", "failed", error=str(exc))
+            raise
 
     async def wait_results(self, page) -> None:
         self._log_phase("xbrl_grid", "started")
         try:
-            await page.wait_for_selector(self.locators.results_grid, timeout=self.GRID_TIMEOUT)
-            await page.wait_for_timeout(1000)
-        except PWTimeoutError:
             try:
-                await page.get_by_text(re.compile(r"No\s+Record\s+Found", re.I)).first.wait_for(timeout=2000)
-                self._log_phase("xbrl_grid", "success", no_records=True)
-                return
-            except PWTimeoutError as exc:
-                await page.screenshot(path="debug_wait_for_results.png", full_page=True)
-                self._raise_heal("results_grid_missing_or_changed", phase="xbrl_grid", error=str(exc))
-        self._log_phase("xbrl_grid", "success")
+                await page.wait_for_selector(self.locators.results_grid, timeout=self.GRID_TIMEOUT)
+                await page.wait_for_timeout(1000)
+            except PWTimeoutError:
+                try:
+                    await page.get_by_text(re.compile(r"No\s+Record\s+Found", re.I)).first.wait_for(timeout=2000)
+                    self._log_phase("xbrl_grid", "success", no_records=True)
+                    return
+                except PWTimeoutError as exc:
+                    await page.screenshot(path="debug_wait_for_results.png", full_page=True)
+                    self._raise_heal("results_grid_missing_or_changed", phase="xbrl_grid", error=str(exc))
+            self._log_phase("xbrl_grid", "success")
+        except PlaywrightHealRequired:
+            raise
+        except Exception as exc:
+            self._log_phase("xbrl_grid", "failed", error=str(exc))
+            raise
 
     async def results_container(self, page):
         return page.locator(self.locators.results_grid).first

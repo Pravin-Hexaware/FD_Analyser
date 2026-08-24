@@ -1021,13 +1021,21 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
 
         except PlaywrightHealRequired as exc:
+            fail_phase = getattr(exc, "phase", None) or "xbrl_extract"
             if not healed_once:
                 healed_once = True
                 old_module_path = Path(__file__).resolve().parents[1] / "automation" / "results_portal.py"
                 heal_results_portal(BSE_URL, old_module_path, test_input=company)
                 logging_service.log_phase("agent_swap", "success", company=company, retry_after_heal=True)
                 continue
-            logging_service.log_phase("xbrl_extract", "failed", company=company, attempt=attempts, error=str(exc), classification="ui_drift")
+            logging_service.log_phase(
+                fail_phase,
+                "failed",
+                company=company,
+                attempt=attempts,
+                error=str(exc),
+                classification="ui_drift",
+            )
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
             except Exception:
@@ -1283,7 +1291,28 @@ async def get_all_std_xbrl_urls(ctx, company: str):
             # no links; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
 
-        except Exception:
+        except PlaywrightHealRequired as exc:
+            fail_phase = getattr(exc, "phase", None) or "xbrl_extract"
+            logging_service.log_phase(
+                fail_phase,
+                "failed",
+                company=company,
+                attempt=attempts,
+                error=str(exc),
+                classification="ui_drift",
+                loop_action="stop_retries_after_heal",
+            )
+            break
+        except Exception as exc:
+            logging_service.log_phase(
+                "xbrl_extract",
+                "failed",
+                company=company,
+                attempt=attempts,
+                error=str(exc),
+                classification=classify_playwright_failure(exc),
+                loop_action="retry_after_error",
+            )
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
             except Exception as e:

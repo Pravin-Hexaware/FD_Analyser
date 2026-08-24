@@ -293,6 +293,10 @@ class LoggingService:
             pass
 
     def log_heal_trigger(self, reason: str, **details: Any) -> None:
+        # `phase` is a reserved log_phase kwarg; remap so callers can pass the failing portal phase.
+        details = dict(details)
+        if "phase" in details:
+            details["failed_phase"] = details.pop("phase")
         self.log_phase("playwright_heal_trigger", "failed", reason=reason, **details)
 
     def get_daily_audit_path(self) -> Path:

@@ -385,7 +385,7 @@ def _try_parse_numeric_value(raw_value: Any) -> Optional[float]:
 
 
 def _invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int = 8000) -> Any:
-    """Invoke the LangChain AzureChatOpenAI model and return the raw response."""
+    """Invoke the shared Foundry ChatOpenAI model and return the raw response."""
     llm = _get_llm()
     # LangChain returns an object with a .content attribute.
     resp = llm.invoke(
@@ -652,7 +652,7 @@ CRITICAL SECTION - Include ALL:
 
 
 def stream_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str, news_context: Optional[str] = None, report_mode: str = "single") -> Iterator[str]:
-    """Stream answer chunks from the LLM using AzureChatOpenAI streaming.
+    """Stream answer chunks from the LLM using Foundry ChatOpenAI streaming.
     
     Args:
         report_mode: "single" for complete report, "multi-first" for main analysis without conclusions

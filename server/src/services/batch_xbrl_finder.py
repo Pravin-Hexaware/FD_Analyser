@@ -18,6 +18,7 @@ Endpoints:
 import asyncio
 import re
 import time
+import traceback
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -90,6 +91,8 @@ POST_CLICK_SETTLE_MS = 600          # small delay after click to let window.open
 MAX_ATTEMPTS_PER_COMPANY = 10        # full cycles
 COOLDOWN_BETWEEN_ATTEMPTS_MS = 1500 # small pause to placate WAF
 BROADCAST_PERIODS = ["7", "6", "5", "4", "3"]  # legacy ASP.NET values; sample.py flow uses ddl "Beyond last 1 year" only
+SEARCH_INPUT_SELECTOR = "#scripsearchtxtbx"
+BROADCAST_PERIOD_SELECTOR = "#ddlBrodCastPeriod"
 
 # -------------------- Small helpers --------------------
 def looks_like_scrip(text: str) -> bool:
@@ -98,6 +101,12 @@ def looks_like_scrip(text: str) -> bool:
 
 def strip_lower(s: str) -> str:
     return (s or "").strip().lower()
+
+
+def is_quarterly_or_cumulative_period(period: str) -> bool:
+    """Return True only for BSE periods coded as quarter (Q) or cumulative (C)."""
+    compact = re.sub(r"[^A-Za-z]", "", period or "").upper()
+    return bool(re.match(r"^[MSJD][QC]", compact))
 
 
 def _is_bse_corporate_results_portal_url(url: str) -> bool:
@@ -336,19 +345,35 @@ async def apply_results_filters_new(page) -> None:
     """
     Matches sample.py: Result Period ALL, Industry ALL, Broadcast Beyond last 1 year (best-effort).
     """
-    await page.wait_for_selector("#ContentPlaceHolder1_periioddd", timeout=10_000)
-    await page.select_option("#ContentPlaceHolder1_periioddd", label="ALL")
-    await page.wait_for_selector("#dllindustry", timeout=10_000)
-    await page.select_option("#dllindustry", label="ALL")
+    for selector, label in (
+        ("#ContentPlaceHolder1_periioddd", "ALL"),
+        ("#dllindustry", "ALL"),
+    ):
+        try:
+            await page.wait_for_selector(selector, state="attached", timeout=3_000)
+            await page.select_option(selector, label=label)
+            print(f"[XBRL] Optional filter selected: {selector}={label}", flush=True)
+        except Exception as e:
+            print(f"[XBRL] Optional filter unavailable: {selector} ({e})", flush=True)
+
+    print(f"[XBRL] Waiting for broadcast period control: {BROADCAST_PERIOD_SELECTOR}", flush=True)
+    await page.wait_for_selector(BROADCAST_PERIOD_SELECTOR, timeout=10_000)
     try:
-        await page.wait_for_selector("#ddlBrodCastPeriod", timeout=10_000)
-        await page.select_option("#ddlBrodCastPeriod", label="Beyond last 1 year")
+        await page.select_option(BROADCAST_PERIOD_SELECTOR, value="7")
     except Exception as e:
-        print(f"Warning: failed to set broadcast period 'Beyond last 1 year': {e}")
+        print(f"Warning: failed to set broadcast period value '7': {e}")
+        await page.select_option(BROADCAST_PERIOD_SELECTOR, label="Beyond last 1 year")
+
+    selected_period = await page.locator(BROADCAST_PERIOD_SELECTOR).input_value()
+    if selected_period != "7":
+        raise RuntimeError(
+            f"Broadcast period was not set to Beyond last 1 year (selected value: {selected_period!r})"
+        )
+    print("[XBRL] Broadcast period selected: value=7 (Beyond last 1 year)", flush=True)
 
 async def fill_company_search_new(page, company: str) -> None:
     """
-    Same UX as sample.py: #scripsearchtxtbx.last, char-by-char type(delay=150),
+    Same UX as sample.py: visible #scripsearchtxtbx, char-by-char type(delay=150),
     visible li.quotemenu, pick row where match_key in text else first.
     For names, resolve PeerSmartSearch API to scrip when possible so typing matches BSE suggestions.
     """
@@ -369,28 +394,76 @@ async def fill_company_search_new(page, company: str) -> None:
             type_string = needle.strip()
             match_key = needle.strip()
 
-    await page.wait_for_selector("#scripsearchtxtbx", timeout=10_000)
-    input_box = page.locator("#scripsearchtxtbx").last
+    await page.wait_for_selector(SEARCH_INPUT_SELECTOR, state="attached", timeout=10_000)
+    input_candidates = page.locator(SEARCH_INPUT_SELECTOR)
+    candidate_count = await input_candidates.count()
+    print(f"[XBRL] Search field detected: {candidate_count} element(s) for {SEARCH_INPUT_SELECTOR}", flush=True)
+
+    input_box = None
+    preferred_index = 1 if candidate_count > 1 else 0
+    for index in range(candidate_count):
+        candidate = input_candidates.nth(index)
+        try:
+            visible = await candidate.is_visible()
+            enabled = await candidate.is_enabled()
+            editable = await candidate.is_editable()
+            bounds = await candidate.bounding_box()
+            print(
+                f"[XBRL] Search field {index}: visible={visible}, enabled={enabled}, "
+                f"editable={editable}, bounds={bounds}",
+                flush=True,
+            )
+            if (
+                index == preferred_index
+                and visible
+                and enabled
+                and editable
+                and bounds
+                and bounds["width"] > 0
+                and bounds["height"] > 0
+            ):
+                input_box = candidate
+                print(f"[XBRL] Using search field {index} (preferred duplicate)", flush=True)
+        except Exception as e:
+            print(f"[XBRL] Search field {index} inspection failed: {e}", flush=True)
+
+    if input_box is None and preferred_index != 0:
+        candidate = input_candidates.nth(0)
+        if await candidate.is_visible() and await candidate.is_enabled() and await candidate.is_editable():
+            input_box = candidate
+            print("[XBRL] Preferred search field unavailable; using field 0 fallback", flush=True)
+
+    if input_box is None:
+        raise RuntimeError(
+            f"No visible, editable search field found among {candidate_count} matching elements"
+        )
+
+    print(f"[XBRL] Clicking visible search field for {needle}", flush=True)
     await input_box.click()
+    await input_box.fill("")
+    print(f"[XBRL] Typing search value: {type_string}", flush=True)
 
     for ch in type_string:
         await input_box.type(str(ch), delay=150)
 
+    print("[XBRL] Search value entered; waiting for suggestions", flush=True)
     try:
         await page.wait_for_selector("li.quotemenu", state="visible", timeout=10_000)
     except Exception as e:
-        print(f"Warning: no suggestions visible for {needle}: {e}")
+        print(f"[XBRL] Warning: no suggestions visible for {needle}: {e}", flush=True)
 
     items = page.locator("li.quotemenu")
     suggestions: List[str] = []
     if await items.count() > 0:
         suggestions = await items.all_inner_texts()
+    print(f"[XBRL] Suggestions detected: {len(suggestions)}", flush=True)
 
     mk = match_key.lower()
     selected = False
     for i, text in enumerate(suggestions):
         if mk in (text or "").lower():
             await items.nth(i).click()
+            print(f"[XBRL] Selected matching suggestion {i}: {text.strip()}", flush=True)
             selected = True
             break
 
@@ -402,12 +475,14 @@ async def fill_company_search_new(page, company: str) -> None:
             for i, text in enumerate(suggestions):
                 if mk in (text or "").lower():
                     await items.nth(i).click()
+                    print(f"[XBRL] Selected delayed matching suggestion {i}: {text.strip()}", flush=True)
                     selected = True
                     break
 
     if not selected:
         if await items.count() > 0:
             await items.nth(0).click()
+            print("[XBRL] Selected first available suggestion", flush=True)
             selected = True
         else:
             # sample.py does not throw here; headless often never shows li.quotemenu. Seed the same
@@ -415,11 +490,16 @@ async def fill_company_search_new(page, company: str) -> None:
             code_to_bind = type_string.strip()
             if looks_like_scrip(needle) or looks_like_scrip(code_to_bind):
                 try:
+                    print(f"[XBRL] No suggestion list; binding numeric scrip {code_to_bind} directly", flush=True)
                     await page.evaluate(
                         """([code]) => {
                             code = String(code || '').trim();
                             const inputs = Array.from(document.querySelectorAll('#scripsearchtxtbx'));
-                            const vis = inputs.length ? inputs[inputs.length - 1] : null;
+                            const preferred = inputs.length > 1 ? inputs[1] : inputs[0];
+                            const vis = [preferred, ...inputs.filter((input) => input !== preferred)].find((input) => {
+                                const rect = input.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0 && !input.disabled;
+                            }) || null;
                             if (vis) {
                                 vis.value = code;
                                 vis.dispatchEvent(new Event('input', { bubbles: true }));
@@ -445,6 +525,7 @@ async def fill_company_search_new(page, company: str) -> None:
                     print(f"Warning: failed to select first suggestion for {needle}: {e}")
             else:
                 try:
+                    print("[XBRL] No suggestion list; using keyboard selection fallback", flush=True)
                     await input_box.press("ArrowDown")
                     await input_box.press("Enter")
                 except Exception as e:
@@ -541,6 +622,7 @@ async def submit_form(page):
     await submit_button.wait_for(state="visible", timeout=10_000)
     await submit_button.scroll_into_view_if_needed()
     await submit_button.focus()
+    print("[XBRL] Submit button detected; preparing results request", flush=True)
 
     old_table_html = None
     if await page.locator("#ContentPlaceHolder1_gvData").count() > 0:
@@ -552,6 +634,7 @@ async def submit_form(page):
     await page.evaluate(
         "() => { const b = document.querySelector('#ContentPlaceHolder1_btnSubmit'); if (b) b.click(); }"
     )
+    print("[XBRL] Submit button clicked; waiting for results table", flush=True)
 
     await page.wait_for_timeout(20_000)
     try:
@@ -573,6 +656,7 @@ async def submit_form(page):
         await page.wait_for_load_state("networkidle", timeout=60_000)
     except Exception as e:
         print("Warning: networkidle wait failed after submit:", e)
+    print("[XBRL] Results request finished", flush=True)
 
 # -------------------- SmartSearch & Scrip handling --------------------
 async def inject_scrip_code(page, scrip_code: str, display_name: Optional[str] = None) -> None:
@@ -1237,6 +1321,7 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
 
             await submit_form(page)
             await wait_grid_ready(page)
+            print(f"[XBRL] Results table detected for {company}; collecting Std XBRL records", flush=True)
 
             annual_url = None
             quarterly_url = None
@@ -1297,7 +1382,9 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
             # no url; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
 
-        except Exception:
+        except Exception as e:
+            print(f"[XBRL] Attempt {attempts} failed for {company}: {e}", flush=True)
+            traceback.print_exc()
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
             except Exception as e:
@@ -1475,6 +1562,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
 
                 # collect all rows (GridView may omit <tbody>)
                 body_rows = await _grid_data_rows_locator(grid)
+                print(f"[XBRL] Results rows detected: {await body_rows.count()}", flush=True)
                 for r in range(await body_rows.count()):
                     tr = body_rows.nth(r)
                     tds = tr.locator("td")
@@ -1489,6 +1577,10 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                             continue
 
                         per = (await tds.nth(idx_period).inner_text()).strip()
+                        if not is_quarterly_or_cumulative_period(per):
+                            print(f"[XBRL] Skipping non-quarterly/cumulative period: {per}", flush=True)
+                            continue
+
                         ind = (await tds.nth(idx_industry).inner_text()).strip() if await tds.count() > idx_industry else ""
                         std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
                         con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
@@ -1505,6 +1597,7 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                             if url and (per, "std") not in yielded:
                                 yielded.add((per, "std"))
                                 yielded_any = True
+                                print(f"[XBRL] Std XBRL found: period={per}, url={url}", flush=True)
                                 # Fetch XBRL content and save to file
                                 xbrl_content = await fetch_xbrl_content(ctx, url)
                                 yield url, per, "std", xbrl_content, ind
@@ -1540,7 +1633,9 @@ async def get_all_std_xbrl_urls(ctx, company: str):
             # no links; next attempt after cooldown
             await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
 
-        except Exception:
+        except Exception as e:
+            print(f"[XBRL] All-record attempt {attempts} failed for {company}: {e}", flush=True)
+            traceback.print_exc()
             try:
                 await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
             except Exception as e:

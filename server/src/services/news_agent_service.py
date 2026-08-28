@@ -8,13 +8,10 @@ import feedparser
 import requests
 import time
 import urllib3
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
 from bs4 import BeautifulSoup
 from googlenewsdecoder import gnewsdecoder
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_openai import AzureChatOpenAI
 from langgraph.graph import StateGraph, END, add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from markdownify import markdownify as md
@@ -23,7 +20,8 @@ import re
 
 import trafilatura
 
-from config.settings import KEY_VAULT_URL, MARKDOWN_DIR
+from config.settings import MARKDOWN_DIR
+from utils.llm_testing import get_azure_chat_openai
 
 MARKDOWN_BASE = MARKDOWN_DIR
 MARKDOWN_BASE.mkdir(parents=True, exist_ok=True)
@@ -227,28 +225,6 @@ def process_results(message_content: str, company_name: Optional[str] = None) ->
             print(f"Failed to scrape {url}: {exc}")
 
     return file_paths
-
-def get_azure_chat_openai():
-    key_vault_url = KEY_VAULT_URL
-
-    credential = DefaultAzureCredential()
-    kv_client = SecretClient(vault_url=key_vault_url, credential=credential)
-
-    subscription_key = kv_client.get_secret("llm-api-key").value
-    endpoint = kv_client.get_secret("llm-base-endpoint").value
-    deployment = kv_client.get_secret("llm-41").value
-    api_version = kv_client.get_secret("llm-41-version").value
-
-    llm = AzureChatOpenAI(
-        azure_deployment=deployment,
-        api_version=api_version,
-        azure_endpoint=endpoint,
-        api_key=subscription_key,
-        streaming=True,
-        temperature=0,
-    )
-    return llm
-
 
 _llm_client = get_azure_chat_openai()
 

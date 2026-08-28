@@ -1,47 +1,39 @@
+from typing import Any, cast
+
+from azure.core.credentials import TokenCredential
 from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-from langchain_openai import AzureChatOpenAI
+from azure.ai.projects import AIProjectClient
+from langchain_openai import ChatOpenAI
+
+PROJECT_ENDPOINT = "https://bfs-to-dev-foundry.services.ai.azure.com/api/projects/FinBot"
+MODEL_DEPLOYMENT = "gpt-4.1"
+
+_project_client: AIProjectClient | None = None
+_llm: Any = None
 
 
-from config.settings import KEY_VAULT_URL
+def get_openai_client() -> Any:
+    """Return the authenticated OpenAI-compatible client for the FinBot project."""
+    global _project_client
+    if _project_client is None:
+        raw_credential = DefaultAzureCredential()
+        credential = cast(TokenCredential, raw_credential)
+        _project_client = AIProjectClient(
+            endpoint=PROJECT_ENDPOINT,
+            credential=credential,
+        )
+    return _project_client.get_openai_client()
 
 
-def get_azure_chat_openai():
-    """
-    Returns ready-to-use AzureChatOpenAI from Key Vault.
-    Supports .invoke(), agents, tools, streaming, etc.
-    """
-    key_vault_url = KEY_VAULT_URL
-
-    # 2. Authenticate and get secrets
-    credential = DefaultAzureCredential()
-    kv_client = SecretClient(vault_url=key_vault_url, credential=credential)
-
-    # 3. Retrieve your exact secrets
-    subscription_key = kv_client.get_secret("llm-api-key").value
-    endpoint = kv_client.get_secret("llm-base-endpoint").value
-    deployment = kv_client.get_secret("llm-41").value  # Your GPT-4.1 deployment
-    api_version = kv_client.get_secret("llm-41-version").value
-
-    # 4. ✅ Native LangChain AzureChatOpenAI
-    llm = AzureChatOpenAI(
-        azure_deployment=deployment,
-        openai_api_version=api_version,
-        azure_endpoint=endpoint,
-        api_key=subscription_key,
-        streaming=True,
-        temperature=0,
-    )
-    return llm
-
-
-# Usage example
-if __name__ == "__main__":
-    llm = get_azure_chat_openai()
-    print("✅ LLM ready!")
-
-    # Test with messages
-    from langchain_core.messages import HumanMessage
-
-    result = llm.invoke([HumanMessage(content="Who is the president of North Korea?")])
-    print(result.content)
+def get_azure_chat_openai() -> ChatOpenAI:
+    """Return the shared LangChain model backed by the FinBot Foundry client."""
+    global _llm
+    if _llm is None:
+        _llm = ChatOpenAI(
+            model=MODEL_DEPLOYMENT,
+            api_key="foundry-managed-credential",
+            client=get_openai_client().chat.completions,
+            streaming=True,
+            temperature=0,
+        )
+    return _llm

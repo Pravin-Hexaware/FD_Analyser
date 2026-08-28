@@ -91,6 +91,15 @@ class ChatbotExecutionLogger:
             **details,
         )
         self._logger.info("=== CHATBOT EXECUTION END ===")
+        self.close()
+
+    def close(self) -> None:
+        """Flush and close this request's file handler."""
+        with self._lock:
+            for handler in self._logger.handlers[:]:
+                handler.flush()
+                handler.close()
+                self._logger.removeHandler(handler)
 
 
 class LoggingService:
@@ -117,6 +126,13 @@ class LoggingService:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
         request_id = request_id or f"req-{timestamp}"
         log_path = self.logs_dir / f"Log-{timestamp}.log"
+        return ChatbotExecutionLogger(log_path=log_path, request_id=request_id, user_query=user_query, conversation_id=conversation_id)
+
+    def create_chat_log(self, user_query: str, conversation_id: Optional[int] = None, request_id: Optional[str] = None) -> ChatbotExecutionLogger:
+        """Create a detailed per-chat log without changing the existing log files."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        request_id = request_id or f"chat-{timestamp}"
+        log_path = self.logs_dir / "chat" / f"chat{timestamp}.log"
         return ChatbotExecutionLogger(log_path=log_path, request_id=request_id, user_query=user_query, conversation_id=conversation_id)
 
     def get_daily_audit_path(self) -> Path:

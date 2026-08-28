@@ -15,6 +15,8 @@ from services.analysis_service import (
     parse_query_and_get_companies,
     generate_answer_from_data,
     stream_answer_from_data,
+    _build_llm_prompts,
+    _extract_token_usage,
     _get_or_fetch_today_news_summary,
     _normalize_company_folder_name,
 )
@@ -124,7 +126,8 @@ async def _generate_news_impact_section(
     company_data: Dict[str, Any],
     news_context: str,
     statement_type: str,
-    frequency: str
+    frequency: str,
+    chat_logger: Optional[Any] = None,
 ) -> str:
     """
     Generate a new section: "Impact of Recent News on the Company"
@@ -165,7 +168,21 @@ Generate one seamless section that integrates the recent news into the report an
         response = _invoke_llm(system_prompt, user_prompt, max_tokens=2000)
         from services.analysis_service import _normalize_llm_response
         normalized = _normalize_llm_response(response)
-        return normalized.get("content", "")
+        response_text = normalized.get("content", "")
+        if chat_logger is not None:
+            chat_logger.log_event(
+                "llm_prompt",
+                phase="news_impact",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            chat_logger.log_event(
+                "llm_response",
+                phase="news_impact",
+                response=response_text,
+                token_usage=_extract_token_usage(response),
+            )
+        return response_text
     except Exception as e:
         print(f"[ERROR] Failed to generate news impact section: {str(e)}")
         return ""
@@ -726,7 +743,9 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             conversation_id=conversation_id,
             request_id=f"req-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
         )
+        chat_logger = logging_service.create_chat_log(request.query, conversation_id=conversation_id)
         logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies")
+        chat_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies")
         print("Step 1: Parsing user query with NLP (no LLM)")
         progress_messages.append({
             "stage": "Extracting user intent",
@@ -740,6 +759,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             "keywords": parsed.get("keywords", []),
             "classification": parsed.get("classification") or parsed.get("query_classification"),
         })
+        chat_logger.log_nlp_breakdown(parsed)
         print("1st NLP extraction returned:", parsed)
 
         # Store initial LLM interaction for logging
@@ -796,7 +816,10 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 })
             )
             answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
+            chat_logger.log_event("llm_response", response=answer, token_usage={})
+            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
             repo.save_message(conversation_id, "llm", answer)
+            chat_logger.log_event("llm_response", response=answer, token_usage={})
             repo.close()
             return {
                 "chat_id": chat_id,
@@ -920,6 +943,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log
+        chat_logger.log_event("database_data", data=db_fetched_data)
 
         # Log Step 2 - Database fetching
         repo.save_detailed_log(
@@ -1078,6 +1102,12 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         
         # Combine all news context
         news_context = "\n".join(news_context_parts) if news_context_parts else None
+        chat_logger.log_news_processing(
+            status="completed",
+            companies=all_companies_to_fetch_news,
+            details=news_fetch_log,
+            news_context=news_context,
+        )
         
         print(f"News context compiled: {news_context is not None}")
         if news_context:
@@ -1111,6 +1141,20 @@ Provide a clear, concise answer to the query. If data is missing for some compan
 
         final_llm_prompt = get_actual_final_prompt(request.query, all_data, statement_type, frequency)
 
+        exact_system_prompt, exact_user_prompt = _build_llm_prompts(
+            request.query,
+            all_data,
+            statement_type,
+            frequency,
+            news_context=news_context,
+        )
+        chat_logger.log_event(
+            "llm_prompt",
+            system_prompt=exact_system_prompt,
+            user_prompt=exact_user_prompt,
+            data=all_data,
+        )
+
         # Store data passed to LLM for logging
         data_passed_to_llm = all_data
 
@@ -1121,6 +1165,7 @@ Provide a clear, concise answer to the query. If data is missing for some compan
 
         # Store final LLM response for logging
         final_llm_response = answer
+        chat_logger.log_event("llm_response", response=answer, token_usage=tokens_used)
 
         # Save assistant message inside the same conversation
         repo.save_message(conversation_id, "llm", answer)
@@ -1146,6 +1191,7 @@ Provide a clear, concise answer to the query. If data is missing for some compan
 
         logger.log_report("phase_1", answer)
         logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0)
+        chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage=tokens_used)
         repo.close()
 
         # Write comprehensive log to file
@@ -1169,9 +1215,13 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         }
 
     except HTTPException:
+        if "chat_logger" in locals():
+            chat_logger.log_event("request_end", status="http_error")
         raise
     except Exception as e:
         print("Error:", str(e))
+        if "chat_logger" in locals():
+            chat_logger.log_error("chat_request", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1203,6 +1253,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
 
         chat_id = str(conversation_id)
         repo.save_message(conversation_id, "user", query)
+        chat_logger = logging_service.create_chat_log(query, conversation_id=conversation_id)
+        chat_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies/stream")
 
         # Initialize log variables
         initial_llm_prompt = get_actual_initial_prompt()
@@ -1220,6 +1272,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         })
 
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(query)
+        chat_logger.log_nlp_breakdown(parsed)
 
         if parsed.get("error"):
             repo.close()
@@ -1244,6 +1297,9 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 invalid_companies.append(company_name)
 
         if invalid_companies:
+            answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
+            chat_logger.log_event("llm_response", response=answer, token_usage={})
+            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
             repo.save_message(conversation_id, "llm", f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company.")
             repo.close()
             return StreamingResponse(
@@ -1311,6 +1367,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                                 tracked_missing.add(missing_key)
                                 missing_processing_scheduled = True
 
+                chat_logger.log_event("database_data", data=all_data)
+
         has_data = bool(all_data) and any(all_data.values())
 
         if not has_data:
@@ -1318,6 +1376,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 "Company data for the selected period is temporarily unavailable, possibly due to processing delays. Please try again after 10 minutes."
             )
             repo.save_message(conversation_id, "llm", answer)
+            chat_logger.log_report("no_data", answer)
+            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
             repo.close()
             return StreamingResponse(
                 iter([_format_sse_event("message", answer), _format_sse_event("done", "true")]),
@@ -1351,6 +1411,11 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
 
         print(f"News status: {has_any_news=}, {needs_news_fetch=}")
         print(f"News exists map: {news_exists_map}")
+        chat_logger.log_news_processing(
+            status="cache_check_completed",
+            companies=news_check_companies,
+            exists_map=news_exists_map,
+        )
 
         # ====== CASE 1: All news exists ======
         if has_any_news and not needs_news_fetch:
@@ -1371,6 +1436,20 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                         news_context_parts.append(f"\n### {company_name} - Recent News\n{markdown_news}")
 
             news_context = "\n".join(news_context_parts) if news_context_parts else None
+            chat_logger.log_news_processing(
+                status="context_ready",
+                news_context=news_context,
+            )
+            exact_system_prompt, exact_user_prompt = _build_llm_prompts(
+                query, all_data, statement_type, frequency, news_context=news_context
+            )
+            chat_logger.log_event(
+                "llm_prompt",
+                phase="full_report_stream",
+                system_prompt=exact_system_prompt,
+                user_prompt=exact_user_prompt,
+                data=all_data,
+            )
 
             # Generate and stream full report with news
             def event_generator_case1() -> Iterator[bytes]:
@@ -1388,6 +1467,13 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 try:
                     answer = "".join(answer_parts)
                     repo.save_message(conversation_id, "llm", answer)
+                    chat_logger.log_event(
+                        "llm_response",
+                        phase="full_report_stream",
+                        response=answer,
+                        token_usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "note": "Streaming response did not expose usage metadata"},
+                    )
+                    chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={"note": "Streaming response did not expose usage metadata"})
                     repo.close()
                 except Exception as e:
                     print("Error closing page:", e)
@@ -1438,6 +1524,22 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             finally:
                 report_queue.put(None)
 
+        fast_system_prompt, fast_user_prompt = _build_llm_prompts(
+            query,
+            all_data,
+            statement_type,
+            frequency,
+            news_context=None,
+            report_mode="multi-first",
+        )
+        chat_logger.log_event(
+            "llm_prompt",
+            phase="fast_report_stream",
+            system_prompt=fast_system_prompt,
+            user_prompt=fast_user_prompt,
+            data=all_data,
+        )
+
         async def event_generator_case2() -> AsyncIterator[bytes]:
             """Event generator for CASE 2: Fast path + background news collection."""
             metadata = {"chat_id": chat_id, "conversation_id": conversation_id}
@@ -1467,6 +1569,10 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             try:
                 collected_news_result = await news_task
                 print(f"[PROCESS B] News collection completed: {list(collected_news_result.keys())}")
+                chat_logger.log_news_processing(
+                    status="collection_completed",
+                    news=collected_news_result,
+                )
             except Exception as e:
                 print(f"[PROCESS B] News collection failed: {e}")
 
@@ -1474,6 +1580,11 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             for company_name, news_text in collected_news_result.items():
                 if news_text:
                     combined_news_parts.append(f"\n### {company_name} - Recent News\n{news_text}")
+
+            chat_logger.log_news_processing(
+                status="context_ready",
+                news_context="\n".join(combined_news_parts) if combined_news_parts else None,
+            )
 
             complete_report = fast_report
             if combined_news_parts:
@@ -1486,7 +1597,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                         company_data=all_data,
                         news_context=news_context,
                         statement_type=statement_type,
-                        frequency=frequency
+                        frequency=frequency,
+                        chat_logger=chat_logger,
                     )
 
                     if news_impact:
@@ -1506,6 +1618,13 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
 
             try:
                 repo.save_message(conversation_id, "llm", complete_report)
+                chat_logger.log_event(
+                    "llm_response",
+                    phase="combined_stream",
+                    response=complete_report,
+                    token_usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "note": "Streaming response usage is logged per non-streaming news-impact call when available"},
+                )
+                chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={"note": "Streaming response usage unavailable from stream chunks"})
             except Exception as e:
                 print(f"[ERROR] Failed to save complete report: {e}")
 
@@ -1519,9 +1638,13 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         return StreamingResponse(event_generator_case2(), media_type="text/event-stream")
 
     except HTTPException:
+        if "chat_logger" in locals():
+            chat_logger.log_event("request_end", status="http_error")
         raise
     except Exception as e:
         print("Stream error:", str(e))
+        if "chat_logger" in locals():
+            chat_logger.log_error("stream_chat_request", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

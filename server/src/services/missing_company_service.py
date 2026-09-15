@@ -6,25 +6,38 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from services.batch_xbrl_finder import create_browser_and_context, get_all_std_xbrl_urls, fetch_xbrl_content
+
+from config.settings import LOGS_DIR, MISSING_COMPANIES_CSV
+from services.batch_xbrl_finder import (
+    BSE_URL,
+    check_bse_landing_site_health,
+    create_browser_and_context,
+    fetch_xbrl_content,
+    get_all_std_xbrl_urls,
+)
+from services.heal_service import BseWebsiteDown, PlaywrightHealBatchHalt, heal_results_portal
+from automation.results_portal import WEBSITE_DOWN_DETAIL, is_site_down
 from playwright.async_api import async_playwright
 from repositories.sqlite_repository import SqliteRepository
 from services.html_parser_service import html_dom_to_structured_json_from_content
 from services.xml_extraction_service import extract_xbrl_data_from_bytes
+from utils.fiscal_year import is_within_5year_range
+
+PRODUCTION_PORTAL_PATH = Path(__file__).resolve().parents[1] / "automation" / "results_portal.py"
+
+# Sentinel: caller did not prefetch raw content (legacy / direct calls).
+_RAW_CONTENT_UNSET = object()
 
 
 def _missing_tracker_csv_path() -> Path:
-    """Get path to missing_companies.csv"""
-    src_dir = Path(__file__).resolve().parents[2]   # points to src/
-    data_dir = src_dir / "Data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir / "missing_companies.csv"
+    """Canonical missing_companies.csv (same path chatbot + admin use)."""
+    MISSING_COMPANIES_CSV.parent.mkdir(parents=True, exist_ok=True)
+    return MISSING_COMPANIES_CSV
 
 
 def _missing_company_log_dir() -> Path:
     """Get path to the missing company processing logs directory."""
-    src_dir = Path(__file__).resolve().parents[2]
-    logs_dir = src_dir / "logs" / "missing_company"
+    logs_dir = LOGS_DIR / "missing_company"
     logs_dir.mkdir(parents=True, exist_ok=True)
     return logs_dir
 
@@ -168,7 +181,7 @@ class MissingCompanyService:
         publication_date: Optional[str],
         log_file: Optional[Path] = None,
         report_type: str = 'std',
-        raw_content: Optional[Any] = None,
+        raw_content: Optional[Any] = _RAW_CONTENT_UNSET,
         industry: Optional[str] = None,
     ) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -187,10 +200,33 @@ class MissingCompanyService:
             result['error'] = 'No XBRL URL provided.'
             return result
 
-        if raw_content is None:
+        if raw_content is _RAW_CONTENT_UNSET:
             raw_content = await fetch_xbrl_content(ctx, xbrl_url)
+        elif not raw_content:
+            # Prefetched by collector but unprocessable (404/empty) — do not re-fetch.
+            result['error'] = f'skipped_unprocessable: no raw content for {xbrl_url}'
+            if log_file is not None:
+                _append_missing_company_log(log_file, {
+                    'stage': 'skipped_unprocessable',
+                    'scrip_code': scrip_code,
+                    'company_name': company_name,
+                    'xbrl_url': xbrl_url,
+                    'period': publication_date,
+                    'reason': 'link present but raw content unavailable',
+                })
+            return result
+
         if not raw_content:
             result['error'] = f'Unable to fetch raw XBRL content from {xbrl_url}'
+            if log_file is not None:
+                _append_missing_company_log(log_file, {
+                    'stage': 'skipped_unprocessable',
+                    'scrip_code': scrip_code,
+                    'company_name': company_name,
+                    'xbrl_url': xbrl_url,
+                    'period': publication_date,
+                    'reason': 'unable to fetch raw content',
+                })
             return result
 
         raw_text = raw_content if isinstance(raw_content, str) else raw_content
@@ -203,7 +239,7 @@ class MissingCompanyService:
                 'company_name': company_name,
                 'xbrl_url': xbrl_url,
                 'period': publication_date,
-                'message': 'URL discovered and content fetch starting',
+                'message': 'URL discovered with raw content; storing',
             })
 
         print(json.dumps({
@@ -341,8 +377,10 @@ class MissingCompanyService:
         symbol: Optional[str] = None,
     ) -> Dict[str, Any]:
         query = scrip_code.strip() if scrip_code and scrip_code.strip() else company_name
+        expected_scrip = scrip_code.strip() if scrip_code and scrip_code.strip() else None
         repo = SqliteRepository()
         browser = None
+        ctx = None
         log_file = _new_missing_company_log_file(scrip_code or company_name)
         _append_missing_company_log(log_file, {
             'stage': 'started',
@@ -352,29 +390,174 @@ class MissingCompanyService:
             'query': query,
             'timestamp': datetime.now().isoformat(),
         })
+
+        async def _collect_and_store(active_ctx) -> tuple:
+            attempts = 0
+            results = []
+            consecutive_out_of_range = 0
+            async for xbrl_url, xbrl_period, xbrl_type, raw_content, industry in get_all_std_xbrl_urls(
+                active_ctx,
+                query,
+                expected_scrip=expected_scrip,
+            ):
+                if not xbrl_url or str(xbrl_type).lower() != 'std':
+                    continue
+
+                # Same past-5-FY gate + early exit as Fetch Filings WS
+                if not is_within_5year_range(xbrl_period):
+                    consecutive_out_of_range += 1
+                    _append_missing_company_log(log_file, {
+                        'stage': 'skipped_outside_5year_range',
+                        'scrip_code': scrip_code,
+                        'period': xbrl_period,
+                        'url': xbrl_url,
+                        'consecutive_out_of_range': consecutive_out_of_range,
+                    })
+                    if consecutive_out_of_range >= 2:
+                        _append_missing_company_log(log_file, {
+                            'stage': 'halting_collection',
+                            'scrip_code': scrip_code,
+                            'reason': (
+                                '2 consecutive records outside 5-year range. '
+                                'All remaining records assumed to be older.'
+                            ),
+                        })
+                        break
+                    continue
+
+                consecutive_out_of_range = 0
+                attempts += 1
+                results.append(await MissingCompanyService._fetch_and_store_xbrl_for_company(
+                    active_ctx,
+                    repo,
+                    scrip_code,
+                    company_name,
+                    symbol,
+                    xbrl_url,
+                    xbrl_period,
+                    log_file=log_file,
+                    report_type='std',
+                    raw_content=raw_content,
+                    industry=industry,
+                ))
+            return attempts, results
+
         try:
             async with async_playwright() as p:
                 browser, ctx = await create_browser_and_context(p)
-                attempts = 0
-                results = []
-                async for xbrl_url, xbrl_period, xbrl_type, raw_content, industry in get_all_std_xbrl_urls(ctx, query):
-                    if not xbrl_url or xbrl_type != 'std':
-                        continue
 
-                    attempts += 1
-                    results.append(await MissingCompanyService._fetch_and_store_xbrl_for_company(
-                        ctx,
-                        repo,
-                        scrip_code,
-                        company_name,
-                        symbol,
-                        xbrl_url,
-                        xbrl_period,
-                        log_file=log_file,
-                        report_type='std',
-                        raw_content=raw_content,
-                        industry=industry,
-                    ))
+                # Same downtime gate as Fetch Filings — empty landing grid ⇒ no heal.
+                try:
+                    health = await check_bse_landing_site_health(ctx)
+                except Exception as health_exc:
+                    _append_missing_company_log(log_file, {
+                        'stage': 'site_health_probe_failed',
+                        'error': str(health_exc),
+                        'detail': 'proceed_to_collect',
+                    })
+                    health = None
+                if health is not None and is_site_down(health):
+                    _append_missing_company_log(log_file, {
+                        'stage': 'website_down',
+                        'detail': WEBSITE_DOWN_DETAIL,
+                    })
+                    return {
+                        'scrip_code': scrip_code or '',
+                        'company_name': company_name,
+                        'symbol': symbol or '',
+                        'attempts': 0,
+                        'results': [],
+                        'success': False,
+                        'error': WEBSITE_DOWN_DETAIL,
+                    }
+
+                heal_attempted = False
+                attempts = 0
+                results: List[Dict[str, Any]] = []
+
+                while True:
+                    try:
+                        attempts, results = await _collect_and_store(ctx)
+                        break
+                    except BseWebsiteDown as down_exc:
+                        _append_missing_company_log(log_file, {
+                            'stage': 'website_down',
+                            'detail': str(down_exc),
+                        })
+                        return {
+                            'scrip_code': scrip_code or '',
+                            'company_name': company_name,
+                            'symbol': symbol or '',
+                            'attempts': attempts,
+                            'results': results,
+                            'success': False,
+                            'error': str(down_exc) or WEBSITE_DOWN_DETAIL,
+                        }
+                    except PlaywrightHealBatchHalt as heal_halt:
+                        needs_heal = getattr(heal_halt, 'needs_heal', False)
+                        if not needs_heal or heal_attempted:
+                            raise
+                        heal_attempted = True
+                        try:
+                            pre_heal_health = await check_bse_landing_site_health(ctx)
+                        except Exception as health_exc:
+                            _append_missing_company_log(log_file, {
+                                'stage': 'pre_heal_probe_failed',
+                                'error': str(health_exc),
+                                'detail': 'proceed_to_heal',
+                            })
+                            pre_heal_health = None
+                        if pre_heal_health is not None and is_site_down(pre_heal_health):
+                            return {
+                                'scrip_code': scrip_code or '',
+                                'company_name': company_name,
+                                'symbol': symbol or '',
+                                'attempts': attempts,
+                                'results': results,
+                                'success': False,
+                                'error': WEBSITE_DOWN_DETAIL,
+                            }
+
+                        _append_missing_company_log(log_file, {
+                            'stage': 'heal_started',
+                            'reason': getattr(heal_halt, 'reason', str(heal_halt)),
+                            'scrip_code': scrip_code,
+                        })
+                        try:
+                            await asyncio.to_thread(
+                                heal_results_portal,
+                                BSE_URL,
+                                PRODUCTION_PORTAL_PATH,
+                                scrip_code or query,
+                            )
+                        except BseWebsiteDown as down_exc:
+                            return {
+                                'scrip_code': scrip_code or '',
+                                'company_name': company_name,
+                                'symbol': symbol or '',
+                                'attempts': attempts,
+                                'results': results,
+                                'success': False,
+                                'error': str(down_exc) or WEBSITE_DOWN_DETAIL,
+                            }
+
+                        # Recreate browser after portal promote (same as Fetch Filings WS).
+                        try:
+                            if ctx is not None:
+                                await ctx.close()
+                        except Exception:
+                            pass
+                        try:
+                            if browser is not None:
+                                await browser.close()
+                        except Exception:
+                            pass
+                        browser, ctx = await create_browser_and_context(p)
+                        _append_missing_company_log(log_file, {
+                            'stage': 'heal_success_retrying',
+                            'scrip_code': scrip_code,
+                        })
+                        continue
 
                 if not results:
                     _append_missing_company_log(log_file, {
@@ -409,6 +592,11 @@ class MissingCompanyService:
                     })
                 return summary
         except Exception as e:
+            _append_missing_company_log(log_file, {
+                'stage': 'failed',
+                'scrip_code': scrip_code,
+                'error': str(e),
+            })
             return {
                 'scrip_code': scrip_code or '',
                 'company_name': company_name,
@@ -420,10 +608,10 @@ class MissingCompanyService:
             }
         finally:
             try:
-                if 'ctx' in locals() and ctx is not None:
+                if ctx is not None:
                     await ctx.close()
             except Exception as e:
-                print(f"Error closing websocket: {e}")
+                print(f"Error closing context: {e}")
             try:
                 if browser is not None:
                     await browser.close()
@@ -435,30 +623,68 @@ class MissingCompanyService:
                 print(f"Error closing repository: {e}")
 
     @staticmethod
+    def _company_queue_key(company: Dict[str, Any]) -> str:
+        key = (company.get('scrip_code') or '').strip().lower()
+        if key:
+            return key
+        return f"name:{(company.get('company_name') or '').strip().lower()}"
+
+    @staticmethod
+    def _dedupe_fifo(companies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Keep first occurrence of each scrip/name (CSV top = sno 1)."""
+        deduped: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for company in companies:
+            key = MissingCompanyService._company_queue_key(company)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(company)
+        return deduped
+
+    @staticmethod
     async def process_missing_companies_batch(
         scrip_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Process multiple missing companies.
-        If scrip_codes is None, process all missing companies.
-        
-        Returns progress and results for each company.
+        Process missing companies as a FIFO CSV queue (sno 1 first).
+
+        Re-reads the CSV after each company so mid-run appends are picked up
+        at the end of the queue. Removes a row only after successful
+        collect+extract. Failed companies are skipped for the rest of this
+        run (left in CSV for a later worker).
         """
         async with MissingCompanyService._processing_lock:
-            missing_companies = MissingCompanyService.get_missing_companies()
-            
-            # Filter by scrip_codes if provided
+            results: List[Dict[str, Any]] = []
+            failed_keys: set[str] = set()
+            scrip_codes_set = None
             if scrip_codes:
                 scrip_codes_set = {s.strip().lower() for s in scrip_codes}
-                missing_companies = [
-                    c for c in missing_companies
-                    if c['scrip_code'].strip().lower() in scrip_codes_set
+
+            while True:
+                missing_companies = MissingCompanyService.get_missing_companies()
+                if scrip_codes_set is not None:
+                    missing_companies = [
+                        c for c in missing_companies
+                        if c['scrip_code'].strip().lower() in scrip_codes_set
+                    ]
+
+                queue = MissingCompanyService._dedupe_fifo(missing_companies)
+                queue = [
+                    c for c in queue
+                    if MissingCompanyService._company_queue_key(c) not in failed_keys
                 ]
-            
-            results = []
-            total = len(missing_companies)
-            
-            for idx, company in enumerate(missing_companies, start=1):
+                if not queue:
+                    break
+
+                company = queue[0]
+                company_key = MissingCompanyService._company_queue_key(company)
+                print(
+                    f"[missing-queue] Processing head "
+                    f"{company.get('company_name')} ({company.get('scrip_code')}) "
+                    f"— {len(queue)} left in queue"
+                )
+
                 try:
                     result = await MissingCompanyService.process_missing_company_full(
                         scrip_code=company['scrip_code'],
@@ -466,10 +692,21 @@ class MissingCompanyService:
                         symbol=company['symbol'],
                     )
                     results.append(result)
-                    
+
                     if result.get('success'):
                         MissingCompanyService.remove_missing_company(company['scrip_code'])
+                        print(
+                            f"[missing-queue] Removed {company.get('scrip_code')} "
+                            f"after successful collect"
+                        )
+                    else:
+                        failed_keys.add(company_key)
+                        print(
+                            f"[missing-queue] Leaving {company.get('scrip_code')} in CSV "
+                            f"(failed this run); skipping for remainder of worker"
+                        )
                 except Exception as e:
+                    failed_keys.add(company_key)
                     results.append({
                         'scrip_code': company['scrip_code'],
                         'company_name': company['company_name'],
@@ -479,13 +716,11 @@ class MissingCompanyService:
                         'success': False,
                         'error': f'Batch processing error: {str(e)}',
                     })
-                
-                # Small delay between requests to avoid overwhelming the BSE
-                if idx < total:
-                    await asyncio.sleep(0.5)
-        
+
+                await asyncio.sleep(0.5)
+
         return {
-            'total': total,
+            'total': len(results),
             'processed': len(results),
             'timestamp': datetime.now().isoformat(),
             'results': results,

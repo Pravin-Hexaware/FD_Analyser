@@ -8,6 +8,9 @@ from typing import Optional
 
 from config.settings import MISSING_COMPANIES_CSV
 
+_worker_lock = threading.Lock()
+_worker_running = False
+
 
 def missing_tracker_csv_path() -> Path:
     MISSING_COMPANIES_CSV.parent.mkdir(parents=True, exist_ok=True)
@@ -15,18 +18,42 @@ def missing_tracker_csv_path() -> Path:
 
 
 def schedule_missing_company_processing() -> None:
+    """
+    Start at most one background worker for the missing-companies CSV queue.
+    If a worker is already running, new CSV appends are picked up by that worker
+    on its next head-of-queue re-read — do not start a second browser batch.
+    """
+    global _worker_running
+
     try:
         from services.missing_company_service import MissingCompanyService
 
+        with _worker_lock:
+            if _worker_running:
+                print("[missing-queue] Worker already running; leaving company in CSV queue")
+                return
+            _worker_running = True
+
         def _run():
+            global _worker_running
             try:
                 asyncio.run(MissingCompanyService.process_missing_companies_batch(None))
             except Exception as exc:
                 print(f"[WARN] Missing company background task failed: {exc}")
+            finally:
+                with _worker_lock:
+                    _worker_running = False
 
-        thread = threading.Thread(target=_run, daemon=True)
+        thread = threading.Thread(
+            target=_run,
+            daemon=True,
+            name="missing-company-worker",
+        )
         thread.start()
+        print("[missing-queue] Background worker started")
     except Exception as exc:
+        with _worker_lock:
+            _worker_running = False
         print(f"[WARN] Failed to schedule missing company processing: {exc}")
 
 

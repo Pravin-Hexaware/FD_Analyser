@@ -4,6 +4,7 @@ import base64
 from playwright.async_api import async_playwright
 
 from llm.azure_llm import evaluate_with_azure_llm, markdownify
+from prompts.loader import load_prompt
 
 # =============================
 # CONFIG
@@ -310,22 +311,75 @@ async def extract_dom_clusters(page):
 # =============================
 # REUSABLE DOM EXTRACTOR
 # =============================
-async def extract_dom_from_url(url, headless=True, screenshot_path="bse_page.png"):
+async def extract_dom_from_url(url, headless=None, screenshot_path="bse_page.png"):
+    """
+    Navigate and extract DOM.
+    headless=None → read FINBOT_HEADLESS (default headless). Set FINBOT_HEADLESS=0 to watch.
+    """
+    import os
+
+    if headless is None:
+        headless_env = os.environ.get("FINBOT_HEADLESS", "1").strip().lower()
+        headless = headless_env not in {"0", "false", "no", "off"}
+
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/121.0.0.0 Safari/537.36"
+    )
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        page = await browser.new_page()
+        launch_kw = dict(headless=headless, args=["--no-sandbox"])
+        try:
+            browser = await p.chromium.launch(channel="chrome", **launch_kw)
+        except Exception:
+            browser = await p.chromium.launch(**launch_kw)
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent=user_agent,
+            ignore_https_errors=True,
+        )
+        page = await context.new_page()
+        await page.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            """
+        )
 
         print(f"[DOM TOOL] Navigating to {url} headless={headless}")
-        await page.goto(url, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(5000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=60000)
+        except Exception as exc:
+            print(f"[DOM TOOL] networkidle wait skipped: {exc}")
+        await page.wait_for_timeout(3000)
+
+        # Soft-accept cookie banners when present (same idea as ResultsPortal.navigate).
+        for sel in [
+            'button:has-text("Accept")',
+            'button:has-text("I Agree")',
+            "#onetrust-accept-btn-handler",
+        ]:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible():
+                    await loc.click()
+                    break
+            except Exception:
+                continue
 
         dom = await extract_dom_clusters(page)
         html = await page.content()
         text = await page.inner_text("body")
+        access_denied = "access denied" in (text or "").lower()
+        if access_denied:
+            print("[DOM TOOL] WARNING: page text looks like Access Denied; selectors may be empty")
 
         screenshot_bytes = await page.screenshot(path=screenshot_path, full_page=True)
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
+        await context.close()
         await browser.close()
 
         return {
@@ -333,8 +387,9 @@ async def extract_dom_from_url(url, headless=True, screenshot_path="bse_page.png
             "dom": dom,
             "html": html,
             "text": text,
+            "access_denied": access_denied,
             "screenshot_path": screenshot_path,
-            "screenshot_b64": screenshot_b64
+            "screenshot_b64": screenshot_b64,
         }
 
 
@@ -347,152 +402,22 @@ def build_dom_combined_prompt(dom_data):
     page_text = dom_data.get("text", "")[:5000]
     screenshot_b64 = dom_data.get("screenshot_b64", "")[:1000]
 
-    return f"""
-You are an expert UI automation DOM analysis agent.
-
-INPUT:
-- FULL PAGE DOM JSON with clusters and extracted elements
-- DOM CLUSTERS WITH CONTAINER CONTEXT
-- SCREENSHOT BASE64 FOR VISUAL REFERENCE
-- PAGE TEXT CONTENT
-- PAGE URL
-
-DUAL TASK:
-1. FILTER THE DOM: Remove duplicates, keep stable selectors, preserve form/result clusters, identify suggestion boxes
-2. UNDERSTAND THE DOM: Identify UI roles (search input, filters, buttons, results table, suggestion containers, data links) and their selectors
-
-FILTERING RULES:
-- Analyze all extracted inputs, dropdowns, buttons, suggestions, and tables
-- For duplicate selectors, choose the one with:
-  * visible=true over visible=false
-  * Better proximity to labels or descriptive text
-  * Presence in form_cluster over isolated elements
-- IDENTIFY SUGGESTION BOXES
-- Return deduplicated, stable selectors only
-- Include container context and suggestion container selectors
-- Ensure chosen selectors are unique and match exactly one visible element in the DOM
-
-UNDERSTANDING RULES:
-- Identify PRIMARY ROLES: search inputs, filter controls, action buttons, result containers
-- For each role, list ALL possible selectors (id-based, class-based, attribute-based) while marking the best unique selector
-- Explain WHY each selector is relevant based on cluster neighbors, labels, and screenshot context
-- Map selectors to automation steps
-- Prefer selectors that are unique and stable; do not recommend selectors that may match multiple elements
-
-FULL DOM DATA:
-{markdownify(dom)}
-
-DOM CLUSTERS:
-{markdownify(clusters)}
-
-PAGE TEXT:
-{page_text}
-
-PAGE URL:
-{url}
-
-SCREENSHOT (truncated):
-{screenshot_b64}
-
-OUTPUT FORMAT:
-- Return valid markdown output only, with no extra text.
-- Use markdown headings and bullet lists for structure.
-- If you need to include code snippets, use fenced markdown code blocks.
-
-Example structure:
-- filtered_dom:
-  - source: llm_dom_combined
-  - url: {url}
-  - counts:
-    - inputs: 0
-    - dropdowns: 0
-    - buttons: 0
-    - suggestions: 0
-    - tables: 0
-  - elements:
-    - inputs:
-      - selector: ""
-        id: ""
-        name: ""
-        type: ""
-        placeholder: ""
-        class: ""
-        label: ""
-        container_selector: ""
-        visible: true
-    - dropdowns: []
-    - buttons: []
-    - suggestions:
-      - selector: ""
-        id: ""
-        role: listbox|list|menu|none
-        visible: false
-        description: "AJAX suggestion container for search input"
-    - tables: []
-  - clusters: []
-  - logical_clusters: []
-  - form_based_dom:
-    - primary_form_cluster: {{}}
-    - result_cluster: {{}}
-    - elements:
-      - inputs: []
-      - dropdowns: []
-      - buttons: []
-      - suggestions: []
-      - tables: []
-- dom_understanding:
-  - goal: Describe page purpose from URL and content
-  - roles:
-    - search_input:
-      - selectors:
-        - #id_or_selector
-        - input.class_name
-      - reason: Input field for company name or search query
-      - suggestion_container: Related suggestion box selector if applicable
-    - filter_controls:
-      - selectors:
-        - #select_id
-      - reason: Dropdown for filtering by criteria
-    - suggestion_boxes:
-      - selectors:
-        - #suggestions
-        - div.autocomplete
-      - reason: AJAX suggestion container that appears after typing in search input
-      - linked_to_input: search_input
-    - submit_action:
-      - selectors:
-        - #search_btn
-        - button.search
-      - reason: Button to submit search or apply filters
-    - results_table:
-      - selectors:
-        - table#results
-        - table.data-table
-      - reason: Container for displaying search/filtered results
-    - data_links:
-      - selectors:
-        - a.result-link
-        - a[href*=xbrl]
-      - reason: Links to XBRL or detailed data
-  - recommended_flow:
-    - Select filter dropdowns if required
-    - Enter search/company identifier in search input
-    - Wait for and interact with suggestion box if available
-    - Select suggestion from dropdown or autocomplete
-    - Click submit button
-    - Wait for results table
-    - Extract or click data links
-  - notes: Additional context about page structure and challenges
-- agent_thoughts: ""
-
-"""
-
+    return load_prompt(
+        "dom_combined_prompt.md",
+        dom=markdownify(dom),
+        clusters=markdownify(clusters),
+        page_text=page_text,
+        url=url,
+        screenshot_b64=screenshot_b64,
+    )
 
 def analyze_dom_combined(dom_data, cache_path="cache/dom_analysis_combined.md"):
     prompt = build_dom_combined_prompt(dom_data)
     result = evaluate_with_azure_llm(
         prompt=prompt,
-        cache_path=cache_path
+        cache_path=cache_path,
+        run_name="heal_dom_analysis",
+        tags=["heal-agent", "dom"],
     )
     return result
 

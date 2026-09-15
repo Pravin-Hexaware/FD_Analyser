@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config.settings import LOGS_DIR
+from prompts.loader import load_prompt
 
 
 def write_llm_log(
@@ -72,10 +73,11 @@ def get_actual_initial_prompt() -> str:
 
 
 def get_actual_final_prompt(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
-    system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided parsed JSON financial data.
-The data is for {frequency} financial statements, including {statement_type.replace('_', ' ')} metrics where available.
-
-Provide a clear, concise manager-style analysis report. Use only the data present in the JSON and mention if any requested period or metric is missing."""
+    system_prompt = load_prompt(
+        "chatbot_financial_analyst_qa.md",
+        frequency=frequency,
+        statement_type_label=statement_type.replace("_", " "),
+    ).strip()
     user_prompt = f"Query: {query}\n\nData: {json.dumps(data, indent=2)}"
     return f"{system_prompt}\n\n{user_prompt}"
 

@@ -16,6 +16,7 @@ Endpoints:
 """
 
 import asyncio
+import os
 import re
 import time
 from pathlib import Path
@@ -26,8 +27,20 @@ import urllib3
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, validator
 from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError
-from automation.results_portal import ResultsPortal, PlaywrightHealRequired
-from services.heal_service import classify_playwright_failure, heal_results_portal
+from automation.results_portal import (
+    ResultsPortal,
+    PlaywrightHealRequired,
+    SiteHealth,
+    WEBSITE_DOWN_DETAIL,
+    is_site_down,
+)
+from services.heal_service import (
+    BseWebsiteDown,
+    PlaywrightHealBatchHalt,
+    classify_playwright_failure,
+    heal_results_portal,
+    is_heal_in_progress,
+)
 from services.logging_service import logging_service
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -83,6 +96,11 @@ USER_AGENT = (
     "Chrome/121.0.0.0 Safari/537.36"
 )
 
+def _heal_disabled() -> bool:
+    """When set (staging harness), never nest heal_results_portal."""
+    return os.environ.get("FINBOT_HEAL_DISABLED", "").strip().lower() in {"1", "true", "yes"}
+
+
 # Master knobs (tune if needed)
 NAV_TIMEOUT = 25_000                # generous for slow days
 GRID_TIMEOUT = 18_000               # wait grid
@@ -90,7 +108,7 @@ XHR_TIMEOUT  = 12_000               # smart search fetch
 CLICK_NAV_TIMEOUT = 8_000           # navigation after click
 POPUP_TIMEOUT = 4_000               # popup wait
 POST_CLICK_SETTLE_MS = 600          # small delay after click to let window.open fire
-MAX_ATTEMPTS_PER_COMPANY = 10        # full cycles
+MAX_ATTEMPTS_PER_COMPANY = 3        # full cycles (was 10 — caused log/attempt loops on UI drift)
 COOLDOWN_BETWEEN_ATTEMPTS_MS = 1500 # small pause to placate WAF
 BROADCAST_PERIODS = ["7", "6", "5", "4", "3"]  # legacy ASP.NET values; sample.py flow uses ddl "Beyond last 1 year" only
 PORTAL = ResultsPortal(
@@ -111,6 +129,22 @@ def looks_like_scrip(text: str) -> bool:
 
 def strip_lower(s: str) -> str:
     return (s or "").strip().lower()
+
+
+def is_c_or_q_period(period: Optional[str]) -> bool:
+    """True when BSE period token is annual (C) or quarterly (Q), e.g. JQ2026-2027."""
+    if not period:
+        return False
+    p = str(period).strip().upper()
+    return len(p) >= 2 and p[1] in {"C", "Q"}
+
+
+
+def is_half_or_nine_month_period(period: Optional[str]) -> bool:
+    if not period:
+        return False
+    p = str(period).strip().upper()
+    return len(p) > 1 and p[1] in ("H", "N")
 
 
 def _is_bse_corporate_results_portal_url(url: str) -> bool:
@@ -235,14 +269,16 @@ async def fetch_xbrl_content(ctx, url: str) -> Optional[str]:
 
 # -------------------- Browser/context helpers --------------------
 async def create_browser_and_context(p):
-    """Minimal browser setup aligned with sample.py (viewport + UA only)."""
+    """Browser setup. Set FINBOT_HEADLESS=0/false/no for headed Chrome (observe UI)."""
+    headless_env = os.environ.get("FINBOT_HEADLESS", "1").strip().lower()
+    headless = headless_env not in {"0", "false", "no", "off"}
     launch_kw = dict(
-        headless=True,
+        headless=headless,
         args=[
             "--no-sandbox",
         ],
     )
-    # BSE autocomplete often fails in bundled Chromium; real Chrome improves headless parity with sample.py.
+    # BSE autocomplete often fails in bundled Chromium; real Chrome improves parity.
     try:
         browser = await p.chromium.launch(channel="chrome", **launch_kw)
     except Exception:
@@ -261,11 +297,47 @@ async def navigate_and_prepare(page):
     await PORTAL.navigate(page)
 
 
+async def check_bse_landing_site_health(ctx) -> SiteHealth:
+    """
+    Open the BSE results landing page with NO company search and classify site health.
+
+    Used before Fetch Filings collection and before starting the heal agent so BSE
+    downtime (empty default grid) is not mistaken for UI drift.
+    """
+    page = None
+    try:
+        page = await prepare_page(ctx)
+        await navigate_and_prepare(page)
+        # Fresh reload of the default landing table (no form fill).
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=PORTAL.NAV_TIMEOUT)
+        except Exception:
+            try:
+                await page.goto(PORTAL.TARGET_URL, timeout=PORTAL.NAV_TIMEOUT)
+            except Exception:
+                pass
+        try:
+            await page.wait_for_load_state("networkidle", timeout=30_000)
+        except Exception:
+            pass
+        return await PORTAL.check_landing_site_health(page)
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
 async def apply_results_filters_new(page) -> None:
     await PORTAL.apply_filters(page)
 
-async def fill_company_search_new(page, company: str) -> None:
-    await PORTAL.fill_search(page, company)
+async def fill_company_search_new(
+    page,
+    company: str,
+    expected_scrip: Optional[str] = None,
+) -> None:
+    await PORTAL.fill_search(page, company, expected_scrip=expected_scrip)
 
 
 # -------------------- Field helpers --------------------
@@ -951,7 +1023,7 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
 
             expected_scrip = await resolve_expected_bse_scrip(ctx, company)
 
-            await fill_company_search_new(page, company)
+            await fill_company_search_new(page, company, expected_scrip=expected_scrip)
             await apply_results_filters_new(page)
 
             # Single submit + grid refresh (same as sample.py). Past multi-broadcast loop removed;
@@ -1017,15 +1089,92 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 logging_service.log_phase("xbrl_extract", "success", company=company, attempt=attempts, period=period, prefer=prefer)
                 return url, period, attempts, annual_url, annual_period, quarterly_url, quarterly_period
 
-            # no url; next attempt after cooldown
-            await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
+            # Empty grid / no XBRL after a full search+submit cycle.
+            # Do not burn remaining MAX_ATTEMPTS on the same unbound/empty outcome.
+            logging_service.log_phase(
+                "xbrl_extract",
+                "failed",
+                company=company,
+                attempt=attempts,
+                error="no_xbrl_url_after_submit",
+                classification="empty_grid",
+                loop_action="fail_fast_empty_grid",
+                detail="skip_identical_unbound_or_empty_retries",
+            )
+            break
 
         except PlaywrightHealRequired as exc:
             fail_phase = getattr(exc, "phase", None) or "xbrl_extract"
+            if _heal_disabled():
+                logging_service.log_phase(
+                    fail_phase,
+                    "failed",
+                    company=company,
+                    attempt=attempts,
+                    error=str(exc),
+                    classification="ui_drift",
+                    loop_action="heal_disabled_fail_fast",
+                    detail="FINBOT_HEAL_DISABLED",
+                )
+                # Do NOT continue the attempt loop — that was the "old loop log" flood.
+                raise
+            if is_heal_in_progress():
+                logging_service.log_phase(
+                    fail_phase,
+                    "failed",
+                    company=company,
+                    attempt=attempts,
+                    error=str(exc),
+                    classification="ui_drift",
+                    loop_action="skip_heal_already_in_progress",
+                )
+                raise PlaywrightHealBatchHalt(
+                    f"heal_already_in_progress:{exc}",
+                    company=company,
+                ) from exc
             if not healed_once:
                 healed_once = True
                 old_module_path = Path(__file__).resolve().parents[1] / "automation" / "results_portal.py"
-                heal_results_portal(BSE_URL, old_module_path, test_input=company)
+                logging_service.log_phase(
+                    fail_phase,
+                    "failed",
+                    company=company,
+                    attempt=attempts,
+                    error=str(exc),
+                    classification="ui_drift",
+                    loop_action="probe_site_health_before_heal",
+                )
+                try:
+                    health = await check_bse_landing_site_health(ctx)
+                except Exception as health_exc:
+                    logging_service.log_phase(
+                        "site_health",
+                        "failed",
+                        company=company,
+                        error=str(health_exc),
+                        detail="pre_heal_probe_failed_proceed_to_heal",
+                    )
+                    health = SiteHealth.GRID_MISSING
+                if is_site_down(health):
+                    logging_service.log_phase(
+                        "playwright_heal_trigger",
+                        "skipped",
+                        company=company,
+                        reason="bse_downtime",
+                        detail=WEBSITE_DOWN_DETAIL,
+                    )
+                    raise BseWebsiteDown(WEBSITE_DOWN_DETAIL, company=company) from exc
+                logging_service.log_phase(
+                    fail_phase,
+                    "failed",
+                    company=company,
+                    attempt=attempts,
+                    error=str(exc),
+                    classification="ui_drift",
+                    loop_action="invoke_heal_agent_then_retry_once",
+                    site_health=str(getattr(health, "value", health)),
+                )
+                await asyncio.to_thread(heal_results_portal, BSE_URL, old_module_path, company)
                 logging_service.log_phase("agent_swap", "success", company=company, retry_after_heal=True)
                 continue
             logging_service.log_phase(
@@ -1035,11 +1184,9 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
                 attempt=attempts,
                 error=str(exc),
                 classification="ui_drift",
+                loop_action="halt_after_post_heal_retry_failed",
             )
-            try:
-                await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
-            except Exception:
-                pass
+            raise PlaywrightHealBatchHalt(str(exc), company=company) from exc
         except Exception as exc:
             logging_service.log_phase(
                 "xbrl_extract",
@@ -1063,10 +1210,14 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
     return None, None, attempts, None, None, None, None
 
 
-async def get_all_std_xbrl_urls(ctx, company: str):
+async def get_all_std_xbrl_urls(ctx, company: str, expected_scrip: Optional[str] = None):
     """
     Async generator that yields (url, period, xbrl_type, raw_content, industry) for each Std and Con XBRL link found for the company.
     Yields as soon as each URL is resolved. One grid load per successful attempt (aligned with sample.py).
+
+    ``expected_scrip``: optional 4–6 digit BSE code from CSV; when set, grid rows are filtered to that scrip.
+    On UI drift (``PlaywrightHealRequired``), raises ``PlaywrightHealBatchHalt(needs_heal=True)`` so the
+    Fetch Filings WS handler can run the coding agent outside the per-company timeout, then retry.
     """
     async def _resolve(url: Optional[str]) -> Optional[str]:
         if not url:
@@ -1162,7 +1313,14 @@ async def get_all_std_xbrl_urls(ctx, company: str):
 
     attempts = 0
 
-    yielded = set()  # to deduplicate by (period, report_type)
+    # Deduplicate by report_type + URL (not period) so duplicate periods with
+    # different links are each attempted; dead links do not block working ones.
+    tried_urls: set[tuple[str, str]] = set()
+
+    # Prefer caller-provided BSE code (CSV); otherwise resolve from search suggestions.
+    scrip_hint: Optional[str] = None
+    if expected_scrip and re.fullmatch(r"\d{4,6}", str(expected_scrip).strip()):
+        scrip_hint = str(expected_scrip).strip()
 
     # Outer attempt loop
     while attempts < MAX_ATTEMPTS_PER_COMPANY:
@@ -1171,9 +1329,9 @@ async def get_all_std_xbrl_urls(ctx, company: str):
         try:
             await navigate_and_prepare(page)
 
-            expected_scrip = await resolve_expected_bse_scrip(ctx, company)
+            row_scrip = scrip_hint or await resolve_expected_bse_scrip(ctx, company)
 
-            await fill_company_search_new(page, company)
+            await fill_company_search_new(page, company, expected_scrip=row_scrip)
             await apply_results_filters_new(page)
 
             await submit_form(page)
@@ -1236,16 +1394,18 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                             if await tds.count() > idx_name
                             else ""
                         )
-                        if not _row_belongs_to_scrip(code_cell, name_cell, expected_scrip):
+                        if not _row_belongs_to_scrip(code_cell, name_cell, row_scrip):
                             continue
 
                         per = (await tds.nth(idx_period).inner_text()).strip()
+                        # Skip only half-yearly (SH) and nine-months (DN).
+                        if is_half_or_nine_month_period(per):
+                            continue
                         ind = (await tds.nth(idx_industry).inner_text()).strip() if await tds.count() > idx_industry else ""
                         std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
                         con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
 
-
-                        # Yield Std XBRL
+                        # Yield Std XBRL only when raw content loads successfully.
                         if std_a and await std_a.count():
                             href = (await std_a.first.get_attribute("href")) or ""
                             if href and not href.lower().startswith("javascript:"):
@@ -1253,15 +1413,17 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                             else:
                                 url = await _resolve_from_anchor(std_a)
 
-                            if url and (per, "std") not in yielded:
-                                yielded.add((per, "std"))
-                                yielded_any = True
-                                # Fetch XBRL content and save to file
+                            url_key = ("std", url) if url else None
+                            if url and url_key not in tried_urls:
+                                tried_urls.add(url_key)
                                 xbrl_content = await fetch_xbrl_content(ctx, url)
-                                yield url, per, "std", xbrl_content, ind
-                                await asyncio.sleep(2)  # Delay to avoid rate limiting
+                                if xbrl_content:
+                                    yielded_any = True
+                                    yield url, per, "std", xbrl_content, ind
+                                    await asyncio.sleep(2)  # Delay to avoid rate limiting
+                                # else: dead link logged by fetch_xbrl_content; try next row
 
-                        # Yield Con XBRL
+                        # Yield Con XBRL only when raw content loads successfully.
                         if con_a and await con_a.count():
                             href = (await con_a.first.get_attribute("href")) or ""
                             if href and not href.lower().startswith("javascript:"):
@@ -1269,12 +1431,14 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                             else:
                                 url = await _resolve_from_anchor(con_a)
 
-                            if url and (per, "con") not in yielded:
-                                yielded.add((per, "con"))
-                                yielded_any = True
+                            url_key = ("con", url) if url else None
+                            if url and url_key not in tried_urls:
+                                tried_urls.add(url_key)
                                 xbrl_content = await fetch_xbrl_content(ctx, url)
-                                yield url, per, "con", xbrl_content, ind
-                                await asyncio.sleep(2)  # Delay to avoid rate limiting
+                                if xbrl_content:
+                                    yielded_any = True
+                                    yield url, per, "con", xbrl_content, ind
+                                    await asyncio.sleep(2)  # Delay to avoid rate limiting
 
                     except Exception as e:
                         print("Error clicking anchor:", e)
@@ -1288,21 +1452,76 @@ async def get_all_std_xbrl_urls(ctx, company: str):
                     print("Error clicking anchor:", e)
                 return
 
-            # no links; next attempt after cooldown
-            await page.wait_for_timeout(COOLDOWN_BETWEEN_ATTEMPTS_MS)
+            # Empty grid / no matching rows after search+submit.
+            # Fail fast — identical unbound-search cycles were flooding SessionLog (3× loops).
+            logging_service.log_phase(
+                "xbrl_extract",
+                "failed",
+                company=company,
+                attempt=attempts,
+                error="empty_results_grid_or_no_matching_xbrl",
+                classification="empty_grid",
+                loop_action="fail_fast_empty_grid",
+                detail="skip_identical_unbound_or_empty_retries",
+            )
+            break
 
         except PlaywrightHealRequired as exc:
             fail_phase = getattr(exc, "phase", None) or "xbrl_extract"
+            reason = getattr(exc, "reason", None) or str(exc)
+            if _heal_disabled():
+                logging_service.log_phase(
+                    fail_phase,
+                    "failed",
+                    company=company,
+                    attempt=attempts,
+                    error=reason,
+                    classification="ui_drift",
+                    loop_action="heal_disabled_fail_fast",
+                    detail="FINBOT_HEAL_DISABLED",
+                )
+                # Fail fast — never spin MAX_ATTEMPTS with identical heal-disabled failures.
+                raise
+            if is_heal_in_progress():
+                logging_service.log_phase(
+                    fail_phase,
+                    "failed",
+                    company=company,
+                    attempt=attempts,
+                    error=reason,
+                    classification="ui_drift",
+                    loop_action="skip_heal_already_in_progress",
+                )
+                raise PlaywrightHealBatchHalt(
+                    f"heal_already_in_progress:{reason}",
+                    company=company,
+                ) from exc
+            # Bubble UI drift to the Fetch Filings WS handler so it can run the
+            # coding agent outside the per-company timeout, promote portal code,
+            # recreate the browser, retry this company, then continue the batch.
             logging_service.log_phase(
                 fail_phase,
                 "failed",
                 company=company,
                 attempt=attempts,
-                error=str(exc),
+                error=reason,
                 classification="ui_drift",
-                loop_action="stop_retries_after_heal",
+                loop_action="request_heal_then_retry_company",
             )
-            break
+            logging_service.log_phase(
+                "playwright_heal_trigger",
+                "started",
+                company=company,
+                reason=reason,
+                failed_phase=fail_phase,
+                detail="fetch_filings_path_requesting_agent_outside_timeout",
+            )
+            raise PlaywrightHealBatchHalt(
+                reason,
+                company=company,
+                needs_heal=True,
+                failed_phase=fail_phase,
+            ) from exc
         except Exception as exc:
             logging_service.log_phase(
                 "xbrl_extract",

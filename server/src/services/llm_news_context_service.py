@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config.settings import MARKDOWN_DIR
+from prompts.loader import load_prompt
 from services.analysis_service import (
     _get_or_fetch_today_news_summary,
     _invoke_llm,
@@ -94,19 +95,7 @@ async def generate_news_impact_section(
     statement_type: str,
     frequency: str,
 ) -> str:
-    system_prompt = """You are a Senior Financial Analyst providing strategic insights.
-
-You will receive an existing report body plus recent news context. Generate one concise, polished section that integrates the news into the analysis without repeating the title or reprinting the entire report.
-
-Requirements:
-- Keep the report seamless and professional
-- Add a clear section such as '## IX. News-Driven Assessment and Outlook' or similar
-- Explain how recent news changes the interpretation of financial performance, risk, and outlook
-- Include implications for revenue, margin, cash flow, balance sheet, and strategic positioning
-- Must include a dedicated final conclusion or overall assessment section at the end of the response
-- The conclusion must clearly summarize the overall report and provide a final recommendation or takeaway
-
-Do not repeat the full title, do not add 'phase 1'/'phase 2' markers, and do not include any separator text like 'END OF REPORT'."""
+    system_prompt = load_prompt("chatbot_news_impact_system.md").strip()
 
     user_prompt = f"""Original Query: {query}
 
@@ -124,7 +113,13 @@ Existing Report Body:
 Generate one seamless section that integrates the recent news into the report and improves the final analysis. The output should be only the new section content, ready to be appended to the existing report."""
 
     try:
-        response = _invoke_llm(system_prompt, user_prompt, max_tokens=2000)
+        response = _invoke_llm(
+            system_prompt,
+            user_prompt,
+            max_tokens=4000,
+            run_name="chatbot_news_impact",
+            tags=["chatbot", "news-impact"],
+        )
         normalized = _normalize_llm_response(response)
         return normalized.get("content", "")
     except Exception as e:

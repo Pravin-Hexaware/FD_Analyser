@@ -146,28 +146,33 @@ export function streamLLMQuery(query: string, options: LLMQueryStreamOptions, co
 
   const eventSource = new EventSource(url.toString());
 
-  eventSource.onmessage = (event) => {
-    options.onMessage(event.data);
-  };
+  // Server emits named `event: message` chunks — listen explicitly.
+  eventSource.addEventListener("message", (event: MessageEvent) => {
+    if (typeof event.data === "string" && event.data.length > 0) {
+      options.onMessage(event.data);
+    }
+  });
 
-  eventSource.addEventListener('metadata', (event: MessageEvent) => {
+  eventSource.addEventListener("metadata", (event: MessageEvent) => {
     try {
       const data = JSON.parse(event.data);
       options.onMetadata?.(data);
     } catch (err) {
-      console.warn('Failed to parse metadata event:', err);
+      console.warn("Failed to parse metadata event:", err);
     }
   });
 
-  eventSource.addEventListener('done', () => {
+  eventSource.addEventListener("done", () => {
     eventSource.close();
     options.onDone?.();
   });
 
-  eventSource.addEventListener('error', (event) => {
-    eventSource.close();
-    options.onError?.(event);
-  });
+  // Only fail when the connection fully closes without a done event.
+  eventSource.onerror = (event) => {
+    if (eventSource.readyState === EventSource.CLOSED) {
+      options.onError?.(event);
+    }
+  };
 
   return eventSource;
 }

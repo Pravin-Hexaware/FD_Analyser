@@ -1,3 +1,4 @@
+import os
 from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
@@ -5,8 +6,13 @@ from azure.identity import DefaultAzureCredential
 from azure.ai.projects import AIProjectClient
 from langchain_openai import ChatOpenAI
 
-PROJECT_ENDPOINT = "https://bfs-to-dev-foundry.services.ai.azure.com/api/projects/FinBot"
-MODEL_DEPLOYMENT = "gpt-4.1"
+from utils.langsmith_tracing import configure_langsmith
+
+PROJECT_ENDPOINT = os.getenv(
+    "AZURE_FOUNDRY_PROJECT_ENDPOINT",
+    "https://bfs-to-dev-foundry.services.ai.azure.com/api/projects/FinBot",
+)
+MODEL_DEPLOYMENT = os.getenv("AZURE_FOUNDRY_MODEL_DEPLOYMENT", "gpt-4.1")
 
 _project_client: AIProjectClient | None = None
 _llm: Any = None
@@ -29,6 +35,7 @@ def get_azure_chat_openai() -> ChatOpenAI:
     """Return the shared LangChain model backed by the FinBot Foundry client."""
     global _llm
     if _llm is None:
+        configure_langsmith()
         _llm = ChatOpenAI(
             model=MODEL_DEPLOYMENT,
             api_key="foundry-managed-credential",

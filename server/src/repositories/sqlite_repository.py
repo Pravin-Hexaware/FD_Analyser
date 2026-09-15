@@ -222,6 +222,28 @@ class SqliteRepository:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nifty_500_list (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scrip_code TEXT,
+                company_name TEXT,
+                industry TEXT,
+                symbol TEXT,
+                series TEXT,
+                isin_code TEXT UNIQUE,
+                updated_at TEXT
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_nifty_500_list_scrip_code
+            ON nifty_500_list(scrip_code);
+            """
+        )
+
         self._conn.commit()
 
         # Ensure parsed_json column in quarterly_extractions
@@ -1206,6 +1228,99 @@ class SqliteRepository:
         )
         row = cur.fetchone()
         return dict(row) if row else None
+
+    def get_nifty500_last_updated(self) -> Optional[datetime]:
+        """Return the most recent updated_at from nifty_500_list, or None if empty."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT MAX(updated_at) AS last_updated FROM nifty_500_list")
+        row = cur.fetchone()
+        if not row or not row["last_updated"]:
+            return None
+        raw = str(row["last_updated"]).strip()
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(raw, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    def replace_nifty500_rows(self, rows: list[dict], updated_at: str) -> int:
+        """Clear nifty_500_list and insert the given rows with a shared updated_at."""
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM nifty_500_list")
+        payload = [
+            (
+                (row.get("scrip_code") or "").strip() or None,
+                (row.get("company_name") or "").strip(),
+                (row.get("industry") or "").strip(),
+                (row.get("symbol") or "").strip(),
+                (row.get("series") or "").strip(),
+                (row.get("isin_code") or "").strip(),
+                updated_at,
+            )
+            for row in rows
+            if (row.get("isin_code") or "").strip()
+        ]
+        cur.executemany(
+            """
+            INSERT INTO nifty_500_list
+                (scrip_code, company_name, industry, symbol, series, isin_code, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+        self._conn.commit()
+        return len(payload)
+
+    def get_all_nifty500(self) -> list[dict]:
+        """Return all nifty_500_list rows ordered by id."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT id, scrip_code, company_name, industry, symbol, series, isin_code, updated_at
+            FROM nifty_500_list
+            ORDER BY id ASC
+            """
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_scrip_codes_missing_fiscal_year(
+        self, scrip_codes: list[str], year_pair: str
+    ) -> set[str]:
+        """
+        Return scrip codes that have no xbrl_filing_table row whose
+        publication_date contains the given fiscal year pair (e.g. '2026-2027').
+        """
+        codes = sorted({(c or "").strip() for c in scrip_codes if (c or "").strip()})
+        if not codes:
+            return set()
+        year_pair = (year_pair or "").strip()
+        if not year_pair:
+            return set(codes)
+
+        covered: set[str] = set()
+        cur = self._conn.cursor()
+        # Chunk IN clauses to stay within SQLite variable limits
+        chunk_size = 400
+        like_pattern = f"%{year_pair}%"
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i : i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            cur.execute(
+                f"""
+                SELECT DISTINCT scrip_code
+                FROM xbrl_filing_table
+                WHERE scrip_code IN ({placeholders})
+                  AND publication_date LIKE ?
+                """,
+                (*chunk, like_pattern),
+            )
+            covered.update(str(row["scrip_code"]).strip() for row in cur.fetchall() if row["scrip_code"])
+
+        return set(codes) - covered
 
     def close(self) -> None:
         try:

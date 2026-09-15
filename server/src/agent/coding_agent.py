@@ -1,220 +1,311 @@
+from __future__ import annotations
+
 import json
 import logging
-import os
-import sys
-import time
 import re
-import ast
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
 from typing_extensions import TypedDict
 
 from langgraph.constants import START
 from langgraph.graph import StateGraph
-from llm.azure_llm import evaluate_with_azure_llm, extract_code_from_markdown, markdownify
+from agent.heal_context import STAGING_MODULE, HealRunContext
+from agent.portal_flow import BSE_RESULTS_CANONICAL_FLOW
+from agent.portal_merge import build_staging_module, diagnose_harness_failure
+from agent.schemas import (
+    PORTAL_LOCATOR_FIELDS,
+    ChangePlan,
+    normalize_change_plan,
+    validate_portal_locators_kwargs,
+    validate_selector_uniqueness,
+)
+from llm.azure_llm import (
+    evaluate_with_azure_llm,
+    extract_code_from_markdown,
+    markdownify,
+    unwrap_llm_payload,
+)
+from prompts.loader import load_prompt
+from services.logging_service import logging_service
 from tools.executor import execute_generated_script
 
-CACHE_DIR = Path("cache")
-CACHE_DIR.mkdir(exist_ok=True)
+CACHE_DIR = Path(__file__).resolve().parents[1] / "cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-GENERATED_CODE_FILE = Path("automation/results_portal.py")
+GENERATED_CODE_FILE = STAGING_MODULE
 CODE_CACHE_FILE = CACHE_DIR / "code_generation.md"
+FAILED_CODEGEN_RAW = CACHE_DIR / "failed_codegen_raw.md"
+FIRST_GENERATED_FILE = CACHE_DIR / "first_generated_results_portal.py"
 EXECUTION_LOG_FILE = CACHE_DIR / "generated_code_run.log"
 RUNTIME_LOG_FILE = CACHE_DIR / "generated_script_runtime.log"
-LAST_AGENT_THOUGHTS: Optional[Any] = None
-AGENT_STATE_MESSAGES: list[Dict[str, str]] = []
 
+_MAX_LOG_CHARS = 12000
+_MAX_THOUGHT_CHARS = 1500
+_CODING_MAX_TOKENS = 16000
+
+
+def _coding_system() -> str:
+    return load_prompt("coding_system_prompt.md").strip()
+
+
+def _portal_interaction_rules() -> str:
+    return load_prompt(
+        "coding_interaction_guards.md",
+        canonical_flow=BSE_RESULTS_CANONICAL_FLOW,
+    ).rstrip() + "\n"
 
 class CodingAgentState(TypedDict, total=False):
     old_code: str
     final_analysis: Any
     new_url: str
     feedback: Optional[str]
-    previous_thoughts: list[Dict[str, str]]
+    previous_thoughts: list
     attempt: int
     test_input: str
+    deterministic_base: str
     generated_path: str
     execution_log: str
     runtime_log: str
+    last_harness_log: str
+    last_runtime_log: str
+    last_coding_reasoning: str
+    first_generated_code: str
     stdout: str
     stderr: str
     exit_code: int
     status: str
     goal_achieved: bool
+    failure_phase: str
 
 
-def build_coding_prompt(old_code: str, final_analysis: Any, new_url: str, feedback: Optional[str] = None, state_messages: Optional[list[Dict[str, str]]] = None) -> str:
-    analysis_text = final_analysis
-    mapping_text = None
-    goal_text = None
-    if isinstance(final_analysis, dict):
-        goal_text = final_analysis.get("goal")
-        elements = final_analysis.get("elements_to_replace")
-        mapping = final_analysis.get("mapping")
-        if elements is not None:
-            payload = {"elements_to_replace": elements}
-            if mapping is not None:
-                payload["mapping"] = mapping
-            analysis_text = markdownify(payload)
-        else:
-            analysis_text = markdownify(final_analysis)
-        if mapping is not None:
-            mapping_text = markdownify(mapping)
-
-    return f"""
-You are an expert Python Playwright module maintainer.
-
-You are given:
-1) The original Playwright portal module.
-2) A final analysis describing UI behavior changes and replacement rules.
-3) The target URL: {new_url}
-
-GOAL: {goal_text or 'Use analysis to generate the updated script.'}
-
-TASK:
-- Return valid markdown output only, with no extra text.
-- If you include code, wrap it in a fenced markdown code block (```python).
-- Include a markdown section or bullet list for reasoning and agent thoughts.
-- The code content should be provided as raw Python inside the code block, and any analysis or commentary should be in markdown sections.
-- Rewrite the original module so it works against the updated UI.
-- Use the provided analysis goal, element replacements, and mapping to choose the correct UI inputs and selectors.
-- Use the single best selector provided for each element; do not generate or include a list of selectors.
-- Ensure every selected selector is unique and matches exactly one visible target element in the current UI.
-- Generate only the production-ready `results_portal.py` module that implements the existing portal contract methods.
-- The generated module must configure Python logging and log exceptions with stack traces.
-- The generated module must write a runtime action log file at cache/generated_script_runtime.log when exercised by the harness.
-- If runtime log file writing fails, it must also print runtime action log lines to stdout with a distinct prefix like RUNTIME_ACTION_LOG.
-- The runtime log must record each UI interaction step, the selector used, the action performed, and whether that action succeeded or failed.
-- Additionally, the module must measure and record timings for every UI action and for table/grid loads:
-    - Each runtime log entry must include an ISO8601 timestamp and a `duration_ms` field showing the elapsed time for the action.
-    - For table/grid loads, record the time from the initiating action (click/submit) to the first valid row or anchor becoming visible and include `rows_count` when available.
-    - Use `time.monotonic()` to compute durations and include explicit timeout markers when waits expire.
-    - Ensure timing entries are machine-parseable (e.g., JSON lines) so they can be analyzed programmatically.
-- The module must not depend on interactive stdin.
-- If the harnessed module fails before achieving the goal, it must cause a nonzero process exit code.
-- The module must not catch and swallow final errors in a way that returns exit code 0 on failure.
-- Do not generate a standalone script, CLI, or main entrypoint.
-        - Prefer robust selectors: when an element selector can match duplicates, scope selectors to a containing element or combine attributes to ensure uniqueness and verify connections between related elements.
-        - For autocomplete / suggestion-driven inputs (type-to-search fields):
-            - Prefer waiting for visible suggestion list items rather than relying solely on the container element, since duplicate or hidden containers may exist.
-            - Prefer clicking a visible suggestion item; if no visible suggestion appears, fall back to keyboard navigation (repeat ArrowDown then Enter) and verify the selection by reading the input's value or other observed page changes.
-            - Add short delays between keyboard navigation presses, limit iterations (for example, 3), and confirm the selection took effect before proceeding.
-            - Log each attempt and fallback step to the runtime action log so failures are traceable.
-        - When waiting for a results grid to change, do NOT rely on brittle innerHTML differences. Prefer waiting for row presence, anchors, or row-count changes and use explicit polling or anchored checks rather than raw HTML diffs.
-        - After selecting any button, dropdown, or table control that triggers data loading, always wait for the real data to arrive before proceeding:
-            - Immediately after the selection, include a short configurable delay (for example 0.5–2s) to avoid capturing default/placeholder UI data.
-            - Then wait explicitly for concrete evidence of loaded data (visible rows, anchors, non-placeholder cell text, or increased row count) using polling up to a reasonable timeout.
-            - If expected data does not appear, retry the selection up to a small number of times with incremental backoff, logging each attempt, wait duration, and outcome to the runtime action log.
-            - Log the chosen wait time and whether the wait succeeded or expired; prefer waiting for content presence over fixed sleeps when possible.
-- Do not include any explanatory text, markdown, or comments outside the Python code.
-
-OLD SCRIPT:
-{old_code}
-
-ELEMENT REPLACEMENTS TO APPLY:
-{analysis_text}
-
-MAPPING FROM ANALYSIS:
-{mapping_text or 'None'}
-
-PREVIOUS HUMAN FEEDBACK:
-{feedback or 'None'}
-
-PREVIOUS AGENT THOUGHTS:
-{format_state_messages(state_messages)}
-"""
+def _plan_from_analysis(final_analysis: Any, new_url: str) -> ChangePlan:
+    return normalize_change_plan(final_analysis, default_goal=new_url)
 
 
-def save_generated_code(code: str) -> Path:
-    GENERATED_CODE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(GENERATED_CODE_FILE, "w", encoding="utf-8") as f:
-        f.write(code)
-    return GENERATED_CODE_FILE
+def _clip(text: Any, limit: int = _MAX_LOG_CHARS) -> str:
+    s = "" if text is None else str(text)
+    if len(s) <= limit:
+        return s
+    head = limit // 2
+    tail = limit - head
+    return s[:head] + "\n\n...[truncated]...\n\n" + s[-tail:]
 
 
-def print_agent_thoughts(result: Any, prefix: str = "[CODING AGENT THINKING]"):
-    if isinstance(result, dict):
-        thoughts = result.get("agent_thoughts")
-        if thoughts:
-            print(f"\n{prefix}")
-            if isinstance(thoughts, (dict, list)):
-                print(json.dumps(thoughts, indent=2))
-            else:
-                print(thoughts)
+def _run_id(ctx: Optional[HealRunContext]) -> Optional[str]:
+    return ctx.run_id if ctx else None
 
 
-def append_agent_state_message(result: Any, source: str, state_messages: list[Dict[str, str]]) -> None:
-    if isinstance(result, dict):
-        thoughts = result.get("agent_thoughts")
-        if thoughts:
-            state_messages.append({
-                "source": source,
-                "agent_thoughts": thoughts,
-            })
+def log_agent_thoughts(
+    agent: str,
+    thoughts: Any,
+    *,
+    ctx: Optional[HealRunContext] = None,
+    prefix: str = "",
+) -> None:
+    """Write thinking to application/agent-run logs — not the terminal."""
+    if thoughts is None:
+        return
+    if isinstance(thoughts, (dict, list)):
+        text = json.dumps(thoughts, ensure_ascii=False, indent=2)
+    else:
+        text = str(thoughts).strip()
+    if not text:
+        return
+    logging_service.log_agent_thinking(agent, text, run_id=_run_id(ctx))
+    if ctx:
+        ctx.log("agent_thinking", agent=agent, thoughts=text[:_MAX_THOUGHT_CHARS], prefix=prefix or "")
 
 
-def format_state_messages(state_messages: Optional[list[Dict[str, str]]]) -> str:
-    if not state_messages:
-        return "None"
-    return json.dumps(state_messages, indent=2)
+def _status(msg: str, *, ctx: Optional[HealRunContext] = None) -> None:
+    """Short progress line to terminal + app log."""
+    logging_service.log_runtime(msg, echo=True)
+    if ctx:
+        ctx.log("status", message=msg)
 
 
-def build_langraph_coding_agent() -> Any:
-    graph = StateGraph(
-        state_schema=CodingAgentState,
-        input_schema=CodingAgentState,
-        output_schema=CodingAgentState,
+def build_coding_prompt(
+    old_code: str,
+    final_analysis: Any,
+    new_url: str,
+    feedback: Optional[str] = None,
+    state_messages: Optional[list] = None,
+) -> str:
+    plan = _plan_from_analysis(final_analysis, new_url)
+    warnings = validate_selector_uniqueness(plan)
+    contract = plan.get("contract_locators") or []
+    optional = plan.get("optional_controls") or []
+    goal_text = plan.get("goal") or new_url
+    tweaks = plan.get("interaction_tweaks") or []
+    thoughts = plan.get("agent_thoughts")
+
+    return load_prompt(
+        "coding_prompt.md",
+        new_url=new_url,
+        goal_text=goal_text,
+        portal_locator_fields=sorted(PORTAL_LOCATOR_FIELDS),
+        contract=markdownify(contract),
+        optional=markdownify(optional),
+        tweaks=markdownify(tweaks) if tweaks else "None",
+        thoughts=markdownify(thoughts) if thoughts else "None",
+        warnings=markdownify(warnings) if warnings else "None",
+        mapping=markdownify(plan.get("mapping")),
+        state_messages=markdownify(state_messages) if state_messages else "None",
+        feedback=feedback or "None",
+        old_code=old_code,
+        interaction_guards=_portal_interaction_rules(),
     )
 
-    def iteration_node(state: CodingAgentState, runtime: Any) -> CodingAgentState:
-        state_messages = state.get("previous_thoughts") or []
-        attempt = state.get("attempt", 1)
-        feedback = state.get("feedback")
-        test_input = state.get("test_input", "INFY")
 
-        if attempt == 1:
-            generated_path = generate_code_from_analysis(
-                state["old_code"],
-                state["final_analysis"],
-                state["new_url"],
-                feedback=feedback,
-                state_messages=state_messages,
-            )
-        else:
-            logs = state.get("execution_log", "")
-            runtime_log = state.get("runtime_log", "")
-            generated_path = regenerate_code_with_logs(
-                state["old_code"],
-                state["final_analysis"],
-                state["new_url"],
-                logs,
-                runtime_log,
-                state_messages=state_messages,
-            )
+def build_regeneration_prompt(
+    old_code: str,
+    final_analysis: Any,
+    last_code: str,
+    logs: str,
+    runtime_log: str,
+    new_url: str,
+    state_messages: Optional[list] = None,
+    failure_phase: str = "unknown",
+    last_coding_reasoning: str = "",
+    first_generated_code: str = "",
+    test_input: str = "",
+    deterministic_base: str = "",
+) -> str:
+    plan = _plan_from_analysis(final_analysis, new_url)
+    goal_text = plan.get("goal") or new_url
+    contract = plan.get("contract_locators") or []
+    optional = plan.get("optional_controls") or []
+    tweaks = plan.get("interaction_tweaks") or []
+    failure_hints = diagnose_harness_failure(logs, runtime_log, test_input=test_input)
 
-        execution = run_generated_script(test_input=test_input)
-        goal = None
-        if isinstance(state.get("final_analysis"), dict):
-            goal = state["final_analysis"].get("goal")
-        goal_achieved = goal_was_achieved(execution["stdout"], execution["runtime_log"], goal=goal)
+    first_ref = first_generated_code.strip() if first_generated_code else ""
+    if not first_ref:
+        first_ref = "(not available — use DETERMINISTIC BASE + LAST STAGING)"
 
-        return {
-            **state,
-            "previous_thoughts": state_messages,
-            "generated_path": str(generated_path),
-            "execution_log": execution.get("stdout", "") + "\n" + execution.get("stderr", ""),
-            "runtime_log": execution.get("runtime_log", ""),
-            "stdout": execution.get("stdout", ""),
-            "stderr": execution.get("stderr", ""),
-            "exit_code": execution.get("exit_code", -1),
-            "status": execution.get("status", "failed"),
-            "goal_achieved": goal_achieved,
-        }
+    det_base = deterministic_base.strip() if deterministic_base else ""
+    if not det_base:
+        det_base = "(not available — use ORIGINAL MODULE)"
 
-    graph.add_node("iteration", iteration_node)
-    graph.add_edge(START, "iteration")
-    graph.set_finish_point("iteration")
-    return graph.compile()
+    return load_prompt(
+        "coding_regeneration_prompt.md",
+        new_url=new_url,
+        goal_text=goal_text,
+        failure_phase=failure_phase,
+        contract=markdownify(contract),
+        optional=markdownify(optional),
+        tweaks=markdownify(tweaks) if tweaks else "None",
+        last_coding_reasoning=_clip(last_coding_reasoning, _MAX_THOUGHT_CHARS)
+        if last_coding_reasoning
+        else "None",
+        state_messages=markdownify(state_messages) if state_messages else "None",
+        logs=_clip(logs),
+        runtime_log=_clip(runtime_log),
+        failure_hints=failure_hints,
+        det_base=_clip(det_base, 14000),
+        old_code=_clip(old_code, 8000),
+        first_ref=_clip(first_ref, 14000),
+        last_code=_clip(last_code, 14000),
+        portal_locator_fields=sorted(PORTAL_LOCATOR_FIELDS),
+        interaction_guards=_portal_interaction_rules(),
+    )
+
+def classify_harness_failure(stdout: str, stderr: str, status: str = "") -> str:
+    text = f"{stdout or ''}\n{stderr or ''}\n{status or ''}".lower()
+    if "codegen_error" in text or "non-python" in text or "refusing to stage" in text:
+        return "codegen_error"
+    if "portalocators" in text or "unexpected keyword" in text or "contract violation" in text:
+        return "import_error"
+    if "import_error" in text or "syntaxerror" in text or "typeerror" in text:
+        return "import_error"
+    if re.search(r"no\s*match\s*found", text) and "suggestion_items" in text:
+        return "search"
+    if "submit_did_not_refresh" in text or "did_not_refresh_results" in text:
+        return "search"
+    if "empty_results_grid" in text:
+        return "empty_grid"
+    if "heal_disabled_fail" in text:
+        if "xbrl_search" in text or "search" in text:
+            return "search"
+        if "filter" in text:
+            return "filters"
+        if "submit" in text:
+            return "search"
+        return "search"
+    if "harness_phase=submit" in text and ("fail" in text or "exception" in text):
+        return "search"
+    if "harness_phase=search" in text and ("fail" in text or "exception" in text):
+        return "search"
+    if "harness_phase=filters" in text and ("fail" in text or "exception" in text):
+        return "filters"
+    if "search_input" in text or "xbrl_search" in text:
+        return "search"
+    if "filter" in text or "xbrl_filters" in text:
+        return "filters"
+    if "gvdata" in text or ("tbody tr" in text and "timeout" in text):
+        return "empty_grid"
+    if status == "timeout" or "harness_timeout" in text:
+        return "timeout"
+    return "unknown"
+
+
+def save_generated_code(code: str, staging_path: Optional[Path] = None) -> Path:
+    target = Path(staging_path) if staging_path else GENERATED_CODE_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if "ERROR: Generated code was not runnable" in (code or "") or "LLM RAW OUTPUT" in (code or ""):
+        failed_path = CACHE_DIR / "failed_codegen_stub.py"
+        failed_path.write_text(code, encoding="utf-8")
+        raise RuntimeError(
+            f"Coding agent produced non-runnable output; refused to write staging module. "
+            f"Stub saved to {failed_path}"
+        )
+    if "class ResultsPortal" not in (code or "") or "PortalLocators" not in (code or ""):
+        failed_path = CACHE_DIR / "failed_codegen_invalid_module.py"
+        failed_path.write_text(code or "", encoding="utf-8")
+        raise RuntimeError(
+            f"Coding agent output missing ResultsPortal contract; refused to write staging. "
+            f"Saved to {failed_path}"
+        )
+    stripped = (code or "").lstrip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        failed_path = CACHE_DIR / "failed_codegen_json_dump.py"
+        failed_path.write_text(code or "", encoding="utf-8")
+        raise RuntimeError(
+            f"Coding agent output looks like JSON, not Python; refused to write staging. "
+            f"Saved to {failed_path}"
+        )
+
+    locator_errors = validate_portal_locators_kwargs(code)
+    if locator_errors:
+        failed_path = CACHE_DIR / "failed_codegen_locator_contract.py"
+        failed_path.write_text(code or "", encoding="utf-8")
+        raise RuntimeError(
+            "PortalLocators contract violation: " + "; ".join(locator_errors)
+        )
+
+    target.write_text(code, encoding="utf-8")
+    return target
+
+
+def _extract_reasoning_from_text(raw: str) -> str:
+    if not raw:
+        return ""
+    # Prefer REASONING: ... before the python fence
+    fence = re.search(r"```(?:python|py)\b", raw, re.IGNORECASE)
+    head = raw[: fence.start()] if fence else raw
+    m = re.search(r"REASONING\s*:\s*(.*)", head, re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip()[:_MAX_THOUGHT_CHARS]
+    # JSON-shaped fallback
+    parsed = unwrap_llm_payload(raw)
+    if isinstance(parsed, dict):
+        reasoning = parsed.get("reasoning") or parsed.get("agent_thoughts")
+        if reasoning is not None:
+            if isinstance(reasoning, (dict, list)):
+                return json.dumps(reasoning, ensure_ascii=False)[:_MAX_THOUGHT_CHARS]
+            return str(reasoning)[:_MAX_THOUGHT_CHARS]
+    return head.strip()[:_MAX_THOUGHT_CHARS]
 
 
 def _extract_python_code_from_text(raw: str) -> str:
@@ -224,14 +315,42 @@ def _extract_python_code_from_text(raw: str) -> str:
     if not raw:
         return ""
 
-    if "```python" in raw or "```py" in raw or raw.startswith("```"):
-        code = extract_code_from_markdown(raw)
-        if code:
-            return code
+    # 1) Preferred: ```python ... ``` (even if closing fence missing / truncated)
+    m = re.search(r"```(?:python|py)\s*\n(.*?)(?:```|$)", raw, re.DOTALL | re.IGNORECASE)
+    if m:
+        candidate = m.group(1).strip()
+        if candidate:
+            return candidate
 
-    if any(keyword in raw for keyword in ("def ", "async def ", "import ", "from ", "class ", "await ", "async ", "playwright")):
+    # 2) Generic fence
+    fenced = extract_code_from_markdown(raw)
+    if fenced:
+        return fenced
+
+    # 3) JSON {"code": "..."}
+    parsed = unwrap_llm_payload(raw)
+    if isinstance(parsed, dict):
+        for key in ("code", "script", "generated_code"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                inner = value.strip()
+                if "```" in inner:
+                    nested = extract_code_from_markdown(inner)
+                    if nested:
+                        return nested
+                return inner
+
+    # 4) Raw module text
+    if any(
+        keyword in raw
+        for keyword in ("class ResultsPortal", "def ", "async def ", "from automation")
+    ):
+        # Drop a leading REASONING header if present
+        if re.match(r"(?is)^\s*REASONING\s*:", raw):
+            rest = re.split(r"(?is)^\s*REASONING\s*:.*?(?=\n(?:from |import |class ))", raw, maxsplit=1)
+            if len(rest) == 2 and rest[1].strip():
+                return rest[1].strip()
         return raw
-
     return ""
 
 
@@ -245,234 +364,254 @@ def _is_valid_python_code(code: str) -> bool:
         return False
 
 
-def _build_error_script(raw_output: str) -> str:
-    safe_raw = json.dumps(raw_output)
-    return (
-        "import os\n"
-        "import sys\n"
-        "os.makedirs('cache', exist_ok=True)\n"
-        "with open('cache/generated_script_runtime.log', 'w', encoding='utf-8') as f:\n"
-        "    f.write('ERROR: Generated code was not runnable.\\n')\n"
-        "    f.write('LLM RAW OUTPUT:\\n')\n"
-        f"    f.write({safe_raw} + '\\n')\n"
-        "print('ERROR: Generated code was not runnable.')\n"
-        "print('LLM RAW OUTPUT:')\n"
-        f"print({safe_raw})\n"
-        "sys.exit(1)\n"
+def parse_coding_agent_response(raw: Any) -> Tuple[str, str]:
+    """
+    Returns (reasoning, python_code).
+    Raises RuntimeError if no valid Python module can be extracted.
+    """
+    if isinstance(raw, dict):
+        reasoning = ""
+        r = raw.get("reasoning") or raw.get("agent_thoughts")
+        if r is not None:
+            reasoning = (
+                json.dumps(r, ensure_ascii=False)
+                if isinstance(r, (dict, list))
+                else str(r)
+            )[:_MAX_THOUGHT_CHARS]
+        for key in ("code", "script", "generated_code"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                code = _extract_python_code_from_text(value)
+                if _is_valid_python_code(code):
+                    return reasoning, code
+        # Fall through: stringify and salvage
+        raw = markdownify(raw)
+
+    text = raw if isinstance(raw, str) else str(raw)
+    reasoning = _extract_reasoning_from_text(text)
+    code = _extract_python_code_from_text(text)
+    if _is_valid_python_code(code):
+        return reasoning, code
+
+    FAILED_CODEGEN_RAW.write_text(text, encoding="utf-8")
+    raise RuntimeError(
+        "Coding agent returned non-Python output; refusing to stage. "
+        f"Raw saved to {FAILED_CODEGEN_RAW}"
     )
 
 
-def extract_code_from_result(result: Any) -> str:
-    if isinstance(result, dict):
-        for key in ("code", "script", "generated_code"):
-            value = result.get(key)
-            if isinstance(value, str) and value.strip():
-                candidate = _extract_python_code_from_text(value)
-                if _is_valid_python_code(candidate):
-                    return candidate
-        for key in ("answer", "content"):
-            value = result.get(key)
-            if isinstance(value, str) and value.strip():
-                candidate = _extract_python_code_from_text(value)
-                if _is_valid_python_code(candidate):
-                    return candidate
-        # if any string values exist, choose the longest one and attempt to extract code from it
-        string_values = [v for v in result.values() if isinstance(v, str) and v.strip()]
-        for value in sorted(string_values, key=len, reverse=True):
-            candidate = _extract_python_code_from_text(value)
-            if _is_valid_python_code(candidate):
-                return candidate
-        raw = result.get("answer") or result.get("content") or json.dumps(result, indent=2)
-        return _build_error_script(str(raw))
-    raw = str(result)
-    candidate = _extract_python_code_from_text(raw)
-    if _is_valid_python_code(candidate):
-        return candidate
-    return _build_error_script(raw)
+def _field_lines(text: str) -> List[str]:
+    lines: List[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("FIELD ") or " FIELD field=" in f" {stripped}":
+            lines.append(stripped)
+        elif "field=" in stripped and "action=" in stripped and "status=" in stripped:
+            # tolerate harness / app-log variants without FIELD prefix
+            lines.append(stripped)
+    return lines
 
 
-def goal_was_achieved(stdout: str, runtime_log: str, goal: Optional[Any] = None) -> bool:
-    """
-    Detect if the automation goal was achieved.
-    
-    Goal achievement is determined by:
-    1. Presence of success indicators in stdout/runtime_log (goal was accomplished)
-    2. Absence of UNRECOVERED failures (script recovered or no FAIL markers found)
-    3. Output evidence matching the goal
-    
-    Args:
-        stdout: Standard output from the script
-        runtime_log: Runtime action log showing step-by-step execution
-        goal: Goal description from analysis (string, dict, or list)
-    
-    Returns:
-        True if goal was achieved, False otherwise
-    """
-    stdout_lower = stdout.lower()
-    runtime_log_lower = runtime_log.lower()
-
-    success_indicators = [
-        "healed_module_ok",
-        "module_test_success",
-        "run success",
-        "xbrl_url=",
-        "http",
-    ]
-    
-    has_success_indicator = any(indicator in stdout_lower or indicator in runtime_log_lower for indicator in success_indicators)
-    
-    # If we have success indicators, check for uncovered failures
-    if has_success_indicator:
-        # Check if the last FAIL was recovered (i.e., there's a SUCCESS after it)
-        if "| fail |" in runtime_log_lower:
-            # Find the position of the last FAIL
-            last_fail_pos = runtime_log_lower.rfind("| fail |")
-            # Check if there's any SUCCESS after the last FAIL
-            after_fail = runtime_log_lower[last_fail_pos:]
-            if "| success |" in after_fail:
-                # Script recovered after failure
-                return True
-            else:
-                # Last operation was a failure - goal not achieved
-                return False
-        # No FAIL markers, just success indicators - goal achieved
-        return True
-    
-    # Detect partial outcomes: rows saved but no anchors/XBRL => not a full success
-    rl = runtime_log.lower() if runtime_log else ""
-    if "saved rows to" in rl:
-        # If anchors were explicitly reported and are zero, treat as failure
-        m = re.search(r"anchors found in grid:\s*(\d+)", rl)
-        if m and int(m.group(1)) == 0:
-            return False
-        # If a later select/click for anchors failed, treat as failure
-        if "no anchors available" in rl or ("select selector" in rl and "success=false" in rl):
-            return False
-
-    # No success indicators found - normalize the goal if it is not a string
-    if isinstance(goal, dict):
-        goal = goal.get("goal") or goal.get("description") or json.dumps(goal, indent=2)
-    elif isinstance(goal, list):
-        goal = " ".join(str(item) for item in goal if item is not None)
-    elif goal is not None:
-        goal = str(goal)
-
-    # If goal is specified, verify it appears in output/logs
-    if goal and goal.strip():
-        goal_lower = goal.lower().strip()
-        
-        # Check if any key words from goal appear in output
-        goal_keywords = goal_lower.split()
-        # Look for meaningful keywords (at least 3 chars, not articles/prepositions)
-        meaningful_keywords = [
-            kw for kw in goal_keywords 
-            if len(kw) >= 3 and kw not in ("the", "and", "from", "into", "with", "for", "that")
-        ]
-        
-        found_evidence = False
-        if meaningful_keywords:
-            for keyword in meaningful_keywords:
-                if keyword in stdout_lower or keyword in runtime_log_lower:
-                    found_evidence = True
-                    break
-
-        if not found_evidence:
-            # Fallback: treat explicit success markers in runtime output as evidence
-            if (
-                "run success" in stdout_lower
-                or "run success" in runtime_log_lower
-                or "xbrl_url=" in stdout_lower
-                or "xbrl_url=" in runtime_log_lower
-                or "final result" in stdout_lower
-                or "final result" in runtime_log_lower
-            ):
-                return True
-            return False
-
-        return True
-
-    # If no goal is provided and no success indicators, do not assume success
-    # As a final fallback, ask the LLM to judge success based on the provided logs.
-    try:
-        prompt = (
-            "You are an automated judge. Given the following program output and runtime action log, "
-            "return ONLY a JSON object with the keys: achieved (true/false), confidence (0..1 float), reason (short string).\n\n"
-            f"STDOUT:\n" + stdout + "\n\n" +
-            f"RUNTIME_LOG:\n" + runtime_log + "\n\n"
-            "Return only JSON. Do not include any explanatory text."
-        )
-        llm_resp = evaluate_with_azure_llm(prompt=prompt, cache_path=str(CODE_CACHE_FILE))
-        parsed = None
-        # Try to robustly parse the LLM response
-        if isinstance(llm_resp, dict):
-            parsed = llm_resp
-        else:
-            text = str(llm_resp).strip()
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                try:
-                    parsed = ast.literal_eval(text)
-                except Exception:
-                    parsed = None
-
-        if isinstance(parsed, dict):
-            # Accept common boolean keys
-            for key in ("achieved", "goal_achieved", "success"):
-                if key in parsed:
-                    try:
-                        return bool(parsed.get(key))
-                    except Exception:
-                        return False
-            # If explicit key not found, look for textual yes/no
-            txt = json.dumps(parsed).lower()
-            if "true" in txt and "false" not in txt:
-                return True
-            return False
-    except Exception:
-        # If LLM fallback fails, conservatively return False
-        return False
-
+def _has_no_match_found_pass(text: str) -> bool:
+    """True if suggestion_items logged No Match Found as status=pass (unsafe promote)."""
+    for line in _field_lines(text):
+        low = line.lower()
+        if "field=suggestion_items" not in low:
+            continue
+        if "status=pass" not in low:
+            continue
+        if re.search(r"no\s*match\s*found", low):
+            return True
     return False
 
 
-def generate_code_from_analysis(old_code: str, final_analysis: Any, new_url: str, feedback: Optional[str] = None, state_messages: Optional[list[Dict[str, str]]] = None) -> Path:
-    global LAST_AGENT_THOUGHTS
-    state_messages = state_messages or []
-    print("[CODING AGENT] Generating code from analysis")
-    prompt = build_coding_prompt(old_code, final_analysis, new_url, feedback, state_messages=state_messages)
-    result = evaluate_with_azure_llm(
+def _scrip_bound_in_logs(text: str, test_input: str) -> bool:
+    """
+    Require FIELD evidence that autocomplete was selected (not inject-only):
+    - suggestion_items click_first / click_match / keyboard_select, or
+    - inject alone is NOT enough (leaves empty grid on live BSE).
+    """
+    scrip = (test_input or "").strip()
+    saw_suggestion_select = False
+    saw_scrip_type = False
+    for line in _field_lines(text):
+        low = line.lower()
+        if "status=pass" not in low:
+            continue
+        if "field=search_input" in low and "action=type" in low:
+            if not scrip or scrip.lower() in low or "type_symbol" in low:
+                saw_scrip_type = True
+        if "field=suggestion_items" not in low:
+            continue
+        if re.search(r"no\s*match\s*found", low):
+            continue
+        if any(
+            act in low
+            for act in (
+                "action=click_first",
+                "action=click_match",
+                "action=keyboard_select",
+                "action=click",
+            )
+        ):
+            saw_suggestion_select = True
+            if not scrip or scrip.lower() in low:
+                return True
+    # Real suggestion click after typing is enough even if value text lacks digits.
+    return bool(saw_suggestion_select and (saw_scrip_type or not scrip))
+
+
+def goal_was_achieved(
+    stdout: str,
+    runtime_log: str,
+    goal: Optional[Any] = None,
+    test_input: Optional[str] = None,
+) -> bool:
+    """
+    Strict harness success: HEALED_MODULE_OK + real xbrl_url + autocomplete click proof.
+    Reject inject-only runs (they produce empty grids after Submit).
+    """
+    text = f"{stdout or ''}\n{runtime_log or ''}"
+    if "HEALED_MODULE_OK" not in text:
+        return False
+    if _has_no_match_found_pass(text):
+        return False
+    # Inject without suggestion click is a false success — reject.
+    low = text.lower()
+    if "inject_hidden_scrip" in low and "action=click_first" not in low and "keyboard_select" not in low:
+        if "action=click_match" not in low:
+            return False
+    m = re.search(r"xbrl_url\s*=\s*(\S+)", text, re.IGNORECASE)
+    if not m:
+        return False
+    url = m.group(1).strip().strip('"').strip("'")
+    if not url or url.lower() in {"none", "null", ""}:
+        return False
+    if not url.lower().startswith("http"):
+        return False
+    scrip = (test_input or "").strip()
+    if scrip and not _scrip_bound_in_logs(text, scrip):
+        return False
+    return True
+
+
+def _invoke_coding_llm(prompt: str, *, ctx: Optional[HealRunContext] = None) -> Tuple[str, str]:
+    raw = evaluate_with_azure_llm(
         prompt=prompt,
-        cache_path=str(CODE_CACHE_FILE)
+        cache_path=str(CODE_CACHE_FILE),
+        max_tokens=_CODING_MAX_TOKENS,
+        system=_coding_system(),
+        parse_json=False,
+        run_name="heal_coding",
+        tags=["heal-agent", "coding"],
+        metadata={"run_id": _run_id(ctx)},
     )
-    print_agent_thoughts(result)
-    if isinstance(result, dict):
-        LAST_AGENT_THOUGHTS = result.get("agent_thoughts")
-        append_agent_state_message(result, source="initial_generation", state_messages=state_messages)
-
-    code = extract_code_from_result(result)
-    generated_path = save_generated_code(code)
-    return generated_path
+    reasoning, code = parse_coding_agent_response(raw)
+    if reasoning:
+        log_agent_thoughts("coding", reasoning, ctx=ctx, prefix="coding_reasoning")
+    return reasoning, code
 
 
-def run_generated_script(test_input: str = "INFY") -> Dict[str, Any]:
+def generate_code_from_analysis(
+    old_code: str,
+    final_analysis: Any,
+    new_url: str,
+    feedback: Optional[str] = None,
+    state_messages: Optional[list] = None,
+    staging_path: Optional[Path] = None,
+    ctx: Optional[HealRunContext] = None,
+) -> Tuple[Path, str, str]:
+    _status("[CODING AGENT] Generating code from analysis", ctx=ctx)
+    prompt = build_coding_prompt(
+        old_code, final_analysis, new_url, feedback, state_messages=state_messages
+    )
+    reasoning, code = _invoke_coding_llm(prompt, ctx=ctx)
+    path = save_generated_code(code, staging_path=staging_path)
+    FIRST_GENERATED_FILE.write_text(code, encoding="utf-8")
+    if ctx:
+        ctx.add_thought(
+            "coding",
+            summary=f"Wrote staging module ({path.name})",
+            decisions=[reasoning] if reasoning else [f"staged={path}"],
+        )
+        ctx.log("codegen_written", path=str(path), bytes=path.stat().st_size)
+    return path, reasoning, code
+
+
+def regenerate_code_with_logs(
+    old_code: str,
+    final_analysis: Any,
+    new_url: str,
+    logs: str,
+    runtime_log: str,
+    state_messages: Optional[list] = None,
+    staging_path: Optional[Path] = None,
+    ctx: Optional[HealRunContext] = None,
+    failure_phase: str = "unknown",
+    last_coding_reasoning: str = "",
+    first_generated_code: str = "",
+    test_input: str = "",
+    deterministic_base: str = "",
+) -> Tuple[Path, str, str]:
+    staging = Path(staging_path) if staging_path else GENERATED_CODE_FILE
+    last_code = staging.read_text(encoding="utf-8") if staging.exists() else old_code
+    if not first_generated_code and FIRST_GENERATED_FILE.exists():
+        first_generated_code = FIRST_GENERATED_FILE.read_text(encoding="utf-8")
+
+    _status(f"[CODING AGENT] Regenerating code (failure_phase={failure_phase})", ctx=ctx)
+    prompt = build_regeneration_prompt(
+        old_code,
+        final_analysis,
+        last_code,
+        logs,
+        runtime_log,
+        new_url,
+        state_messages=state_messages,
+        failure_phase=failure_phase,
+        last_coding_reasoning=last_coding_reasoning,
+        first_generated_code=first_generated_code,
+        test_input=test_input,
+        deterministic_base=deterministic_base,
+    )
+    reasoning, code = _invoke_coding_llm(prompt, ctx=ctx)
+    path = save_generated_code(code, staging_path=staging)
+    if ctx:
+        ctx.add_thought(
+            "regen",
+            summary=f"Regenerated staging module (phase={failure_phase})",
+            decisions=[reasoning] if reasoning else [],
+            warnings=["previous_attempt_failed", f"phase={failure_phase}"],
+        )
+        ctx.log(
+            "codegen_regenerated",
+            path=str(path),
+            bytes=path.stat().st_size,
+            failure_phase=failure_phase,
+        )
+    return path, reasoning, code
+
+
+def run_generated_script(test_input: str = "INFY", staging_path: Optional[Path] = None) -> Dict[str, Any]:
     EXECUTION_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    # Clear previous logs before each execution so regeneration uses only the latest diagnostics.
     try:
         EXECUTION_LOG_FILE.unlink(missing_ok=True)
     except Exception:
         pass
     try:
-        Path(RUNTIME_LOG_FILE).unlink(missing_ok=True)
+        # Fresh FIELD= lines for this harness run
+        RUNTIME_LOG_FILE.write_text("", encoding="utf-8")
     except Exception:
-        pass
+        try:
+            RUNTIME_LOG_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-    result = execute_generated_script(str(GENERATED_CODE_FILE), test_input)
+    module_path = Path(staging_path) if staging_path else GENERATED_CODE_FILE
+    result = execute_generated_script(str(module_path), test_input)
     exit_code = result.get("exit_code", -1)
     stdout = result.get("stdout", "")
     stderr = result.get("stderr", "")
-    command = result.get("command", f"{sys.executable} {GENERATED_CODE_FILE} {test_input}")
+    command = result.get("command", "")
     status = result.get("status", "failed")
 
     log_text = (
@@ -481,17 +620,12 @@ def run_generated_script(test_input: str = "INFY") -> Dict[str, Any]:
         f"STDOUT:\n{stdout}\n"
         f"STDERR:\n{stderr}\n"
     )
-    with open(EXECUTION_LOG_FILE, "w", encoding="utf-8") as f:
-        f.write(log_text)
+    EXECUTION_LOG_FILE.write_text(log_text, encoding="utf-8")
 
     runtime_log_text = ""
-    runtime_log_path = str(RUNTIME_LOG_FILE)
-    # If the runtime log file was written by the generated script, wait a short
-    # time for it to stabilize (avoid reading a partially written file).
     if RUNTIME_LOG_FILE.exists():
         last_size = -1
         stable_count = 0
-        # Poll for up to ~2 seconds (8 * 0.25s)
         for _ in range(8):
             try:
                 size = RUNTIME_LOG_FILE.stat().st_size
@@ -519,245 +653,335 @@ def run_generated_script(test_input: str = "INFY") -> Dict[str, Any]:
         "stderr": stderr,
         "command": command,
         "log_path": str(EXECUTION_LOG_FILE),
-        "runtime_log_path": runtime_log_path,
+        "runtime_log_path": str(RUNTIME_LOG_FILE),
         "runtime_log": runtime_log_text,
     }
 
 
-def build_regeneration_prompt(old_code: str, final_analysis: Any, last_code: str, logs: str, runtime_log: str, new_url: str, state_messages: Optional[list[Dict[str, str]]] = None) -> str:
-    analysis_text = final_analysis
-    mapping_text = None
-    goal_text = None
-    if isinstance(final_analysis, dict):
-        goal_text = final_analysis.get("goal")
-        elements = final_analysis.get("elements_to_replace")
-        mapping = final_analysis.get("mapping")
-        payload = {}
-        if elements is not None:
-            payload["elements_to_replace"] = elements
-        if mapping is not None:
-            payload["mapping"] = mapping
-        if payload:
-            analysis_text = markdownify(payload)
-        else:
-            analysis_text = markdownify(final_analysis)
-        if mapping is not None:
-            mapping_text = markdownify(mapping)
+def build_langraph_coding_agent(
+    ctx: Optional[HealRunContext] = None,
+    *,
+    deterministic_base: str = "",
+) -> Any:
+    staging_path = ctx.staging_path if ctx else GENERATED_CODE_FILE
 
-    return f"""
-You are an expert Python Playwright module maintainer and problem solver.
-
-The previously generated portal module encountered errors during execution.
-Analyze the failure, understand the root cause, and generate a FIXED version.
-
-TARGET URL: {new_url}
-
-GOAL: {goal_text or 'Achieve the goal defined in the analysis.'}
-
-CRITICAL INSTRUCTION:
-Continue regenerating and retesting until the goal is achieved.
-Do NOT accept partial success - the goal must be fully completed.
-
-FAILURE ANALYSIS:
-1. Examine the RUNTIME ACTION LOG to identify which step FAILED (look for status=FAIL).
-2. Understand the error (timeout, selector not found, element not visible, etc.).
-3. Determine what was attempted and why it failed.
-4. Consult ELEMENT REPLACEMENTS and MAPPING FROM ANALYSIS for alternative approaches.
-5. Implement a FIXED version that addresses the root cause.
-
-- If a selector failed:
-- Try alternative selector from analysis
-- Verify element is visible and accessible
-- Add wait/retry logic
-- Check if interaction method needs adjustment
-- For autocomplete/suggestion failures specifically:
- - For autocomplete/suggestion failures specifically:
-     - Prefer waiting for visible suggestion items first, then fall back to presence checks for list items if necessary.
-     - If clicking suggestions consistently fails, implement a keyboard-navigation fallback (repeat a small number of down-arrow presses followed by Enter) and verify the selection by reading the input value or observing the resulting UI change.
-     - Avoid relying on an unscoped "first" element when duplicate containers may exist; scope selection to the nearest logical container when possible.
-
-OLD SCRIPT:
-{old_code}
-
-ELEMENT REPLACEMENTS TO APPLY:
-{analysis_text}
-
-MAPPING FROM ANALYSIS:
-{mapping_text or 'None'}
-
-LAST GENERATED MODULE:
-{last_code}
-
-EXECUTION LOGS:
-{logs}
-
-RUNTIME ACTION LOG:
-{runtime_log}
-
-PREVIOUS AGENT THOUGHTS:
-{format_state_messages(state_messages)}
-
-TASK:
-- Return valid markdown output only, with no extra text.
-- If you include code, wrap it in a fenced markdown code block (```python).
-- Include a markdown section or bullet list summarizing what failed, why it failed, and how it was fixed.
-- The code content should be provided as raw Python inside the code block, and any analysis or commentary should be in markdown sections.
-- Regenerate the module addressing the identified failure.
-- Use the single best selector provided for each element.
-- Ensure every selected selector is unique and matches exactly one visible target element.
-- Refer to the ELEMENT REPLACEMENTS and MAPPING directly for alternatives when a selector/interaction fails.
-- New controls may be added or old controls may be removed; adapt the module according to the analysis rather than preserving old steps blindly.
-- Include robust error handling, waits, and visibility checks.
-- When implementing keyboard fallbacks (ArrowDown/Enter), limit iterations (e.g., 3) and verify selection by reading the input value or observing a visible selected suggestion.
-            - When waiting for result-grid updates, prefer explicit checks such as waiting for rows or anchors to appear, or perform row-count polling to detect changes; avoid raw innerHTML comparisons.
-            - After any click/selection of buttons, dropdowns, or table controls that trigger loading, follow the same wait-and-verify pattern described above: short configurable sleep, then explicit polling for loaded data, with retries and detailed runtime logging.
-- Generate a complete `results_portal.py` module that implements the contract methods used by the production finder.
-        - The module must write a runtime action log file to cache/generated_script_runtime.log when exercised by the harness.
-        - If runtime log file writing fails, it must also print runtime log lines to stdout with a distinct prefix like RUNTIME_ACTION_LOG.
-        - The module must log each step clearly to runtime_log so failures are visible.
-        - Timing requirements:
-            - Measure and log the elapsed time for every UI interaction (click/type/select) and every table/grid load or data refresh.
-            - Log entries must include: ISO8601 timestamp, action name, selector, success/failure, duration_ms, and when relevant `rows_count` or `anchor_count`.
-            - Use `time.monotonic()` to compute durations and include explicit timeout markers when waits expire.
-            - Prefer JSON-lines format for timing entries so downstream tooling can parse them reliably.
-- If the module fails before achieving the goal, the harness must exit with a nonzero process exit code.
-- The module must not catch and swallow final errors in a way that returns exit code 0 on failure.
-- Do not generate a standalone CLI or main function.
-- Do not return any text outside the Python source code.
-"""
-
-
-def regenerate_code_with_logs(old_code: str, final_analysis: Any, new_url: str, logs: str, runtime_log: str, state_messages: Optional[list[Dict[str, str]]] = None) -> Path:
-    global LAST_AGENT_THOUGHTS
-    state_messages = state_messages or []
-    with GENERATED_CODE_FILE.open("r", encoding="utf-8") as f:
-        last_code = f.read()
-
-    print("[CODING AGENT] Regenerating code with execution logs")
-    prompt = build_regeneration_prompt(
-        old_code,
-        final_analysis,
-        last_code,
-        logs,
-        runtime_log,
-        new_url,
-        state_messages=state_messages,
+    graph = StateGraph(
+        state_schema=CodingAgentState,
+        input_schema=CodingAgentState,
+        output_schema=CodingAgentState,
     )
-    result = evaluate_with_azure_llm(
-        prompt=prompt,
-        cache_path=str(CODE_CACHE_FILE)
-    )
-    print_agent_thoughts(result)
-    if isinstance(result, dict):
-        LAST_AGENT_THOUGHTS = result.get("agent_thoughts")
-        append_agent_state_message(result, source="regeneration", state_messages=state_messages)
 
-    code = extract_code_from_result(result)
-    generated_path = save_generated_code(code)
-    return generated_path
+    def iteration_node(state: CodingAgentState, runtime: Any = None) -> CodingAgentState:
+        state_messages = list(state.get("previous_thoughts") or [])
+        attempt = state.get("attempt", 1)
+        feedback = state.get("feedback")
+        test_input = state.get("test_input", "INFY")
+        last_reasoning = state.get("last_coding_reasoning") or ""
+        first_code = state.get("first_generated_code") or ""
+        det_base = state.get("deterministic_base") or deterministic_base or ""
 
+        harness_log = state.get("last_harness_log") or state.get("execution_log") or ""
+        runtime_log = state.get("last_runtime_log") or state.get("runtime_log") or ""
 
-def autonomous_coding_agent(old_code: str, final_analysis: Any, new_url: str, test_input: str = "INFY", max_attempts: int = 5) -> Path:
-    """
-    Autonomously generate and test code until goal is achieved or max attempts reached.
-    
-    Success criteria:
-    1. Exit code == 0 (script completed without unhandled exception)
-    2. Goal was achieved (extracted from final_analysis, verified in logs/stdout)
-    
-    Regeneration triggers:
-    - Goal was NOT achieved, OR
-    - Exit code != 0
-    
-    Each regeneration analyzes errors and attempts to fix them.
-    """
-    # Extract goal from analysis
-    goal = None
-    if isinstance(final_analysis, dict):
-        goal = final_analysis.get("goal")
-    
-    logging.info(f"\n{'='*60}")
-    logging.info(f"Coding Agent Initialization")
-    logging.info(f"Goal: {goal}")
-    logging.info(f"{'='*60}\n")
-    
-    attempt = 1
-    compiled_graph = build_langraph_coding_agent()
-    state: CodingAgentState = {
-        "old_code": old_code,
-        "final_analysis": final_analysis,
-        "new_url": new_url,
-        "feedback": None,
-        "previous_thoughts": AGENT_STATE_MESSAGES,
-        "attempt": attempt,
-        "test_input": test_input,
-    }
-    execution = None
+        try:
+            if attempt == 1 and det_base:
+                regen_logs = harness_log or state.get("execution_log") or ""
+                generated_path, reasoning, code = regenerate_code_with_logs(
+                    state["old_code"],
+                    state["final_analysis"],
+                    state["new_url"],
+                    regen_logs,
+                    runtime_log,
+                    state_messages=state_messages,
+                    staging_path=staging_path,
+                    ctx=ctx,
+                    failure_phase=state.get("failure_phase") or "unknown",
+                    last_coding_reasoning=last_reasoning,
+                    first_generated_code=det_base,
+                    test_input=test_input,
+                    deterministic_base=det_base,
+                )
+                first_code = det_base
+            elif attempt == 1:
+                generated_path, reasoning, code = generate_code_from_analysis(
+                    det_base or state["old_code"],
+                    state["final_analysis"],
+                    state["new_url"],
+                    feedback=feedback,
+                    state_messages=state_messages,
+                    staging_path=staging_path,
+                    ctx=ctx,
+                )
+                first_code = code
+            else:
+                regen_logs = harness_log
+                prior_exec = state.get("execution_log") or ""
+                if prior_exec and prior_exec not in regen_logs:
+                    regen_logs = (prior_exec + "\n\n" + regen_logs).strip()
+                generated_path, reasoning, code = regenerate_code_with_logs(
+                    state["old_code"],
+                    state["final_analysis"],
+                    state["new_url"],
+                    regen_logs,
+                    runtime_log,
+                    state_messages=state_messages,
+                    staging_path=staging_path,
+                    ctx=ctx,
+                    failure_phase=state.get("failure_phase") or "unknown",
+                    last_coding_reasoning=last_reasoning,
+                    first_generated_code=first_code,
+                    test_input=test_input,
+                    deterministic_base=det_base,
+                )
+                if not first_code:
+                    first_code = code
+        except Exception as gen_exc:
+            err = f"CODEGEN_ERROR: {gen_exc}"
+            phase = classify_harness_failure(err, err, status="failed")
+            if ctx:
+                ctx.log("codegen_error", attempt=attempt, error=str(gen_exc), failure_phase=phase)
+                ctx.add_thought(
+                    "coding" if attempt == 1 else "regen",
+                    summary="Code generation failed",
+                    warnings=[str(gen_exc)[:400]],
+                )
+            combined = f"{harness_log}\n\n{err}".strip() if harness_log else err
+            thoughts = state_messages + [
+                {
+                    "agent": "coding",
+                    "summary": "codegen_failed",
+                    "decisions": [str(gen_exc)[:500]],
+                    "warnings": [phase],
+                }
+            ]
+            return {
+                **state,
+                "previous_thoughts": thoughts[-12:],
+                "generated_path": str(staging_path),
+                "execution_log": err,
+                "runtime_log": runtime_log,
+                "last_harness_log": harness_log,
+                "last_runtime_log": runtime_log,
+                "last_coding_reasoning": last_reasoning or str(gen_exc)[:_MAX_THOUGHT_CHARS],
+                "first_generated_code": first_code,
+                "stdout": "",
+                "stderr": err,
+                "exit_code": 1,
+                "status": "failed",
+                "goal_achieved": False,
+                "failure_phase": phase,
+            }
 
-    while attempt <= max_attempts:
-        logging.info(f"\n{'='*60}")
-        logging.info(f"Attempt {attempt}/{max_attempts}")
-        logging.info(f"{'='*60}")
-
-        state["attempt"] = attempt
-        state["test_input"] = test_input
-        state = compiled_graph.invoke(state)
-        AGENT_STATE_MESSAGES[:] = state.get("previous_thoughts", AGENT_STATE_MESSAGES)
-
-        generated_path = Path(state.get("generated_path", "scripts/generated_script.py"))
-        logging.info(f"Generated code: {generated_path}")
-
-        execution = {
-            "stdout": state.get("stdout", ""),
-            "stderr": state.get("stderr", ""),
-            "exit_code": state.get("exit_code", -1),
-            "status": state.get("status", "failed"),
-            "runtime_log": state.get("runtime_log", ""),
-            "log_path": str(EXECUTION_LOG_FILE),
-        }
-
-        logging.info(f"Exit code: {execution['exit_code']}, Status: {execution['status']}")
-        
-        goal_achieved = state.get("goal_achieved", False)
-        if not goal_achieved:
-            # Fallback to explicit log-based detection if needed
-            goal_achieved = goal_was_achieved(execution['stdout'], execution['runtime_log'], goal=goal)
-        logging.info(f"Goal achieved: {goal_achieved}")
-        
-        # Success: goal achieved is confirmed and script exited cleanly
-        if goal_achieved and execution['exit_code'] == 0:
-            logging.info("\n" + "="*60)
-            logging.info("SUCCESS: Goal achieved with exit code 0")
-            if LAST_AGENT_THOUGHTS is not None:
-                print_agent_thoughts({"agent_thoughts": LAST_AGENT_THOUGHTS}, prefix="[CODING AGENT FINAL THOUGHTS]")
-            logging.info("="*60)
-            return generated_path
-
-        if goal_achieved and execution['exit_code'] != 0:
-            logging.warning("\nGoal evidence was found, but the generated script exited with a nonzero code.")
-            logging.warning("Continuing regeneration to secure a clean execution.")
-
-        # Failure: prepare for regeneration or exit if max attempts
-        if attempt < max_attempts:
-            failure_reason = ""
-            if execution['exit_code'] != 0:
-                failure_reason = f"Exit code {execution['exit_code']}"
-            if not goal_achieved:
-                if failure_reason:
-                    failure_reason += " AND goal not achieved"
-                else:
-                    failure_reason = "Goal not achieved"
-            
-            logging.warning(f"\nAttempt {attempt} failed: {failure_reason}")
-            logging.warning(f"Will regenerate for attempt {attempt + 1}/{max_attempts}...\n")
-        else:
-            logging.error(f"\nMax attempts ({max_attempts}) reached. Goal not achieved.")
-            failure_reason = ""
-            if execution['exit_code'] != 0:
-                failure_reason = f"Exit code {execution['exit_code']}. "
-            failure_reason += "Goal not achieved."
-            raise RuntimeError(
-                f"Coding agent failed after {max_attempts} attempts. {failure_reason} See {EXECUTION_LOG_FILE} for details."
+        execution = run_generated_script(test_input=test_input, staging_path=staging_path)
+        plan = _plan_from_analysis(state.get("final_analysis"), state.get("new_url", ""))
+        goal = plan.get("goal")
+        goal_achieved = goal_was_achieved(
+            execution["stdout"],
+            execution["runtime_log"],
+            goal=goal,
+            test_input=test_input,
+        )
+        exec_blob = (execution.get("stdout", "") or "") + "\n" + (execution.get("stderr", "") or "")
+        failure_phase = classify_harness_failure(
+            exec_blob,
+            execution.get("stderr", ""),
+            status=str(execution.get("status") or ""),
+        )
+        if ctx:
+            ctx.log(
+                "harness_result",
+                attempt=attempt,
+                exit_code=execution.get("exit_code"),
+                goal_achieved=goal_achieved,
+                status=execution.get("status"),
+                failure_phase=failure_phase,
             )
 
+        thoughts = state_messages + [
+            {
+                "agent": "coding" if attempt == 1 else "regen",
+                "summary": "harness_ok" if goal_achieved else f"harness_fail:{failure_phase}",
+                "decisions": [reasoning] if reasoning else [],
+                "warnings": [] if goal_achieved else [failure_phase, _clip(exec_blob, 400)],
+            }
+        ]
+
+        return {
+            **state,
+            "previous_thoughts": thoughts[-12:],
+            "generated_path": str(generated_path),
+            "execution_log": exec_blob,
+            "runtime_log": execution.get("runtime_log", ""),
+            "last_harness_log": exec_blob,
+            "last_runtime_log": execution.get("runtime_log", ""),
+            "last_coding_reasoning": reasoning,
+            "first_generated_code": first_code,
+            "stdout": execution.get("stdout", ""),
+            "stderr": execution.get("stderr", ""),
+            "exit_code": execution.get("exit_code", -1),
+            "status": execution.get("status", "failed"),
+            "goal_achieved": goal_achieved,
+            "failure_phase": failure_phase,
+        }
+
+    graph.add_node("iteration", iteration_node)
+    graph.add_edge(START, "iteration")
+    graph.set_finish_point("iteration")
+    return graph.compile()
+
+
+def autonomous_coding_agent(
+    old_code: str,
+    final_analysis: Any,
+    new_url: str,
+    test_input: str = "INFY",
+    max_attempts: int = 5,
+    ctx: Optional[HealRunContext] = None,
+) -> Path:
+    """
+    Generate and test staging module until goal achieved or max attempts.
+    Never writes production results_portal.py — only staging.
+
+    Phase 0 (deterministic): merge ChangePlan locators + canonical fill_search without LLM.
+    Phase 1+: LLM patches only if harness still fails.
+    """
+    plan = _plan_from_analysis(final_analysis, new_url)
+    goal = plan.get("goal")
+    warnings = validate_selector_uniqueness(plan)
+    staging_path = ctx.staging_path if ctx else GENERATED_CODE_FILE
+
+    deterministic_base = build_staging_module(old_code, plan)
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
+    staging_path.write_text(deterministic_base, encoding="utf-8")
+
+    logging.info("Coding Agent: running deterministic merge harness")
+    if ctx:
+        ctx.add_thought(
+            "merge",
+            summary="Deterministic portal merge (ChangePlan locators + canonical fill_search)",
+            decisions=[
+                f"staging={staging_path}",
+                f"locators={len(plan.get('contract_locators') or [])}",
+            ],
+        )
+        ctx.log("deterministic_merge", path=str(staging_path), bytes=staging_path.stat().st_size)
+
+    det_exec = run_generated_script(test_input=test_input, staging_path=staging_path)
+    det_goal = goal_was_achieved(
+        det_exec["stdout"],
+        det_exec.get("runtime_log", ""),
+        goal=goal,
+        test_input=test_input,
+    )
+    if det_goal and det_exec.get("exit_code") == 0:
+        logging.info("Deterministic merge passed harness — skipping LLM codegen")
+        if ctx:
+            ctx.add_thought(
+                "coding",
+                summary="Deterministic merge passed harness; staging ready for promote",
+                decisions=[f"path={staging_path}"],
+            )
+        return staging_path
+
+    logging.info("Deterministic merge failed harness — starting LLM coding loop")
+    if ctx:
+        ctx.add_thought(
+            "coding",
+            summary="Deterministic merge failed; LLM will patch locators/interactions",
+            warnings=[classify_harness_failure(det_exec.get("stdout", ""), det_exec.get("stderr", ""))],
+        )
+
+    logging.info("Coding Agent Initialization goal=%s", goal)
+    if ctx:
+        ctx.add_thought(
+            "coding",
+            summary="Starting coding agent loop",
+            decisions=[
+                f"goal={goal}",
+                f"contract={len(plan.get('contract_locators') or [])}",
+                f"optional={len(plan.get('optional_controls') or [])}",
+            ],
+            warnings=warnings,
+        )
+
+    run_thoughts: List[Any] = []
+    if ctx:
+        run_thoughts = [t.to_dict() for t in ctx.thoughts]
+
+    attempt = 1
+    compiled_graph = build_langraph_coding_agent(ctx=ctx, deterministic_base=deterministic_base)
+    state: CodingAgentState = {
+        "old_code": old_code,
+        "final_analysis": plan,
+        "new_url": new_url,
+        "feedback": diagnose_harness_failure(
+            det_exec.get("stdout", ""),
+            det_exec.get("runtime_log", ""),
+            test_input=test_input,
+        ),
+        "previous_thoughts": run_thoughts,
+        "attempt": attempt,
+        "test_input": test_input,
+        "deterministic_base": deterministic_base,
+        "last_harness_log": (det_exec.get("stdout", "") or "") + "\n" + (det_exec.get("stderr", "") or ""),
+        "last_runtime_log": det_exec.get("runtime_log", ""),
+        "first_generated_code": deterministic_base,
+        "last_coding_reasoning": "",
+    }
+
+    while attempt <= max_attempts:
+        logging.info("Coding attempt %s/%s", attempt, max_attempts)
+        state["attempt"] = attempt
+        state["test_input"] = test_input
+        if ctx:
+            ctx_thoughts = [t.to_dict() for t in ctx.thoughts][-6:]
+            loop_thoughts = list(state.get("previous_thoughts") or [])[-6:]
+            merged = ctx_thoughts + [t for t in loop_thoughts if t not in ctx_thoughts]
+            state["previous_thoughts"] = merged[-12:]
+
+        graph_config = {
+            "run_name": "heal_coding_graph",
+            "tags": ["heal-agent", "coding", "langgraph"],
+            "metadata": {
+                "run_id": _run_id(ctx),
+                "attempt": attempt,
+                "test_input": test_input,
+            },
+        }
+        state = compiled_graph.invoke(state, config=graph_config)
+        generated_path = Path(state.get("generated_path", str(GENERATED_CODE_FILE)))
+        exit_code = state.get("exit_code", -1)
+        goal_achieved = bool(state.get("goal_achieved"))
+        if not goal_achieved:
+            goal_achieved = goal_was_achieved(
+                state.get("stdout", ""),
+                state.get("runtime_log", ""),
+                goal=goal,
+                test_input=test_input,
+            )
+
+        logging.info(
+            "Attempt %s exit_code=%s goal_achieved=%s failure_phase=%s",
+            attempt,
+            exit_code,
+            goal_achieved,
+            state.get("failure_phase"),
+        )
+
+        if goal_achieved and exit_code == 0:
+            if ctx:
+                ctx.add_thought(
+                    "coding",
+                    summary="Harness succeeded; staging ready for promote",
+                    decisions=[f"path={generated_path}"],
+                )
+            return generated_path
+
+        if attempt >= max_attempts:
+            raise RuntimeError(
+                f"Coding agent failed after {max_attempts} attempts. "
+                f"Exit code {exit_code}. Goal not achieved. See {EXECUTION_LOG_FILE}."
+            )
         attempt += 1
+
+    raise RuntimeError("Coding agent exited without success")

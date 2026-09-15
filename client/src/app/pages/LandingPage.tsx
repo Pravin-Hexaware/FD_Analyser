@@ -249,7 +249,7 @@ export default function LandingPage() {
           <div className="flex items-center gap-8 mt-12 text-sm text-slate-500">
             <div className="flex items-center gap-2">
               <Building2 className="size-4 text-indigo-400" />
-              <span><span className="text-white font-medium">30</span> Companies Tracked</span>
+              <span><span className="text-white font-medium">600</span> Companies Tracked</span>
             </div>
             {/*<div className="flex items-center gap-2">
               <Database className="size-4 text-teal-400" />

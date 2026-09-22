@@ -19,6 +19,7 @@ import asyncio
 import os
 import re
 import time
+import traceback
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -407,6 +408,7 @@ async def submit_form(page):
     await submit_button.wait_for(state="visible", timeout=10_000)
     await submit_button.scroll_into_view_if_needed()
     await submit_button.focus()
+    print("[XBRL] Submit button detected; preparing results request", flush=True)
 
     old_table_html = None
     if await page.locator("#ContentPlaceHolder1_gvData").count() > 0:
@@ -418,6 +420,7 @@ async def submit_form(page):
     await page.evaluate(
         "() => { const b = document.querySelector('#ContentPlaceHolder1_btnSubmit'); if (b) b.click(); }"
     )
+    print("[XBRL] Submit button clicked; waiting for results table", flush=True)
 
     await page.wait_for_timeout(20_000)
     try:
@@ -439,6 +442,7 @@ async def submit_form(page):
         await page.wait_for_load_state("networkidle", timeout=60_000)
     except Exception as e:
         print("Warning: networkidle wait failed after submit:", e)
+    print("[XBRL] Results request finished", flush=True)
 
 # -------------------- SmartSearch & Scrip handling --------------------
 async def inject_scrip_code(page, scrip_code: str, display_name: Optional[str] = None) -> None:
@@ -1031,6 +1035,7 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
 
             await submit_form(page)
             await wait_grid_ready(page)
+            print(f"[XBRL] Results table detected for {company}; collecting Std XBRL records", flush=True)
 
             annual_url = None
             quarterly_url = None
@@ -1384,6 +1389,7 @@ async def get_all_std_xbrl_urls(ctx, company: str, expected_scrip: Optional[str]
 
                 # collect all rows (GridView may omit <tbody>)
                 body_rows = await _grid_data_rows_locator(grid)
+                print(f"[XBRL] Results rows detected: {await body_rows.count()}", flush=True)
                 for r in range(await body_rows.count()):
                     tr = body_rows.nth(r)
                     tds = tr.locator("td")

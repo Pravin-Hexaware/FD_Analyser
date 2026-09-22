@@ -133,6 +133,15 @@ class ChatbotExecutionLogger:
             **details,
         )
         self._logger.info("=== CHATBOT EXECUTION END ===")
+        self.close()
+
+    def close(self) -> None:
+        """Flush and close this request's file handler."""
+        with self._lock:
+            for handler in self._logger.handlers[:]:
+                handler.flush()
+                handler.close()
+                self._logger.removeHandler(handler)
 
 
 class LoggingService:

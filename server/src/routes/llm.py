@@ -721,7 +721,9 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             conversation_id=conversation_id,
             request_id=f"req-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
         )
+        chat_logger = logging_service.create_chat_log(request.query, conversation_id=conversation_id)
         logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies")
+        chat_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies")
         print("Step 1: Parsing user query with NLP (no LLM)")
         progress_messages.append({
             "stage": "Extracting user intent",
@@ -735,6 +737,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             "keywords": parsed.get("keywords", []),
             "classification": parsed.get("classification") or parsed.get("query_classification"),
         })
+        chat_logger.log_nlp_breakdown(parsed)
         print("1st NLP extraction returned:", parsed)
 
         # Store initial LLM interaction for logging
@@ -791,7 +794,10 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 })
             )
             answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
+            chat_logger.log_event("llm_response", response=answer, token_usage={})
+            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
             repo.save_message(conversation_id, "llm", answer)
+            chat_logger.log_event("llm_response", response=answer, token_usage={})
             repo.close()
             return {
                 "chat_id": chat_id,
@@ -915,6 +921,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log
+        chat_logger.log_event("database_data", data=db_fetched_data)
 
         # Log Step 2 - Database fetching
         repo.save_detailed_log(
@@ -1073,6 +1080,12 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         
         # Combine all news context
         news_context = "\n".join(news_context_parts) if news_context_parts else None
+        chat_logger.log_news_processing(
+            status="completed",
+            companies=all_companies_to_fetch_news,
+            details=news_fetch_log,
+            news_context=news_context,
+        )
         
         print(f"News context compiled: {news_context is not None}")
         if news_context:
@@ -1107,6 +1120,20 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         final_llm_prompt = get_actual_final_prompt(request.query, all_data, statement_type, frequency)
 
+        exact_system_prompt, exact_user_prompt = _build_llm_prompts(
+            request.query,
+            all_data,
+            statement_type,
+            frequency,
+            news_context=news_context,
+        )
+        chat_logger.log_event(
+            "llm_prompt",
+            system_prompt=exact_system_prompt,
+            user_prompt=exact_user_prompt,
+            data=all_data,
+        )
+
         # Store data passed to LLM for logging
         data_passed_to_llm = all_data
 
@@ -1124,6 +1151,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Store final LLM response for logging
         final_llm_response = answer
+        chat_logger.log_event("llm_response", response=answer, token_usage=tokens_used)
 
         # Save assistant message inside the same conversation
         repo.save_message(conversation_id, "llm", answer)
@@ -1149,6 +1177,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         logger.log_report("phase_1", answer)
         logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0)
+        chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage=tokens_used)
         repo.close()
 
         # Write comprehensive log to file
@@ -1172,9 +1201,13 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         }
 
     except HTTPException:
+        if "chat_logger" in locals():
+            chat_logger.log_event("request_end", status="http_error")
         raise
     except Exception as e:
         print("Error:", str(e))
+        if "chat_logger" in locals():
+            chat_logger.log_error("chat_request", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1206,6 +1239,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
 
         chat_id = str(conversation_id)
         repo.save_message(conversation_id, "user", query)
+        chat_logger = logging_service.create_chat_log(query, conversation_id=conversation_id)
+        chat_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies/stream")
 
         chatbot_logger = logging_service.create_chatbot_logger(
             query,
@@ -1274,6 +1309,9 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 invalid_companies.append(company_name)
 
         if invalid_companies:
+            answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
+            chat_logger.log_event("llm_response", response=answer, token_usage={})
+            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
             repo.save_message(conversation_id, "llm", f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company.")
             repo.close()
             return StreamingResponse(
@@ -1342,6 +1380,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                                 tracked_missing.add(missing_key)
                                 missing_processing_scheduled = True
 
+                chat_logger.log_event("database_data", data=all_data)
+
         has_data = bool(all_data) and any(all_data.values())
         chat_log.set_db_data(all_data)
 
@@ -1352,6 +1392,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             chat_log.note("No DB data available; LLM skipped")
             chat_log.write()
             repo.save_message(conversation_id, "llm", answer)
+            chat_logger.log_report("no_data", answer)
+            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
             repo.close()
             return StreamingResponse(
                 iter([_format_sse_event("message", answer), _format_sse_event("done", "true")]),
@@ -1406,6 +1448,20 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                         news_context_parts.append(f"\n### {company_name} - Recent News\n{markdown_news}")
 
             news_context = "\n".join(news_context_parts) if news_context_parts else None
+            chat_logger.log_news_processing(
+                status="context_ready",
+                news_context=news_context,
+            )
+            exact_system_prompt, exact_user_prompt = _build_llm_prompts(
+                query, all_data, statement_type, frequency, news_context=news_context
+            )
+            chat_logger.log_event(
+                "llm_prompt",
+                phase="full_report_stream",
+                system_prompt=exact_system_prompt,
+                user_prompt=exact_user_prompt,
+                data=all_data,
+            )
 
             system_prompt, user_prompt, _ = prepare_chat_prompts(
                 query, all_data, statement_type, frequency, news_context=news_context, report_mode="single"
@@ -1532,6 +1588,22 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 chatbot_logger.log_error("report_generation", e)
             finally:
                 report_queue.put(None)
+
+        fast_system_prompt, fast_user_prompt = _build_llm_prompts(
+            query,
+            all_data,
+            statement_type,
+            frequency,
+            news_context=None,
+            report_mode="multi-first",
+        )
+        chat_logger.log_event(
+            "llm_prompt",
+            phase="fast_report_stream",
+            system_prompt=fast_system_prompt,
+            user_prompt=fast_user_prompt,
+            data=all_data,
+        )
 
         async def event_generator_case2() -> AsyncIterator[bytes]:
             """Event generator for CASE 2: Fast path + background news collection."""

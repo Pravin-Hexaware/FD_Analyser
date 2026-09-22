@@ -170,9 +170,47 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
           addLiveLog(`⊘ Skipped company at index ${data.idx}: ${data.reason}`);
         } else if (data.status === "already_found_in_db") {
           addLiveLog(`⊘ ${data.scrip_code} - already found in db, skipping`);
+        } else if (data.status === "started") {
+          addLiveLog(`→ Fetching ${data.symbol || data.scrip_code} (${data.scrip_code})...`);
+        } else if (data.status === "no_results") {
+          addLiveLog(`⊘ ${data.scrip_code} — no XBRL rows on BSE grid`);
+        } else if (data.status === "website_down") {
+          addLiveLog(
+            `⚠ ${data.detail || "The website is currently not working. Please try again later."}`
+          );
+        } else if (data.status === "completed") {
+          addLiveLog(
+            `✓ ${data.symbol || data.scrip_code} done (${data.filings_found ?? 0} filings)`
+          );
+        } else if (data.status === "heal_agent_started") {
+          addLiveLog(
+            `⚕ Heal agent started for ${data.scrip_code}: ${data.reason || "UI drift"} — may take 15–25 min`
+          );
+          if (data.detail) addLiveLog(`  ${data.detail}`);
+        } else if (data.status === "heal_success_retrying") {
+          addLiveLog(
+            `✓ Heal promoted portal — retrying ${data.scrip_code}, then continuing batch`
+          );
+        } else if (data.status === "heal_failed_batch_halted") {
+          addLiveLog(`✗ Heal agent failed for ${data.scrip_code}: ${data.error || data.reason}`);
+          if (data.detail) addLiveLog(`  ${data.detail}`);
+        } else if (data.status === "heal_retry_failed_skipping") {
+          addLiveLog(
+            `⚠ ${data.scrip_code} still failing after heal — skipping, continuing batch`
+          );
+        } else if (data.status === "heal_in_progress_timeout") {
+          addLiveLog(`⚠ Timeout while heal agent was running: ${data.error || ""}`);
         } else if (data.report_type && data.period) {
           const typeLabel = data.report_type === "annual" ? "📊" : "📄";
-          const logMessage = `${typeLabel} ${data.symbol} (${data.scrip_code}) → ${data.report_type}: ${data.period} ${data.stored ? "[Stored]" : "[New]"}`;
+          const statusNote =
+            data.status === "skipped_duplicate"
+              ? "[Duplicate]"
+              : data.status === "skipped_outside_5year_range"
+                ? "[Outside 5y]"
+                : data.stored
+                  ? "[Stored]"
+                  : "[New]";
+          const logMessage = `${typeLabel} ${data.symbol} (${data.scrip_code}) → ${data.report_type}: ${data.period} ${statusNote}`;
           addLiveLog(logMessage);
           
           // Add individual company to Recent Runs
@@ -188,22 +226,34 @@ export const ExtractionProvider: React.FC<{ children: ReactNode }> = ({ children
             addLog(companyLog);
           }
         } else if (data.status === "complete") {
-          addLiveLog("✓ XBRL fetch complete!");
+          const halted = data.halted_by ? ` (halted: ${data.halted_by})` : "";
+          if (data.halted_by === "bse_downtime") {
+            addLiveLog(
+              `⚠ Fetch halted — ${data.detail || "The website is currently not working. Please try again later."}`
+            );
+          } else {
+            addLiveLog(`✓ XBRL fetch complete${halted}!`);
+          }
           setIsCollecting(false);
 
           const newLog = {
             id: String(logs.length + 1),
             company: "All Companies (XBRL Fetch)",
-            status: "success",
+            status: data.halted_by ? "error" : "success",
             timestamp: new Date(),
             recordsProcessed: 1440,
-            message: "XBRL URLs fetched and stored",
+            message:
+              data.halted_by === "bse_downtime"
+                ? data.detail || "BSE website currently not working"
+                : data.halted_by
+                  ? `Fetch halted by ${data.halted_by}`
+                  : "XBRL URLs fetched and stored",
           };
           addLog(newLog);
           ws.close();
           wsRef.current = null;
-        } else if (data.error) {
-          addLiveLog(`✗ Error: ${data.error}`);
+        } else if (data.status === "row_error" || data.error) {
+          addLiveLog(`✗ Error${data.scrip_code ? ` (${data.scrip_code})` : ""}: ${data.error}`);
         }
       };
 

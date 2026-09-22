@@ -15,15 +15,22 @@ from services.analysis_service import (
     parse_query_and_get_companies,
     generate_answer_from_data,
     stream_answer_from_data,
-    _build_llm_prompts,
-    _extract_token_usage,
+    prepare_chat_prompts,
+    CHAT_NEWS_IMPACT_MAX_TOKENS,
     _get_or_fetch_today_news_summary,
     _normalize_company_folder_name,
 )
 from repositories.sqlite_repository import SqliteRepository
 from services.logging_service import logging_service
+from services.chat_log_service import ChatSessionLog
+from prompts.loader import load_prompt
+from config.settings import MISSING_COMPANIES_CSV
 
 router = APIRouter()
+
+
+def _log(message: str, *, request_logger=None, **details) -> None:
+    logging_service.log_runtime(message, request_logger=request_logger, **details)
 
 # ============================================================================
 # LOW-LATENCY PIPELINE: Helper Functions for Parallel News Handling
@@ -116,7 +123,7 @@ async def _fetch_news_for_company(
         resolved_name = validated_name or company_name
         return await _get_or_fetch_today_news_summary(resolved_name, scrip_code)
     except Exception as e:
-        print(f"[ERROR] Failed to fetch news for {company_name}: {str(e)}")
+        _log(f"[ERROR] Failed to fetch news for {company_name}: {str(e)}")
         return None
 
 
@@ -127,27 +134,14 @@ async def _generate_news_impact_section(
     news_context: str,
     statement_type: str,
     frequency: str,
-    chat_logger: Optional[Any] = None,
-) -> str:
+) -> Tuple[str, str, str]:
     """
     Generate a new section: "Impact of Recent News on the Company"
-    This is called after news collection completes (STEP 4).
+    Returns (section_text, combined_prompt, raw_response).
     """
     from services.analysis_service import _invoke_llm
     
-    system_prompt = """You are a Senior Financial Analyst providing strategic insights.
-
-You will receive an existing report body plus recent news context. Generate one concise, polished section that integrates the news into the analysis without repeating the title or reprinting the entire report.
-
-Requirements:
-- Keep the report seamless and professional
-- Add a clear section such as '## IX. News-Driven Assessment and Outlook' or similar
-- Explain how recent news changes the interpretation of financial performance, risk, and outlook
-- Include implications for revenue, margin, cash flow, balance sheet, and strategic positioning
-- Must include a dedicated final conclusion or overall assessment section at the end of the response
-- The conclusion must clearly summarize the overall report and provide a final recommendation or takeaway
-
-Do not repeat the full title, do not add 'phase 1'/'phase 2' markers, and do not include any separator text like 'END OF REPORT'."""
+    system_prompt = load_prompt("chatbot_news_impact_system.md").strip()
 
     user_prompt = f"""Original Query: {query}
 
@@ -164,52 +158,34 @@ Existing Report Body:
 
 Generate one seamless section that integrates the recent news into the report and improves the final analysis. The output should be only the new section content, ready to be appended to the existing report."""
 
+    combined_prompt = f"{system_prompt}\n\n{user_prompt}"
     try:
-        response = _invoke_llm(system_prompt, user_prompt, max_tokens=2000)
+        response = _invoke_llm(
+            system_prompt,
+            user_prompt,
+            max_tokens=CHAT_NEWS_IMPACT_MAX_TOKENS,
+            run_name="chatbot_news_impact",
+            tags=["chatbot", "news-impact"],
+        )
         from services.analysis_service import _normalize_llm_response
         normalized = _normalize_llm_response(response)
-        response_text = normalized.get("content", "")
-        if chat_logger is not None:
-            chat_logger.log_event(
-                "llm_prompt",
-                phase="news_impact",
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
-            chat_logger.log_event(
-                "llm_response",
-                phase="news_impact",
-                response=response_text,
-                token_usage=_extract_token_usage(response),
-            )
-        return response_text
+        content = normalized.get("content", "") or ""
+        return content, combined_prompt, content
     except Exception as e:
-        print(f"[ERROR] Failed to generate news impact section: {str(e)}")
-        return ""
+        _log(f"[ERROR] Failed to generate news impact section: {str(e)}")
+        return "", combined_prompt, f"[ERROR] {e}"
 
 def _missing_tracker_csv_path() -> Path:
-    src_dir = Path(__file__).resolve().parents[1]   # points to src/
-    data_dir = src_dir / "Data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir / "missing_companies.csv"
+    MISSING_COMPANIES_CSV.parent.mkdir(parents=True, exist_ok=True)
+    return MISSING_COMPANIES_CSV
 
 
 
 def _schedule_missing_company_processing() -> None:
-    """Schedule background processing of missing companies."""
-    try:
-        from services.missing_company_service import MissingCompanyService
+    """Schedule background processing via the shared single-worker gate."""
+    from services.llm_missing_company_tracker import schedule_missing_company_processing
 
-        def _run():
-            try:
-                asyncio.run(MissingCompanyService.process_missing_companies_batch(None))
-            except Exception as exc:
-                print(f"[WARN] Missing company background task failed: {exc}")
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-    except Exception as exc:
-        print(f"[WARN] Failed to schedule missing company processing: {exc}")
+    schedule_missing_company_processing()
 
 
 def _append_missing_company(
@@ -446,14 +422,16 @@ def get_actual_initial_prompt() -> str:
 
 def get_actual_final_prompt(query: str, data: Dict[str, Any], statement_type: str, frequency: str) -> str:
     """Get the actual final prompt used for answer generation."""
-    system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided parsed JSON financial data.
-The data is for {frequency} financial statements, including {statement_type.replace('_', ' ')} metrics where available.
-
-Provide a clear, concise manager-style analysis report. Use only the data present in the JSON and mention if any requested period or metric is missing."""
+    system_prompt = load_prompt(
+        "chatbot_financial_analyst_qa.md",
+        frequency=frequency,
+        statement_type_label=statement_type.replace("_", " "),
+    ).strip()
     
     user_prompt = f"Query: {query}\n\nData: {json.dumps(data, indent=2)}"
-    
+
     return f"{system_prompt}\n\n{user_prompt}"
+
 
 class LLMQueryRequest(BaseModel):
     query: str
@@ -1132,10 +1110,11 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         })
 
         # Prepare the EXACT data being sent to LLM
-        system_prompt = f"""You are a Financial Analyst. Answer the user's query using the provided financial data.
-The data is for {frequency} financial statements, including {statement_type.replace('_', ' ')} metrics where available.
-
-Provide a clear, concise answer to the query. If data is missing for some companies, note that."""
+        system_prompt = load_prompt(
+            "chatbot_financial_analyst_concise.md",
+            frequency=frequency,
+            statement_type_label=statement_type.replace("_", " "),
+        ).strip()
 
         user_prompt = f"Query: {request.query}\n\nData: {json.dumps(all_data, indent=2)}"
 
@@ -1159,7 +1138,14 @@ Provide a clear, concise answer to the query. If data is missing for some compan
         data_passed_to_llm = all_data
 
         print(f"Calling generate_answer_from_data with news_context: {news_context is not None}")
-        answer, tokens_used = generate_answer_from_data(request.query, all_data, statement_type, frequency, news_context=news_context)
+        answer, tokens_used = generate_answer_from_data(
+            request.query,
+            all_data,
+            statement_type,
+            frequency,
+            news_context=news_context,
+            conversation_id=conversation_id,
+        )
         print("2nd LLM answer:", answer)
         print("LLM token usage:", tokens_used)
 
@@ -1256,6 +1242,21 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         chat_logger = logging_service.create_chat_log(query, conversation_id=conversation_id)
         chat_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies/stream")
 
+        chatbot_logger = logging_service.create_chatbot_logger(
+            query,
+            conversation_id=conversation_id,
+            request_id=f"stream-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+        )
+        logging_service.set_request_logger(chatbot_logger)
+        chatbot_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies/stream")
+        _log(f"Chatbot log file: {chatbot_logger.log_path}", request_logger=chatbot_logger)
+
+        chat_log = ChatSessionLog(
+            query=query,
+            conversation_id=conversation_id,
+            chat_id=chat_id,
+        )
+
         # Initialize log variables
         initial_llm_prompt = get_actual_initial_prompt()
         peer_extraction_log = ""
@@ -1265,14 +1266,25 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         tracked_missing = set()
 
         # ====== STEP 1: Parse user query ======
-        print("[STEP 1] Parsing user query with NLP")
+        _log("[STEP 1] Parsing user query with NLP", request_logger=chatbot_logger)
+        chatbot_logger.log_phase("request_start", "in_progress", step="nlp_parse")
         progress_messages.append({
             "stage": "Extracting user intent",
             "timestamp": datetime.now().isoformat()
         })
 
         parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(query)
-        chat_logger.log_nlp_breakdown(parsed)
+        chatbot_logger.log_nlp_breakdown({
+            "intent": parsed.get("intent", {}),
+            "entities": parsed.get("target_companies", {}),
+            "keywords": parsed.get("keywords", []),
+            "classification": parsed.get("classification") or parsed.get("query_classification"),
+        })
+        chat_log.set_query_breakdown({
+            "nlp_prompt_doc": initial_llm_prompt,
+            "peer_extraction_log": peer_extraction_log,
+            "parsed": parsed,
+        })
 
         if parsed.get("error"):
             repo.close()
@@ -1308,7 +1320,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             )
 
         # ====== STEP 2: Fetch financial data ======
-        print("[STEP 2] Fetching financial data for target companies" + (" + peers" if get_peer else ""))
+        _log("[STEP 2] Fetching financial data for target companies" + (" + peers" if get_peer else ""), request_logger=chatbot_logger)
+        chatbot_logger.log_phase("db_fetch", "started")
         progress_messages.append({
             "stage": "Fetching relevant data",
             "timestamp": datetime.now().isoformat()
@@ -1370,11 +1383,14 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 chat_logger.log_event("database_data", data=all_data)
 
         has_data = bool(all_data) and any(all_data.values())
+        chat_log.set_db_data(all_data)
 
         if not has_data:
             answer = (
                 "Company data for the selected period is temporarily unavailable, possibly due to processing delays. Please try again after 10 minutes."
             )
+            chat_log.note("No DB data available; LLM skipped")
+            chat_log.write()
             repo.save_message(conversation_id, "llm", answer)
             chat_logger.log_report("no_data", answer)
             chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
@@ -1386,7 +1402,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             )
 
         # ====== STEP 3: News check + Parallel Execution ======
-        print("[STEP 3] Checking for cached news and preparing parallel execution")
+        _log("[STEP 3] Checking for cached news and preparing parallel execution", request_logger=chatbot_logger)
+        chatbot_logger.log_phase("news_fetch", "started", mode="stream")
         progress_messages.append({
             "stage": "Checking for news",
             "timestamp": datetime.now().isoformat()
@@ -1409,17 +1426,12 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
         has_any_news = any(news_exists_map.values())
         needs_news_fetch = any(not v for v in news_exists_map.values())
 
-        print(f"News status: {has_any_news=}, {needs_news_fetch=}")
-        print(f"News exists map: {news_exists_map}")
-        chat_logger.log_news_processing(
-            status="cache_check_completed",
-            companies=news_check_companies,
-            exists_map=news_exists_map,
-        )
+        _log(f"News status: {has_any_news=}, {needs_news_fetch=}", request_logger=chatbot_logger)
+        _log(f"News exists map: {news_exists_map}", request_logger=chatbot_logger)
 
         # ====== CASE 1: All news exists ======
         if has_any_news and not needs_news_fetch:
-            print("[CASE 1] All news exists - generating full report with news")
+            _log("[CASE 1] All news exists - generating full report with news", request_logger=chatbot_logger)
             progress_messages.append({
                 "stage": "Generating response with news context",
                 "timestamp": datetime.now().isoformat()
@@ -1451,37 +1463,57 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 data=all_data,
             )
 
+            system_prompt, user_prompt, _ = prepare_chat_prompts(
+                query, all_data, statement_type, frequency, news_context=news_context, report_mode="single"
+            )
+            chat_log.mode = "case1_cached_news"
+            chat_log.set_phase1(f"{system_prompt}\n\n{user_prompt}")
+            chat_log.set_news(
+                prompt="(cached news — no live news-agent fetch)",
+                data_passed={"news_context": news_context},
+                response=news_context or "(empty)",
+            )
+
             # Generate and stream full report with news
             def event_generator_case1() -> Iterator[bytes]:
                 metadata = {"chat_id": chat_id, "conversation_id": conversation_id}
                 yield _format_sse_event("metadata", json.dumps(metadata))
 
                 answer_parts: List[str] = []
-                for chunk in stream_answer_from_data(query, all_data, statement_type, frequency, news_context=news_context):
-                    answer_parts.append(chunk)
-                    yield _format_sse_event("message", chunk)
-
-                yield _format_sse_event("done", "true")
-
-                # Save answer after streaming
                 try:
-                    answer = "".join(answer_parts)
-                    repo.save_message(conversation_id, "llm", answer)
-                    chat_logger.log_event(
-                        "llm_response",
-                        phase="full_report_stream",
-                        response=answer,
-                        token_usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "note": "Streaming response did not expose usage metadata"},
-                    )
-                    chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={"note": "Streaming response did not expose usage metadata"})
-                    repo.close()
-                except Exception as e:
-                    print("Error closing page:", e)
+                    chatbot_logger.log_phase("report_generation", "started", mode="case1_with_news")
+                    for chunk in stream_answer_from_data(
+                        query,
+                        all_data,
+                        statement_type,
+                        frequency,
+                        news_context=news_context,
+                        metadata={"chat_id": chat_id, "conversation_id": conversation_id},
+                    ):
+                        answer_parts.append(chunk)
+                        yield _format_sse_event("message", chunk)
+
+                    yield _format_sse_event("done", "true")
+                finally:
+                    try:
+                        answer = "".join(answer_parts)
+                        chat_log.set_phase1_response(answer)
+                        chat_log.set_phase2(response="(single-pass report; phase 2 not used)")
+                        log_path = chat_log.write()
+                        _log(f"Chat session log written: {log_path}", request_logger=chatbot_logger)
+                        repo.save_message(conversation_id, "llm", answer)
+                        chatbot_logger.log_report("case1", answer)
+                        repo.close()
+                    except Exception as e:
+                        _log(f"Error closing page: {e}", request_logger=chatbot_logger)
+                        chatbot_logger.log_error("stream_case1_finalize", e)
+                    chatbot_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, endpoint="stream_case1")
+                    logging_service.clear_request_logger()
 
             return StreamingResponse(event_generator_case1(), media_type="text/event-stream")
 
         # ====== CASE 2: News missing - Parallel execution ======
-        print("[CASE 2] News missing - launching parallel processes")
+        _log("[CASE 2] News missing - launching parallel processes", request_logger=chatbot_logger)
         progress_messages.append({
             "stage": "Generating response (news will follow)",
             "timestamp": datetime.now().isoformat()
@@ -1496,6 +1528,28 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 if cached_text:
                     cached_news_parts.append(f"\n### {company_name} - Cached News\n{cached_text}")
 
+        news_agent_system = load_prompt("news_agent_system.md").strip()
+        news_collection_prompt_parts = [
+            "=== NEWS AGENT SYSTEM PROMPT ===",
+            news_agent_system,
+            "",
+            "=== PER-COMPANY FETCH QUERIES ===",
+        ]
+        for company_name, _scrip, _resolved in news_check_companies:
+            if not news_exists_map.get(company_name):
+                news_collection_prompt_parts.append(
+                    f"- Collect up to 3 recent news articles for {company_name}. "
+                    "Return only relevant article URLs, titles, published dates if available, "
+                    "and reasons in strict JSON."
+                )
+        chat_log.mode = "case2_parallel_news"
+        chat_log.set_news(prompt="\n".join(news_collection_prompt_parts))
+
+        phase1_system, phase1_user, _ = prepare_chat_prompts(
+            query, all_data, statement_type, frequency, news_context=None, report_mode="multi-first"
+        )
+        chat_log.set_phase1(f"{phase1_system}\n\n{phase1_user}")
+
         async def collect_all_news() -> Dict[str, Optional[str]]:
             """Async function to collect news for missing companies."""
             tasks = []
@@ -1509,7 +1563,8 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 for idx, (company_name, scrip_code, resolved_name) in enumerate(missing_companies):
                     result = completed[idx]
                     if isinstance(result, Exception):
-                        print(f"[PROCESS B] News fetch failed for {company_name}: {result}")
+                        _log(f"[PROCESS B] News fetch failed for {company_name}: {result}", request_logger=chatbot_logger)
+                        chatbot_logger.log_error("news_fetch", result, exc_info=False)
                         results[company_name] = None
                     else:
                         results[company_name] = result
@@ -1517,10 +1572,20 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
 
         def _produce_report_chunks(report_queue: queue.Queue) -> None:
             try:
-                for chunk in stream_answer_from_data(query, all_data, statement_type, frequency, news_context=None, report_mode="multi-first"):
+                chatbot_logger.log_phase("report_generation", "started", mode="case2_fast_path")
+                for chunk in stream_answer_from_data(
+                    query,
+                    all_data,
+                    statement_type,
+                    frequency,
+                    news_context=None,
+                    report_mode="multi-first",
+                    metadata={"chat_id": chat_id, "conversation_id": conversation_id},
+                ):
                     report_queue.put(chunk)
             except Exception as e:
-                print(f"[PROCESS A] Report generation error: {e}")
+                _log(f"[PROCESS A] Report generation error: {e}", request_logger=chatbot_logger)
+                chatbot_logger.log_error("report_generation", e)
             finally:
                 report_queue.put(None)
 
@@ -1545,11 +1610,11 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             metadata = {"chat_id": chat_id, "conversation_id": conversation_id}
             yield _format_sse_event("metadata", json.dumps(metadata))
 
-            print("[PROCESS B] Starting background news collection")
+            _log("[PROCESS B] Starting background news collection", request_logger=chatbot_logger)
             news_task = asyncio.create_task(collect_all_news())
 
             yield _format_sse_event("status", "Started initial report generation while news collection runs in background.")
-            print("[PROCESS A] Generating report without news (fast path)")
+            _log("[PROCESS A] Generating report without news (fast path)", request_logger=chatbot_logger)
             answer_parts: List[str] = []
             report_queue: queue.Queue = queue.Queue()
             producer_thread = threading.Thread(target=_produce_report_chunks, args=(report_queue,), daemon=True)
@@ -1563,51 +1628,58 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 yield _format_sse_event("message", chunk)
 
             fast_report = "".join(answer_parts)
-            print(f"[PROCESS A] Fast report generated ({len(fast_report)} chars)")
+            chat_log.set_phase1_response(fast_report)
+            _log(f"[PROCESS A] Fast report generated ({len(fast_report)} chars)", request_logger=chatbot_logger)
 
             collected_news_result = {}
             try:
                 collected_news_result = await news_task
-                print(f"[PROCESS B] News collection completed: {list(collected_news_result.keys())}")
-                chat_logger.log_news_processing(
-                    status="collection_completed",
-                    news=collected_news_result,
-                )
+                _log(f"[PROCESS B] News collection completed: {list(collected_news_result.keys())}", request_logger=chatbot_logger)
             except Exception as e:
-                print(f"[PROCESS B] News collection failed: {e}")
+                _log(f"[PROCESS B] News collection failed: {e}", request_logger=chatbot_logger)
+                chatbot_logger.log_error("news_fetch", e)
 
             combined_news_parts = list(cached_news_parts)
             for company_name, news_text in collected_news_result.items():
                 if news_text:
                     combined_news_parts.append(f"\n### {company_name} - Recent News\n{news_text}")
 
-            chat_logger.log_news_processing(
-                status="context_ready",
-                news_context="\n".join(combined_news_parts) if combined_news_parts else None,
+            news_response_text = "\n".join(combined_news_parts) if combined_news_parts else "(no news collected)"
+            chat_log.set_news(
+                data_passed={
+                    "cached_companies": [c[0] for c in news_check_companies if news_exists_map.get(c[0])],
+                    "fetched_companies": list(collected_news_result.keys()),
+                    "company_financial_data_keys": list(all_data.keys()),
+                },
+                response=news_response_text,
             )
 
             complete_report = fast_report
             if combined_news_parts:
                 news_context = "\n".join(combined_news_parts)
-                print("[STEP 4] Generating news impact section")
+                _log("[STEP 4] Generating news impact section", request_logger=chatbot_logger)
                 try:
-                    news_impact = await _generate_news_impact_section(
+                    news_impact, phase2_prompt, phase2_raw = await _generate_news_impact_section(
                         original_report=fast_report,
                         query=query,
                         company_data=all_data,
                         news_context=news_context,
                         statement_type=statement_type,
                         frequency=frequency,
-                        chat_logger=chat_logger,
                     )
+                    chat_log.set_phase2(prompt=phase2_prompt, response=phase2_raw)
 
                     if news_impact:
                         complete_report = fast_report + "\n\n" + news_impact.strip()
-                        print(f"[STEP 5] Streaming final combined report ({len(complete_report)} chars)")
+                        _log(f"[STEP 5] Streaming final combined report ({len(complete_report)} chars)", request_logger=chatbot_logger)
                     else:
-                        print("[STEP 5] Streaming base report without news enhancement")
+                        _log("[STEP 5] Streaming base report without news enhancement", request_logger=chatbot_logger)
                 except Exception as e:
-                    print(f"[ERROR] Failed to generate news impact section: {e}")
+                    _log(f"[ERROR] Failed to generate news impact section: {e}", request_logger=chatbot_logger)
+                    chatbot_logger.log_error("news_impact", e)
+                    chat_log.note(f"phase2 failed: {e}")
+            else:
+                chat_log.set_phase2(response="(skipped — no news available)")
 
             if complete_report != fast_report:
                 chunk_size = 80
@@ -1617,34 +1689,33 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                     await asyncio.sleep(0)
 
             try:
+                log_path = chat_log.write()
+                _log(f"Chat session log written: {log_path}", request_logger=chatbot_logger)
                 repo.save_message(conversation_id, "llm", complete_report)
-                chat_logger.log_event(
-                    "llm_response",
-                    phase="combined_stream",
-                    response=complete_report,
-                    token_usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "note": "Streaming response usage is logged per non-streaming news-impact call when available"},
-                )
-                chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={"note": "Streaming response usage unavailable from stream chunks"})
+                chatbot_logger.log_report("case2", complete_report)
             except Exception as e:
-                print(f"[ERROR] Failed to save complete report: {e}")
+                _log(f"[ERROR] Failed to save complete report: {e}", request_logger=chatbot_logger)
+                chatbot_logger.log_error("save_report", e)
 
             yield _format_sse_event("done", "true")
 
             try:
                 repo.close()
             except Exception as e:
-                print(f"[ERROR] Failed to close complete report: {e}")
+                _log(f"[ERROR] Failed to close complete report: {e}", request_logger=chatbot_logger)
+                chatbot_logger.log_error("close_repo", e)
+            finally:
+                chatbot_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, endpoint="stream_case2")
+                logging_service.clear_request_logger()
 
         return StreamingResponse(event_generator_case2(), media_type="text/event-stream")
 
     except HTTPException:
-        if "chat_logger" in locals():
-            chat_logger.log_event("request_end", status="http_error")
+        logging_service.clear_request_logger()
         raise
     except Exception as e:
-        print("Stream error:", str(e))
-        if "chat_logger" in locals():
-            chat_logger.log_error("stream_chat_request", e)
+        _log(f"Stream error: {e}")
+        logging_service.clear_request_logger()
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -11,8 +11,11 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from repositories.sqlite_repository import SqliteRepository
-from utils.llm_testing import get_azure_chat_openai
+from services.logging_service import logging_service
+from utils.llm_testing import get_shared_llm, get_llm_provider_name
+from utils.langsmith_tracing import llm_run_config, merge_run_config
 from services.nlp_company_extractor import parse_query_and_get_companies_nlp
+from prompts.loader import load_prompt
 
 _LLM: Any = None
 
@@ -154,7 +157,7 @@ def _get_today_news_summary(company_name: Optional[str]) -> Optional[str]:
                     return f.read().strip()
 
     except Exception as e:
-        print(f"[DEBUG] Error reading markdown news for {company_name}: {str(e)}")
+        logging_service.log_runtime(f"[DEBUG] Error reading markdown news for {company_name}: {str(e)}")
 
     return None
 
@@ -169,7 +172,7 @@ def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Opt
         from services.news_agent_service import app as news_agent_app, process_results
         from langchain_core.messages import HumanMessage
     except Exception as e:
-        print(f"[WARN] Agent news fetch unavailable: {e}")
+        logging_service.log_runtime(f"[WARN] Agent news fetch unavailable: {e}")
         return None
 
     try:
@@ -179,17 +182,22 @@ def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Opt
         )
         result = news_agent_app.invoke(
             {"messages": [HumanMessage(content=query)]},
-            config={"configurable": {"thread_id": f"news-agent-{uuid.uuid4()}"}}
+            config=merge_run_config(
+                "news_agent_fetch",
+                tags=["news-agent", "langgraph"],
+                metadata={"company_name": company_name},
+                configurable={"thread_id": f"news-agent-{uuid.uuid4()}"},
+            ),
         )
 
         if not result or "messages" not in result:
-            print(f"[WARN] Agent did not return messages for {company_name}")
+            logging_service.log_runtime(f"[WARN] Agent did not return messages for {company_name}")
             return None
 
         output_message = result["messages"][-1].content
         article_paths = process_results(output_message, company_name=company_name)
         if not article_paths:
-            print(f"[WARN] Agent returned no article paths for {company_name}")
+            logging_service.log_runtime(f"[WARN] Agent returned no article paths for {company_name}")
             return None
 
         contents = []
@@ -198,13 +206,13 @@ def _fetch_news_using_agent_sync(company_name: str, max_results: int = 3) -> Opt
                 with open(path, 'r', encoding='utf-8') as f:
                     contents.append(f.read().strip())
             except Exception as read_exc:
-                print(f"[WARN] Failed to read scraped article {path}: {read_exc}")
+                logging_service.log_runtime(f"[WARN] Failed to read scraped article {path}: {read_exc}")
                 continue
 
         return "\n\n".join(contents) if contents else None
 
     except Exception as e:
-        print(f"[WARN] Agent news fetch failed for {company_name}: {e}")
+        logging_service.log_runtime(f"[WARN] Agent news fetch failed for {company_name}: {e}")
         return None
 
 
@@ -243,25 +251,25 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
                 for path in article_files:
                     with open(path, 'r', encoding='utf-8') as f:
                         contents.append(f.read().strip())
-                print(f"[INFO] Using cached markdown articles for {company_name}")
+                logging_service.log_runtime(f"[INFO] Using cached markdown articles for {company_name}")
                 return "\n\n".join(contents)
 
             summary_file = company_date_folder / "summary.md"
             if summary_file.exists() and summary_file.is_file():
                 with open(summary_file, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
-                    print(f"[INFO] Using fallback cached summary for {company_name}")
+                    logging_service.log_runtime(f"[INFO] Using fallback cached summary for {company_name}")
                     return content
 
-        print(f"[INFO] No cached markdown articles for {company_name}, attempting agent-based collection...")
+        logging_service.log_runtime(f"[INFO] No cached markdown articles for {company_name}, attempting agent-based collection...")
 
         # Only agent-based news collection is allowed here.
         agent_news = await _fetch_news_using_agent(company_name, max_results=4)
         if agent_news:
-            print(f"[INFO] Agent news collection succeeded for {company_name}")
+            logging_service.log_runtime(f"[INFO] Agent news collection succeeded for {company_name}")
             return agent_news
 
-        print(f"[WARN] Agent news collection failed or returned no articles for {company_name}. No legacy NewsService fallback will be used.")
+        logging_service.log_runtime(f"[WARN] Agent news collection failed or returned no articles for {company_name}. No legacy NewsService fallback will be used.")
         return None
 
     except Exception as e:
@@ -334,28 +342,29 @@ def _build_peer_list_from_hardcoded(repo: SqliteRepository, symbol: str) -> List
 
 
 def initialize_llm() -> None:
-    """Initialize the AzureChatOpenAI instance once at application startup."""
+    """Initialize the configured LLM instance once at application startup."""
     global _LLM,_LLM_ID
     if _LLM is None:
-
-        _LLM = get_azure_chat_openai()
+        _LLM = get_shared_llm()
         _LLM_ID = str(uuid.uuid4())
-        print(f"🔥 LLM CREATED (startup) → ID: {_LLM_ID}, Memory: {id(_LLM)}")
+        provider = get_llm_provider_name()
+        logging_service.log_runtime(f"[LLM CREATED] (startup) provider={provider}, ID={_LLM_ID}, Memory={id(_LLM)}")
         if _LLM is None:
-            raise RuntimeError("Failed to initialize AzureChatOpenAI from utils.llm_testing")
+            raise RuntimeError("Failed to initialize configured LLM from utils.llm_testing")
 
 
 def _get_llm() -> Any:
-    """Return a cached AzureChatOpenAI instance (or create it)."""
+    """Return a cached configured LLM instance (or create it)."""
     global _LLM,_LLM_ID
     if _LLM is None:
-        _LLM = get_azure_chat_openai()
+        _LLM = get_shared_llm()
         _LLM_ID = str(uuid.uuid4())
-        print(f"🔥 LLM CREATED (Fallback) → ID: {_LLM_ID}, Memory: {id(_LLM)}")
+        provider = get_llm_provider_name()
+        logging_service.log_runtime(f"[LLM CREATED] (Fallback) provider={provider}, ID={_LLM_ID}, Memory={id(_LLM)}")
         if _LLM is None:
-            raise RuntimeError("Failed to initialize AzureChatOpenAI from utils.llm_testing")
+            raise RuntimeError("Failed to initialize configured LLM from utils.llm_testing")
     else:
-        print(f"♻️ LLM REUSED: ID: {_LLM_ID}, Memory: {id(_LLM)}")
+        logging_service.log_runtime(f"[LLM REUSED] provider={get_llm_provider_name()}, ID={_LLM_ID}, Memory={id(_LLM)}")
     return _LLM
 
 
@@ -382,16 +391,29 @@ def _try_parse_numeric_value(raw_value: Any) -> Optional[float]:
     return None
 
 
-def _invoke_llm(system_prompt: str, user_prompt: str, max_tokens: int = 8000) -> Any:
-    """Invoke the LangChain AzureChatOpenAI model and return the raw response."""
+def _invoke_llm(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 8000,
+    *,
+    run_name: str = "chatbot_llm",
+    tags: Optional[list[str]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> Any:
+    """Invoke the shared Foundry ChatOpenAI model and return the raw response."""
     llm = _get_llm()
-    # LangChain returns an object with a .content attribute.
+    config = llm_run_config(
+        run_name,
+        tags=tags or ["chatbot"],
+        metadata=metadata,
+    )
     resp = llm.invoke(
         [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ],
         max_tokens=max_tokens,
+        config=config,
     )
     return resp
 
@@ -423,238 +445,69 @@ def _extract_chunk_text(chunk: Any) -> str:
 
 def _build_llm_prompts(query: str, formatted_data: Any, statement_type: str, frequency: str, news_context: Optional[str] = None, report_mode: str = "single") -> tuple[str, str]:
     """Build system and user prompts for the LLM.
-    
+
     Args:
         report_mode: "single" for complete single-LLM report, "multi-first" for first part of two-LLM analysis
     """
     if report_mode == "multi-first":
-        # For CASE 2: First LLM request - generate the core report body without any phase markers
-        system_prompt = """You are a Senior Financial Analyst providing structured, data-driven analysis.
-
-Using only the financial data provided, generate a complete, polished report body for the user. Use a single title and the following sections in a seamless final-report style:
-Provide a comprehensive, board-Level Title and include the following sections:
-## I. Executive Summary
-## II. Company Overview and Strategic Context
-## III. Comprehensive Financial Performance Analysis
-## IV. Audit Findings, Qualifications & Management Disclosures
-## V. Trend Analysis and Forecasting Insights
-## VI. Risk Assessment and Mitigation
-## VII. Strategic Implications and Recommendations
-## VIII. Appendices
-
-Focus on:
-
-- Use tables whenever numerical comparison helps readability.
-- Present financial metrics in tabular format.
-- Include KPI summaries in tables.
-- Key findings from the financial data
-- Revenue, profitability, cash flow and balance sheet analysis
-- Trend analysis and ratio insights
-- Operational drivers, risks, and financial strengths/weaknesses
-- Any data limitations or gaps
-
-Do not mention that this is a draft, phase 1, Conclusion, Summary or a preliminary version. Do not add separator text, end-of-report markers, or repeated titles."""
+        system_prompt = load_prompt("chatbot_financial_report_multi_first.md").strip()
     else:
-        # For CASE 1: Single LLM request - comprehensive report with all sections
-        system_prompt = f"""
-You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
-
-Generate a complete, exhaustive financial analysis report in Markdown format WITHOUT ANY TRUNCATION OR LENGTH RESTRICTIONS. The report should comprehensively analyze ALL available financial data, metrics, parameters, textual information, AND RECENT NEWS PROVIDED in the input - not just a subset.
-
-## CRITICAL: NEWS FEEDS ARE PRIMARY ANALYTICAL INPUT
-You MUST use the provided recent news and market developments as a PRIMARY ANALYTICAL TOOL, not supplementary context. The news feeds are essential for:
-
-1. **Understanding Financial Performance Drivers**: Correlate financial metrics with recent company events. For example:
-   - If news mentions new contracts/partnerships → expect revenue growth
-   - If news mentions cost-cutting initiatives → expect margin improvements
-   - If news mentions acquisitions → expect changes in asset base and profitability
-   - If news mentions regulatory issues → assess financial impact and risk
-
-2. **Identifying Trends and Inflection Points**: Use news to explain acceleration/deceleration in financial metrics across periods
-
-3. **Risk Assessment**: News about lawsuits, investigations, regulatory probes, leadership changes, or market disruptions directly impact financial risk profile
-
-4. **Forward-Looking Insights**: News about strategic initiatives, R&D investments, market expansion, and technology adoption inform growth trajectory
-
-5. **Valuation Context**: Recent developments provide context for P/E multiples, market positioning, and competitive advantage sustainability
-
-### MANDATORY News Integration Requirements:
-- **Executive Summary**: Lead with key news developments and their financial implications
-- **Company Overview**: Use news to explain business model changes and strategic pivots
-- **Strategic Context**: Analyze how recent news shapes competitive positioning
-- **Performance Analysis**: For each metric trend, explain whether news provides supporting context
-- **Risk Assessment**: Prominently feature risks identified in recent news
-- **Strategic Implications**: Ground recommendations in recent developments and their impact
-- **Forward Outlook**: Use news to project future financial trajectory
-
-PROMINENTLY FEATURE news-based insights throughout the report. Explain explicit causal relationships between recent developments and observed financial performance. Do not relegates news to a separate section—integrate it deeply into every analytical dimension.
-
-## CRITICAL: TEXTUAL INFORMATION AND NOTES
-The provided data includes TEXTUAL INFORMATION sections with financial notes, auditor remarks, management commentary, qualification statements, and other narrative disclosures. These are ESSENTIAL to include in your analysis as they provide critical context for understanding:
-- Audit qualifications or modifications to audit opinions
-- Management disclosure notes explaining financial performance
-- Regulatory compliance information
-- Special circumstances affecting financial results
-- Risk disclosures and material contingencies
-- Related party transaction disclosures
-- Any caveats or limitations on financial results
-
-Extract and prominently feature ALL textual information and narrative disclosures in your analysis. Do not omit or minimize these contextual notes - they are often more important than raw numbers.
-
-Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data. Include all footnotes, explanations, and textual annotations.
-
-The report should be extremely detailed and thorough, suitable for board-level strategic discussions, investment committee reviews, and executive decision-making. LENGTH IS NOT A CONSTRAINT - provide exhaustive, complete analysis without any truncation.
-
-# Comprehensive Financial Analysis Report
-
-## I. Executive Summary
-Provide a comprehensive executive overview synthesizing key findings across all periods and companies:
-- Strategic financial performance highlights and trajectory
-- Critical profitability, efficiency, and growth metrics
-- Major risk indicators and opportunities
-- Strategic implications for business direction and governance
-- Key recommendations for immediate executive attention
-- Material qualifications, audit findings, or management disclosures
-
-## II. Company Overview and Strategic Context
-For each company analyzed:
-- Business model and industry positioning
-- Strategic objectives and market dynamics
-- Key value drivers and competitive advantages
-- Regulatory and macroeconomic context implications
-- Any material management disclosures or special circumstances
-
-## III. Comprehensive Financial Performance Analysis
-Conduct exhaustive period-by-period and cross-company analysis of ALL financial metrics available:
-
-### Revenue Analysis
-- Detailed revenue composition and sources
-- Revenue growth drivers and sustainability
-- Geographic and segment revenue breakdown (if available)
-- Revenue quality indicators and recurring vs. one-time components
-- Management commentary on revenue performance
-
-### Profitability Deep Dive
-- Operating profit margins: Trends, drivers, and sustainability
-- Net profit margins: Components and influencing factors
-- EBITDA margins and operating efficiency metrics
-- Gross margins by business segment or product line
-- Margin drivers and sustainability factors
-- Management notes on profitability
-
-### Cost Structure Analysis
-- Detailed cost breakdown: Fixed vs. variable costs
-- Major expense categories: Personnel, R&D, marketing, administrative
-- Cost optimization opportunities and efficiency trends
-- Cost-to-revenue ratios and benchmarking
-- Root causes of cost variations
-
-### Balance Sheet Analysis
-- Asset quality and composition
-- Liability structure and debt management
-- Working capital efficiency and cash conversion cycles
-- Capital structure optimization and financial leverage
-- Management commentary on balance sheet changes
-
-### Cash Flow Analysis
-- Operating cash flow generation and quality
-- Investment and financing cash flows
-- Free cash flow trends and utilization
-- Cash flow forecasting implications
-- Conversion efficiency from profit to cash
-
-### Key Financial Ratios and Metrics
-- Liquidity ratios: Current ratio, quick ratio, cash ratios
-- Solvency ratios: Debt-to-equity, debt-to-assets, interest coverage
-- Efficiency ratios: Asset turnover, inventory turnover, receivables days
-- Profitability ratios: ROA, ROE, ROCE, EPS trends
-- Valuation metrics and peer benchmarking
-
-## IV. Audit Findings, Qualifications & Management Disclosures
-CRITICAL SECTION - Include ALL:
-- Audit opinion qualifications or modifications
-- Auditor reservations or concerns
-- Management commentary on audit findings
-- Going concern assessments
-- Related party transactions and related management disclosures
-- Material contingencies or uncertain liabilities
-- Regulatory compliance matters
-- Any other material management notes or explanations
-
-## V. Trend Analysis and Forecasting Insights
-- Multi-period trend analysis with statistical significance
-- Growth acceleration/deceleration patterns
-- Cyclical vs. structural performance changes
-- Forward-looking indicators from historical trends
-- Sustainability of observed trends
-
-## VI. Risk Assessment and Mitigation
-- Financial risk factors: Liquidity, solvency, currency, interest rate
-- Operational risks: Cost pressures, margin compression, supply chain
-- Market risks: Competition, demand fluctuations, regulatory changes
-- Strategic risks: Market positioning, technology disruption, M&A implications
-- Quantitative risk metrics and stress testing insights
-- Disclosed management concerns and risk factors
-
-## VII. Strategic Implications and Recommendations
-- Strategic opportunities identified from financial trends
-- Areas requiring management intervention
-- Capital allocation recommendations
-- Risk mitigation strategies
-- Governance and compliance considerations
-- Long-term value creation strategies
-
-## VIII. Appendices
-- Detailed financial statements and schedules
-- Ratio calculations and trend charts
-- Peer comparison tables
-- Statistical analysis and regression insights
-- Complete text of all management disclosures and audit findings
-
----
-
-**Analysis Parameters:** {frequency} financial statements | Focus: {statement_type.replace('_', ' ')} | Data Scope: EXHAUSTIVE analysis of ALL available financial parameters and narrative disclosures
-
-**CRITICAL REQUIREMENTS:**
-1. Analyze EVERY financial metric, parameter, and textual information present - DO NOT OMIT ANYTHING
-2. PROMINENTLY FEATURE all audit findings, qualifications, management notes, and disclosures
-3. Provide exhaustive, board-level analysis with strategic implications - NO TRUNCATION
-4. Use precise numerical references with proper formatting (INR crores/lakhs, percentages, ratios)
-5. Identify trends, drivers, risks, and opportunities across ALL data dimensions
-6. Maintain professional, executive-level tone suitable for C-suite and board presentations
-7. Include ALL contextual information from textual sections - do not minimize or omit
-8. Generate actionable insights that drive strategic decision-making
-9. Structure report for easy navigation while maintaining complete depth
-10. Include quantitative analysis with statistical context where applicable
-11. Provide forward-looking strategic recommendations based on historical trends
-12. Do NOT artificially limit the report length - provide complete, exhaustive analysis
-    """
+        system_prompt = load_prompt(
+            "chatbot_financial_report_system.md",
+            frequency=frequency,
+            statement_type_label=statement_type.replace("_", " "),
+        ).strip()
 
     user_prompt_parts = [
         f"Query: {query}",
-        f"\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n{json.dumps(formatted_data, indent=2)}"
+        "\nFinancial Data (JSON format - for historical queries, data is provided as arrays of records):\n"
+        + json.dumps(formatted_data, indent=2),
     ]
-    
+
     if report_mode == "multi-first":
-        # For CASE 2 first request: Create the main report body only
-        user_prompt_parts.append("\n\nProvide a comprehensive and detailed analysis of the financial data. Include the requested sections in a polished, user-facing report format. Keep the output self-contained and ready to be enhanced with news context later.")
+        user_prompt_parts.append(
+            "\n\nProvide a comprehensive and detailed analysis of the financial data. "
+            "Include the requested sections in a polished, user-facing report format. "
+            "Keep the output self-contained and ready to be enhanced with news context later."
+        )
     else:
-        # For CASE 1: Single request with news if available
         if news_context:
-            user_prompt_parts.append(f"\n\n## RECENT NEWS AND MARKET DEVELOPMENTS (PRIMARY ANALYTICAL INPUT)\n\nUse this recent news to contextualize and explain financial metrics. These developments ARE the key drivers behind the observed financial performance:\n\n{news_context}\n\n**INSTRUCTIONS**: \n1. For each major news item, identify its expected financial impact\n2. Correlate news timing with financial metric changes\n3. Assess how news affects risk profile, growth trajectory, and valuation\n4. Explain whether financial results align with news-driven expectations\n5. Use news to project future financial performance and identify leading indicators\n6. Integrate news insights throughout the analysis, not in a separate section")
+            user_prompt_parts.append(
+                "\n\n## RECENT NEWS AND MARKET DEVELOPMENTS (PRIMARY ANALYTICAL INPUT)\n\n"
+                "Use this recent news to contextualize and explain financial metrics. "
+                "These developments ARE the key drivers behind the observed financial performance:\n\n"
+                f"{news_context}\n\n"
+                "**INSTRUCTIONS**: \n"
+                "1. For each major news item, identify its expected financial impact\n"
+                "2. Correlate news timing with financial metric changes\n"
+                "3. Assess how news affects risk profile, growth trajectory, and valuation\n"
+                "4. Explain whether financial results align with news-driven expectations\n"
+                "5. Use news to project future financial performance and identify leading indicators\n"
+                "6. Integrate news insights throughout the analysis, not in a separate section"
+            )
         else:
-            user_prompt_parts.append("\n\nNOTE: No recent news data available for this analysis. Proceed with financial data analysis only.")
-    
+            user_prompt_parts.append(
+                "\n\nNOTE: No recent news data available for this analysis. Proceed with financial data analysis only."
+            )
+
     user_prompt = "\n".join(user_prompt_parts)
     return system_prompt, user_prompt
 
 
-def stream_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str, news_context: Optional[str] = None, report_mode: str = "single") -> Iterator[str]:
-    """Stream answer chunks from the LLM using AzureChatOpenAI streaming.
-    
-    Args:
-        report_mode: "single" for complete report, "multi-first" for main analysis without conclusions
-    """
+# Chat report generation budget — paired with concise prompts so reports finish fully.
+CHAT_REPORT_MAX_TOKENS = 16000
+CHAT_NEWS_IMPACT_MAX_TOKENS = 4000
+
+
+def prepare_chat_prompts(
+    query: str,
+    data: Dict[str, Any],
+    statement_type: str,
+    frequency: str,
+    news_context: Optional[str] = None,
+    report_mode: str = "single",
+) -> tuple[str, str, Any]:
+    """Return (system_prompt, user_prompt, formatted_data) for logging + generation."""
     formatted_data = data
     if isinstance(data, list):
         formatted_data = []
@@ -672,12 +525,54 @@ def stream_answer_from_data(query: str, data: Dict[str, Any], statement_type: st
                 formatted_data.get("publication_date")
             )
 
-    system_prompt, user_prompt = _build_llm_prompts(query, formatted_data, statement_type, frequency, news_context, report_mode=report_mode)
+    system_prompt, user_prompt = _build_llm_prompts(
+        query,
+        formatted_data,
+        statement_type,
+        frequency,
+        news_context,
+        report_mode=report_mode,
+    )
+    return system_prompt, user_prompt, formatted_data
+
+
+def stream_answer_from_data(
+    query: str,
+    data: Dict[str, Any],
+    statement_type: str,
+    frequency: str,
+    news_context: Optional[str] = None,
+    report_mode: str = "single",
+    *,
+    run_name: str = "chatbot_stream_answer",
+    metadata: Optional[dict[str, Any]] = None,
+    max_tokens: int = CHAT_REPORT_MAX_TOKENS,
+) -> Iterator[str]:
+    """Stream answer chunks from the LLM using Foundry ChatOpenAI streaming.
+    
+    Args:
+        report_mode: "single" for complete report, "multi-first" for main analysis without conclusions
+    """
+    system_prompt, user_prompt, _formatted = prepare_chat_prompts(
+        query, data, statement_type, frequency, news_context, report_mode=report_mode
+    )
     llm = _get_llm()
+    config = llm_run_config(
+        run_name,
+        tags=["chatbot", "stream"],
+        metadata={
+            **(metadata or {}),
+            "statement_type": statement_type,
+            "frequency": frequency,
+            "report_mode": report_mode,
+            "max_tokens": max_tokens,
+        },
+    )
 
     for chunk in llm.stream(
         [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
-        max_tokens=8000,
+        max_tokens=max_tokens,
+        config=config,
     ):
         text = _extract_chunk_text(chunk)
         if text:
@@ -811,12 +706,7 @@ def generate_analysis_report(records: List[Dict[str, Any]]) -> Tuple[str, Dict[s
     if truncated:
         data_block += "\n\n*(only the first %d records shown)*" % max_records
 
-    system_prompt = (
-        "You are a professional financial analyst. "
-        "You have been given a table of company financial metrics. "
-        "Produce a concise analysis report in Markdown format. "
-        "Focus on trends, comparisons, outliers, and data quality issues."
-    )
+    system_prompt = load_prompt("chatbot_financial_analyst_simple.md").strip()
 
     user_prompt = (
         "Here is the data to analyze (Markdown table):\n\n" + data_block + "\n\n"
@@ -844,13 +734,25 @@ def generate_analysis_report(records: List[Dict[str, Any]]) -> Tuple[str, Dict[s
         return str(resp).strip()
 
     # Primary call
-    llm_response = _invoke_llm(system_prompt, user_prompt, max_tokens=400)
+    llm_response = _invoke_llm(
+        system_prompt,
+        user_prompt,
+        max_tokens=400,
+        run_name="chatbot_analysis_report",
+        tags=["chatbot", "analysis-report"],
+    )
     report = _get_response_content(llm_response)
     llm_response_dict = _normalize_llm_response(llm_response)
 
     # Retry with smaller output budget if empty
     if not report:
-        retry_response = _invoke_llm(system_prompt, user_prompt, max_tokens=250)
+        retry_response = _invoke_llm(
+            system_prompt,
+            user_prompt,
+            max_tokens=250,
+            run_name="chatbot_analysis_report_retry",
+            tags=["chatbot", "analysis-report"],
+        )
         report = _get_response_content(retry_response)
         if report:
             return report, _normalize_llm_response(retry_response)
@@ -1085,7 +987,7 @@ def _format_period_from_publication_date(publication_date: Optional[str]) -> str
     return pub_str  # Return original if no pattern matched
 
 
-def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str, news_context: Optional[str] = None) -> tuple[str, dict[str, int]]:
+def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: str, frequency: str, news_context: Optional[str] = None, *, conversation_id: Optional[int] = None) -> tuple[str, dict[str, int]]:
     """Use LLM to generate an answer based on the query and fetched data with optional news context.
 
     Returns a tuple of (answer_text, token_usage).
@@ -1109,193 +1011,11 @@ def generate_answer_from_data(query: str, data: Dict[str, Any], statement_type: 
                 formatted_data.get("publication_date")
             )
     
-    system_prompt = f"""
-You are a Senior Financial Analyst and Strategic Advisor preparing comprehensive, institutional-grade financial analysis reports for C-suite executives, board members, institutional investors, and senior financial representatives. Your reports must be rigorous, data-driven, and provide deep strategic insights that inform critical business decisions.
-
-Generate a complete, exhaustive financial analysis report in Markdown format WITHOUT ANY TRUNCATION OR LENGTH RESTRICTIONS. The report should comprehensively analyze ALL available financial data, metrics, parameters, textual information, AND RECENT NEWS PROVIDED in the input - not just a subset.
-
-## CRITICAL: NEWS FEEDS ARE PRIMARY ANALYTICAL INPUT
-You MUST use the provided recent news and market developments as a PRIMARY ANALYTICAL TOOL, not supplementary context. The news feeds are essential for:
-
-1. **Understanding Financial Performance Drivers**: Correlate financial metrics with recent company events. For example:
-   - If news mentions new contracts/partnerships → expect revenue growth
-   - If news mentions cost-cutting initiatives → expect margin improvements
-   - If news mentions acquisitions → expect changes in asset base and profitability
-   - If news mentions regulatory issues → assess financial impact and risk
-
-2. **Identifying Trends and Inflection Points**: Use news to explain acceleration/deceleration in financial metrics across periods
-
-3. **Risk Assessment**: News about lawsuits, investigations, regulatory probes, leadership changes, or market disruptions directly impact financial risk profile
-
-4. **Forward-Looking Insights**: News about strategic initiatives, R&D investments, market expansion, and technology adoption inform growth trajectory
-
-5. **Valuation Context**: Recent developments provide context for P/E multiples, market positioning, and competitive advantage sustainability
-
-### MANDATORY News Integration Requirements:
-- **Executive Summary**: Lead with key news developments and their financial implications
-- **Company Overview**: Use news to explain business model changes and strategic pivots
-- **Strategic Context**: Analyze how recent news shapes competitive positioning
-- **Performance Analysis**: For each metric trend, explain whether news provides supporting context
-- **Risk Assessment**: Prominently feature risks identified in recent news
-- **Strategic Implications**: Ground recommendations in recent developments and their impact
-- **Forward Outlook**: Use news to project future financial trajectory
-
-PROMINENTLY FEATURE news-based insights throughout the report. Explain explicit causal relationships between recent developments and observed financial performance. Do not relegates news to a separate section—integrate it deeply into every analytical dimension.
-
-## CRITICAL: TEXTUAL INFORMATION AND NOTES
-The provided data includes TEXTUAL INFORMATION sections with financial notes, auditor remarks, management commentary, qualification statements, and other narrative disclosures. These are ESSENTIAL to include in your analysis as they provide critical context for understanding:
-- Audit qualifications or modifications to audit opinions
-- Management disclosure notes explaining financial performance
-- Regulatory compliance information
-- Special circumstances affecting financial results
-- Risk disclosures and material contingencies
-- Related party transaction disclosures
-- Any caveats or limitations on financial results
-
-Extract and prominently feature ALL textual information and narrative disclosures in your analysis. Do not omit or minimize these contextual notes - they are often more important than raw numbers.
-
-Extract and analyze every relevant financial metric, trend, ratio, and insight from the complete dataset. Do not limit analysis to predefined metrics - dynamically identify and analyze all key financial indicators present in the data. Include all footnotes, explanations, and textual annotations.
-
-The report should be extremely detailed and thorough, suitable for board-level strategic discussions, investment committee reviews, and executive decision-making. LENGTH IS NOT A CONSTRAINT - provide exhaustive, complete analysis without any truncation.
-
-# Comprehensive Financial Analysis Report
-
-## I. Executive Summary
-Provide a comprehensive executive overview synthesizing key findings across all periods and companies:
-- Strategic financial performance highlights and trajectory
-- Critical profitability, efficiency, and growth metrics
-- Major risk indicators and opportunities
-- Strategic implications for business direction and governance
-- Key recommendations for immediate executive attention
-- Material qualifications, audit findings, or management disclosures
-
-## II. Company Overview and Strategic Context
-For each company analyzed:
-- Business model and industry positioning
-- Strategic objectives and market dynamics
-- Key value drivers and competitive advantages
-- Regulatory and macroeconomic context implications
-- Any material management disclosures or special circumstances
-
-## III. Comprehensive Financial Performance Analysis
-Conduct exhaustive period-by-period and cross-company analysis of ALL financial metrics available:
-
-### Revenue Analysis
-- Detailed revenue composition and sources
-- Revenue growth drivers and sustainability
-- Geographic and segment revenue breakdown (if available)
-- Revenue quality indicators and recurring vs. one-time components
-- Management commentary on revenue performance
-
-### Profitability Deep Dive
-- Operating profit margins: Trends, drivers, and sustainability
-- Net profit margins: Components and influencing factors
-- EBITDA margins and operating efficiency metrics
-- Gross margins by business segment or product line
-- Margin drivers and sustainability factors
-- Management notes on profitability
-
-### Cost Structure Analysis
-- Detailed cost breakdown: Fixed vs. variable costs
-- Major expense categories: Personnel, R&D, marketing, administrative
-- Cost optimization opportunities and efficiency trends
-- Cost-to-revenue ratios and benchmarking
-- Root causes of cost variations
-
-### Balance Sheet Analysis
-- Asset quality and composition
-- Liability structure and debt management
-- Working capital efficiency and cash conversion cycles
-- Capital structure optimization and financial leverage
-- Management commentary on balance sheet changes
-
-### Cash Flow Analysis
-- Operating cash flow generation and quality
-- Investment and financing cash flows
-- Free cash flow trends and utilization
-- Cash flow forecasting implications
-- Conversion efficiency from profit to cash
-
-### Key Financial Ratios and Metrics
-- Liquidity ratios: Current ratio, quick ratio, cash ratios
-- Solvency ratios: Debt-to-equity, debt-to-assets, interest coverage
-- Efficiency ratios: Asset turnover, inventory turnover, receivables days
-- Profitability ratios: ROA, ROE, ROCE, EPS trends
-- Valuation metrics and peer benchmarking
-
-## IV. Audit Findings, Qualifications & Management Disclosures
-CRITICAL SECTION - Include ALL:
-- Audit opinion qualifications or modifications
-- Auditor reservations or concerns
-- Management commentary on audit findings
-- Going concern assessments
-- Related party transactions and related management disclosures
-- Material contingencies or uncertain liabilities
-- Regulatory compliance matters
-- Any other material management notes or explanations
-
-## V. Trend Analysis and Forecasting Insights
-- Multi-period trend analysis with statistical significance
-- Growth acceleration/deceleration patterns
-- Cyclical vs. structural performance changes
-- Forward-looking indicators from historical trends
-- Sustainability of observed trends
-
-## VI. Comparative Analysis
-- Peer group comparisons across all metrics
-- Industry benchmarking and positioning
-- Competitive advantages and disadvantages
-- Market share and growth relative to peers
-- Relative financial health assessment
-
-## VII. Risk Assessment and Mitigation
-- Financial risk factors: Liquidity, solvency, currency, interest rate
-- Operational risks: Cost pressures, margin compression, supply chain
-- Market risks: Competition, demand fluctuations, regulatory changes
-- Strategic risks: Market positioning, technology disruption, M&A implications
-- Quantitative risk metrics and stress testing insights
-- Disclosed management concerns and risk factors
-
-## VIII. Strategic Implications and Recommendations
-- Strategic opportunities identified from financial trends
-- Areas requiring management intervention
-- Capital allocation recommendations
-- Risk mitigation strategies
-- Governance and compliance considerations
-- Long-term value creation strategies
-
-## IX. Data Quality and Limitations
-- Assessment of data completeness and reliability
-- Missing data impacts on analysis
-- Assumptions and estimation methodologies used
-- Audit qualifications or any hedges on financial reliability
-- Recommendations for improved financial reporting
-
-## X. Appendices
-- Detailed financial statements and schedules
-- Ratio calculations and trend charts
-- Peer comparison tables
-- Statistical analysis and regression insights
-- Complete text of all management disclosures and audit findings
-
----
-
-**Analysis Parameters:** {frequency} financial statements | Focus: {statement_type.replace('_', ' ')} | Data Scope: EXHAUSTIVE analysis of ALL available financial parameters and narrative disclosures
-
-**CRITICAL REQUIREMENTS:**
-1. Analyze EVERY financial metric, parameter, and textual information present - DO NOT OMIT ANYTHING
-2. PROMINENTLY FEATURE all audit findings, qualifications, management notes, and disclosures
-3. Provide exhaustive, board-level analysis with strategic implications - NO TRUNCATION
-4. Use precise numerical references with proper formatting (INR crores/lakhs, percentages, ratios)
-5. Identify trends, drivers, risks, and opportunities across ALL data dimensions
-6. Maintain professional, executive-level tone suitable for C-suite and board presentations
-7. Include ALL contextual information from textual sections - do not minimize or omit
-8. Generate actionable insights that drive strategic decision-making
-9. Structure report for easy navigation while maintaining complete depth
-10. Include quantitative analysis with statistical context where applicable
-11. Provide forward-looking strategic recommendations based on historical trends
-12. Do NOT artificially limit the report length - provide complete, exhaustive analysis
-    """
+    system_prompt = load_prompt(
+        "chatbot_financial_report_system.md",
+        frequency=frequency,
+        statement_type_label=statement_type.replace("_", " "),
+    ).strip()
 
     # Build user prompt with financial data and optional news context
     user_prompt_parts = [
@@ -1311,7 +1031,19 @@ CRITICAL SECTION - Include ALL:
     
     user_prompt = "\n".join(user_prompt_parts)
 
-    response = _invoke_llm(system_prompt, user_prompt, max_tokens=8000)
+    response = _invoke_llm(
+        system_prompt,
+        user_prompt,
+        max_tokens=CHAT_REPORT_MAX_TOKENS,
+        run_name="chatbot_generate_answer",
+        tags=["chatbot", "answer"],
+        metadata={
+            "conversation_id": conversation_id,
+            "statement_type": statement_type,
+            "frequency": frequency,
+            "has_news_context": bool(news_context),
+        },
+    )
 
     token_usage = _extract_token_usage(response)
     normalized = _normalize_llm_response(response)

@@ -17,6 +17,7 @@ from googlenewsdecoder import gnewsdecoder
 from services.analysis_service import _get_llm
 from services.news_service import get_company_domains, is_trusted_source_url, BLACKLIST
 from langchain_core.messages import HumanMessage
+from utils.langsmith_tracing import llm_run_config
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -425,7 +426,12 @@ Content:
 {body}
 """
         try:
-            response = llm.invoke([HumanMessage(content=prompt)])
+            config = llm_run_config(
+                "news_scraper_summary",
+                tags=["news", "summary"],
+                metadata={"company_name": company_name},
+            )
+            response = llm.invoke([HumanMessage(content=prompt)], config=config)
             return response.content
         except Exception as e:
             return f"Error generating summary: {str(e)}"

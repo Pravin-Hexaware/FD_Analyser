@@ -9,6 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from config.settings import COMPANY_METADATA_CSV
 
 from repositories.sqlite_repository import SqliteRepository
+from repositories.xbrl_repository import update_metrics_json
 from services.batch_xbrl_finder import (
     check_bse_landing_site_health,
     create_browser_and_context,
@@ -23,6 +24,7 @@ from services.heal_service import (
     is_heal_in_progress,
 )
 from services.logging_service import logging_service
+from services.xbrl_file_store import read_xbrl_raw, save_xbrl_raw
 from automation.results_portal import SiteHealth, WEBSITE_DOWN_DETAIL, is_site_down
 
 # Heal pipeline (analysis + DOM + up to 5 codegen/harness attempts) can take 15–25 min.
@@ -76,7 +78,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
             if not scrip_code:
                 continue
             try:
-                if repo.xbrl_filing_recent(scrip_code, days=10):
+                if await repo.xbrl_filing_recent(scrip_code, days=10):
                     continue
                 start_idx = idx
                 break
@@ -118,7 +120,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
                             continue
 
                         # Check if company already has XBRL filings in database
-                        if repo.get_xbrl_filings_count(scrip_code) > 0:
+                        if await repo.get_xbrl_filings_count(scrip_code) > 0:
                             await websocket.send_json({
                                 "idx": idx,
                                 "scrip_code": scrip_code,
@@ -131,8 +133,8 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
                         try:
                             async with asyncio.timeout(HEAL_AWARE_PER_COMPANY_TIMEOUT_S):
                                 # Ensure company exists; if already present, keep it as-is
-                                if not repo.company_exists(scrip_code):
-                                    repo.upsert_company(
+                                if not await repo.company_exists(scrip_code):
+                                    await repo.upsert_company(
                                     company_name=name,
                                     symbol=symbol,
                                     scrip_code=scrip_code,
@@ -162,16 +164,18 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
                             q_id = None
                             q_stored = False
                             if q_url:
-                                if repo.xbrl_filing_exists(scrip_code, q_url, report_type="quarterly"):
+                                if await repo.xbrl_filing_exists(scrip_code, q_url, report_type="std", publication_date=q_period):
                                     q_stored = True
-                                    q_id = repo.get_xbrl_filing_id(scrip_code, q_url, report_type="quarterly")
+                                    q_id = await repo.get_xbrl_filing_id(scrip_code, q_url, report_type="std")
                                 else:
-                                    q_id = repo.insert_xbrl_filing(
+                                    q_id = await repo.insert_xbrl_filing(
                                         scrip_code=scrip_code,
                                         symbol=symbol,
                                         xbrl_link=q_url,
                                         publication_date=q_period,
-                                        report_type="quarterly",
+                                        report_type="std",
+                                        category="std",
+                                        period=q_period,
                                     )
                                     q_stored = True
 
@@ -179,7 +183,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
                                     "idx": idx,
                                     "scrip_code": scrip_code,
                                     "symbol": symbol,
-                                    "report_type": "quarterly",
+                                    "report_type": "std",
                                     "period": q_period,
                                     "url": q_url,
                                     "id": q_id,
@@ -191,16 +195,18 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
                             a_id = None
                             a_stored = False
                             if a_url:
-                                if repo.xbrl_filing_exists(scrip_code, a_url, report_type="annual"):
+                                if await repo.xbrl_filing_exists(scrip_code, a_url, report_type="std", publication_date=a_period):
                                     a_stored = True
-                                    a_id = repo.get_xbrl_filing_id(scrip_code, a_url, report_type="annual")
+                                    a_id = await repo.get_xbrl_filing_id(scrip_code, a_url, report_type="std")
                                 else:
-                                    a_id = repo.insert_xbrl_filing(
+                                    a_id = await repo.insert_xbrl_filing(
                                         scrip_code=scrip_code,
                                         symbol=symbol,
                                         xbrl_link=a_url,
                                         publication_date=a_period,
-                                        report_type="annual",
+                                        report_type="std",
+                                        category="std",
+                                        period=a_period,
                                     )
                                     a_stored = True
 
@@ -208,7 +214,7 @@ async def websocket_xbrl_fetch(websocket: WebSocket) -> None:
                                     "idx": idx,
                                     "scrip_code": scrip_code,
                                     "symbol": symbol,
-                                    "report_type": "annual",
+                                    "report_type": "std",
                                     "period": a_period,
                                     "url": a_url,
                                     "id": a_id,
@@ -278,17 +284,17 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
     try:
         await websocket.send_json({"status": "starting"})
 
-        # Get filings with company name and raw content
-        filings = repo.get_xbrl_filings_with_company_and_content()
+        # Get filings with company info (raw content lives on disk via xbrl_file_store)
+        filings = await repo.get_xbrl_filings_with_company_and_content()
         await websocket.send_json({"status": "found_filings", "count": len(filings)})
 
         for idx, f in enumerate(filings, start=1):
             scrip_code = f.get("scrip_code")
             company_name = f.get("company_name") or "Unknown Company"
             xbrl_link = f.get("xbrl_link")
-            publication_date = str(f.get("publication_date") or "").strip()
-            db_report_type = str(f.get("report_type") or "").strip().lower()
-            raw_content = f.get("raw_content")
+            publication_date = str(f.get("publication_date") or f.get("period") or "").strip()
+            db_report_type = str(f.get("category") or f.get("report_type") or "").strip().lower()
+            category = db_report_type if db_report_type in ("std", "con") else "std"
 
             await websocket.send_json({
                 "idx": idx,
@@ -301,12 +307,12 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
             })
             await asyncio.sleep(0)
 
-            # Apply filtering conditions
-            if db_report_type != "std":
+            # Apply filtering conditions — extract both standalone and consolidated
+            if category not in ("std", "con"):
                 await websocket.send_json({
                     "idx": idx,
                     "status": "skipped",
-                    "reason": f"report_type is '{db_report_type}', not 'std'",
+                    "reason": f"category is '{db_report_type}', not std/con",
                 })
                 await asyncio.sleep(0)
                 continue
@@ -357,7 +363,7 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
             await asyncio.sleep(0)
 
             # Check if already extracted
-            if repo.xbrl_extraction_exists(scrip_code, xbrl_link, extraction_type):
+            if await repo.xbrl_extraction_exists(scrip_code, xbrl_link, extraction_type):
                 await websocket.send_json({
                     "idx": idx,
                     "scrip_code": scrip_code,
@@ -367,12 +373,15 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                 await asyncio.sleep(0)
                 continue
 
-            # Check if raw_content exists
+            # Read raw content from file store (not DB)
+            raw_content = read_xbrl_raw(
+                scrip_code, category, publication_date, url=xbrl_link or ""
+            )
             if not raw_content:
                 await websocket.send_json({
                     "idx": idx,
                     "status": "skipped",
-                    "reason": "no raw_content available",
+                    "reason": "no raw_content available on disk",
                 })
                 await asyncio.sleep(0)
                 continue
@@ -404,7 +413,7 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
 
                     parsed_json = html_dom_to_structured_json_from_content(raw_bytes)
                 else:
-                    # XML content stored in raw_content
+                    # XML content from file store
                     await websocket.send_json({
                         "idx": idx,
                         "status": "parsing_xml",
@@ -416,24 +425,47 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
 
                 parsed_json_str = json.dumps(parsed_json, ensure_ascii=False, separators=(',', ':'))
 
+                await update_metrics_json(
+                    scrip_code=scrip_code,
+                    period=publication_date,
+                    category=category,
+                    metrics_json=parsed_json_str,
+                )
+
+                flat_metrics = None
+                try:
+                    from services.xbrl_metrics_service import calculate_metrics, calculate_metrics_fourd, convert_xml_grouped_to_list
+                    if isinstance(parsed_json, list):
+                        flat_metrics = calculate_metrics_fourd(parsed_json)
+                    elif isinstance(parsed_json, dict) and not is_html_content:
+                        as_list = convert_xml_grouped_to_list(parsed_json) if callable(convert_xml_grouped_to_list) else None
+                        if as_list:
+                            flat_metrics = calculate_metrics_fourd(as_list)
+                except Exception as metrics_err:
+                    print(f"[extract] metrics compute skipped: {metrics_err}")
+
                 # Store in appropriate table
                 if extraction_type == "quarterly":
-                    repo.insert_quarterly_extraction(
+                    await repo.insert_quarterly_extraction(
                         scrip_code=scrip_code,
                         company_name=company_name,
                         xbrl_link=xbrl_link,
                         publication_date=publication_date,
-                        report_type=db_report_type,
+                        report_type=category,
+                        category=category,
                         parsed_json=parsed_json_str,
+                        flat=flat_metrics,
                     )
                 else:  # annual
-                    repo.insert_annual_extraction(
+                    await repo.insert_annual_extraction(
                         scrip_code=scrip_code,
                         company_name=company_name,
                         xbrl_link=xbrl_link,
                         publication_date=publication_date,
-                        report_type=db_report_type,
+                        report_type=category,
+                        category=category,
                         parsed_json=parsed_json_str,
+                        flat=flat_metrics,
                     )
 
                 await websocket.send_json({
@@ -442,7 +474,7 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                     "company_name": company_name,
                     "status": "stored",
                     "extraction_type": extraction_type,
-                    "message": f"Parsed JSON stored in {extraction_type}_extractions table",
+                    "message": f"Parsed JSON stored in XBRL_Data + {extraction_type} metrics",
                 })
                 await asyncio.sleep(0)
 
@@ -545,7 +577,7 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                 if not scrip_code:
                     continue
                 try:
-                    if repo.xbrl_filing_recent(scrip_code, days=50):
+                    if await repo.xbrl_filing_recent(scrip_code, days=50):
                         continue
                     start_idx = idx
                     break
@@ -645,8 +677,8 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                             try:
                                 async with asyncio.timeout(per_company_timeout):
                                     # Ensure company exists; if already present, keep it as-is
-                                    if not repo.company_exists(scrip_code):
-                                        repo.upsert_company(
+                                    if not await repo.company_exists(scrip_code):
+                                        await repo.upsert_company(
                                             company_name=name,
                                             symbol=symbol,
                                             scrip_code=scrip_code,
@@ -664,7 +696,7 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
 
                                     # Prepare existing period/url lookup once to prevent repeated DB scans
                                     # Using (publication_date, xbrl_link) key allows O(1) lookup instead of DB queries
-                                    existing_filings = repo.get_xbrl_filings(scrip_code)
+                                    existing_filings = await repo.get_xbrl_filings(scrip_code)
                                     existing_map = {
                                         (f.get('publication_date'), f.get('xbrl_link')): f.get('id')
                                         for f in existing_filings
@@ -749,7 +781,7 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
 
                                         if _industry and _industry.strip():
                                             industry = _industry.strip()
-                                            repo.upsert_company(
+                                            await repo.upsert_company(
                                                 company_name=name,
                                                 symbol=symbol,
                                                 scrip_code=scrip_code,
@@ -773,13 +805,24 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                             continue
 
                                         try:
-                                            filing_id = repo.insert_xbrl_filing(
+                                            category = (xbrl_type or "std").strip().lower()
+                                            if category not in ("std", "con"):
+                                                category = "std"
+                                            save_xbrl_raw(
+                                                scrip_code,
+                                                category,
+                                                period,
+                                                raw_content,
+                                                url,
+                                            )
+                                            filing_id = await repo.insert_xbrl_filing(
                                                 scrip_code=scrip_code,
                                                 symbol=symbol,
                                                 xbrl_link=url,
                                                 publication_date=period,
-                                                report_type=xbrl_type,
-                                                raw_content=raw_content,
+                                                report_type=category,
+                                                category=category,
+                                                period=period,
                                             )
                                             stored = True
                                         except Exception as insert_error:

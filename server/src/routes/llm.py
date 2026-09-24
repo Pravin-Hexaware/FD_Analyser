@@ -613,7 +613,7 @@ def _interpret_time_window(period: str, time_horizon: str, frequency: str) -> tu
     return latest_only, last_n_years, period_filter, limit_records
 
 
-def _fetch_company_data(
+async def _fetch_company_data(
     repo: SqliteRepository,
     scrip_code: str,
     frequency: str,
@@ -633,7 +633,7 @@ def _fetch_company_data(
         quarterly_limit = max(limit_records, last_n_years * 4)
 
     if frequency == "both":
-        annual_results = repo.get_extraction_records(
+        annual_results = await repo.get_extraction_records(
             scrip_code,
             "annual",
             period=period_filter,
@@ -641,7 +641,7 @@ def _fetch_company_data(
             latest_only=latest_only,
             limit=annual_limit,
         )
-        quarterly_results = repo.get_extraction_records(
+        quarterly_results = await repo.get_extraction_records(
             scrip_code,
             "quarterly",
             period=period_filter,
@@ -659,11 +659,11 @@ def _fetch_company_data(
         results = []
 
         if latest_only and not requires_historical and last_n_years is None:
-            latest_record = repo.get_latest_extraction(scrip_code, extraction_type)
+            latest_record = await repo.get_latest_extraction(scrip_code, extraction_type)
             if latest_record:
                 results = [latest_record]
         else:
-            results = repo.get_extraction_records(
+            results = await repo.get_extraction_records(
                 scrip_code,
                 extraction_type,
                 period=period_filter,
@@ -673,7 +673,7 @@ def _fetch_company_data(
             )
 
         if not results and not latest_only:
-            latest_record = repo.get_latest_extraction(scrip_code, extraction_type)
+            latest_record = await repo.get_latest_extraction(scrip_code, extraction_type)
             if latest_record:
                 results = [latest_record]
 
@@ -694,17 +694,17 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Create or validate conversation
         if request.conversation_id is None:
-            conversation_id = repo.create_conversation()
+            conversation_id = await repo.create_conversation()
         else:
             conversation_id = request.conversation_id
-            if not repo.conversation_exists(conversation_id):
+            if not await repo.conversation_exists(conversation_id):
                 repo.close()
                 raise HTTPException(status_code=404, detail="Conversation not found")
 
         chat_id = str(conversation_id)
 
         # Save the incoming user message inside the conversation
-        repo.save_message(conversation_id, "user", request.query)
+        await repo.save_message(conversation_id, "user", request.query)
 
         # Initialize log variables
         user_query = request.query
@@ -721,30 +721,27 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
             conversation_id=conversation_id,
             request_id=f"req-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
         )
-        chat_logger = logging_service.create_chat_log(request.query, conversation_id=conversation_id)
         logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies")
-        chat_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies")
         print("Step 1: Parsing user query with NLP (no LLM)")
         progress_messages.append({
             "stage": "Extracting user intent",
             "timestamp": datetime.now().isoformat()
         })
         
-        parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(request.query)
+        parsed, initial_llm_prompt, peer_extraction_log = await parse_query_and_get_companies(request.query)
         logger.log_nlp_breakdown({
             "intent": parsed.get("intent", {}),
             "entities": parsed.get("target_companies", {}),
             "keywords": parsed.get("keywords", []),
             "classification": parsed.get("classification") or parsed.get("query_classification"),
         })
-        chat_logger.log_nlp_breakdown(parsed)
         print("1st NLP extraction returned:", parsed)
 
         # Store initial LLM interaction for logging
         initial_llm_response = json.dumps(parsed)
 
         # Log Step 1 - Query parsing
-        repo.save_detailed_log(
+        await repo.save_detailed_log(
             chat_id=chat_id,
             step_name="Query Parsing",
             input_data=json.dumps({"user_query": request.query}),
@@ -781,7 +778,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         })
 
         if invalid_companies:
-            repo.save_detailed_log(
+            await repo.save_detailed_log(
                 chat_id=chat_id,
                 step_name="Validation",
                 input_data=json.dumps({
@@ -794,10 +791,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 })
             )
             answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
-            chat_logger.log_event("llm_response", response=answer, token_usage={})
-            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
-            repo.save_message(conversation_id, "llm", answer)
-            chat_logger.log_event("llm_response", response=answer, token_usage={})
+            await repo.save_message(conversation_id, "llm", answer)
             repo.close()
             return {
                 "chat_id": chat_id,
@@ -836,7 +830,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 print(f"Symbol mismatch for {company_name}: parsed symbol '{validation_info['parsed_symbol']}' did not match Validation.csv; using scrip code {resolved_scrip_code}")
 
             start_time = datetime.now()
-            data = _fetch_company_data(repo, resolved_scrip_code, frequency, statement_type, period, time_horizon, request.query)
+            data = await _fetch_company_data(repo, resolved_scrip_code, frequency, statement_type, period, time_horizon, request.query)
             elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
             logger.log_database_operation(
                 operation="fetch_company_data",
@@ -882,7 +876,7 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                     peer_name = peer.get("company", p_key)
                     if p_scrip:
                         start_time = datetime.now()
-                        p_data = _fetch_company_data(repo, p_scrip, frequency, statement_type, period, time_horizon, request.query)
+                        p_data = await _fetch_company_data(repo, p_scrip, frequency, statement_type, period, time_horizon, request.query)
                         elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
                         logger.log_database_operation(
                             operation="fetch_peer_data",
@@ -921,10 +915,9 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Store DB fetched data for logging
         db_fetched_data = db_fetch_log
-        chat_logger.log_event("database_data", data=db_fetched_data)
 
         # Log Step 2 - Database fetching
-        repo.save_detailed_log(
+        await repo.save_detailed_log(
             chat_id=chat_id,
             step_name="Database Fetch",
             input_data=json.dumps({
@@ -951,10 +944,10 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
                 background_note = "Background XBRL fetch has been scheduled. Data will be extracted once available."
 
             # Save assistant message
-            repo.save_message(conversation_id, "llm", answer)
+            await repo.save_message(conversation_id, "llm", answer)
 
             # Log that no data was found
-            repo.save_detailed_log(
+            await repo.save_detailed_log(
                 chat_id=chat_id,
                 step_name="No Data Available",
                 input_data=json.dumps({
@@ -1080,19 +1073,13 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         
         # Combine all news context
         news_context = "\n".join(news_context_parts) if news_context_parts else None
-        chat_logger.log_news_processing(
-            status="completed",
-            companies=all_companies_to_fetch_news,
-            details=news_fetch_log,
-            news_context=news_context,
-        )
         
         print(f"News context compiled: {news_context is not None}")
         if news_context:
             print(f"News context length: {len(news_context)}")
         
         # Log Step 2.5 - News fetching
-        repo.save_detailed_log(
+        await repo.save_detailed_log(
             chat_id=chat_id,
             step_name="News Fetch",
             input_data=json.dumps({
@@ -1120,20 +1107,6 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         final_llm_prompt = get_actual_final_prompt(request.query, all_data, statement_type, frequency)
 
-        exact_system_prompt, exact_user_prompt = _build_llm_prompts(
-            request.query,
-            all_data,
-            statement_type,
-            frequency,
-            news_context=news_context,
-        )
-        chat_logger.log_event(
-            "llm_prompt",
-            system_prompt=exact_system_prompt,
-            user_prompt=exact_user_prompt,
-            data=all_data,
-        )
-
         # Store data passed to LLM for logging
         data_passed_to_llm = all_data
 
@@ -1151,13 +1124,12 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         # Store final LLM response for logging
         final_llm_response = answer
-        chat_logger.log_event("llm_response", response=answer, token_usage=tokens_used)
 
         # Save assistant message inside the same conversation
-        repo.save_message(conversation_id, "llm", answer)
+        await repo.save_message(conversation_id, "llm", answer)
 
         # Log Step 3 - EXACT LLM input and output
-        repo.save_detailed_log(
+        await repo.save_detailed_log(
             chat_id=chat_id,
             step_name="Answer Generation (LLM)",
             input_data=json.dumps({
@@ -1177,7 +1149,6 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
 
         logger.log_report("phase_1", answer)
         logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0)
-        chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage=tokens_used)
         repo.close()
 
         # Write comprehensive log to file
@@ -1201,13 +1172,9 @@ async def llm_target_companies(request: LLMQueryRequest, background_tasks: Backg
         }
 
     except HTTPException:
-        if "chat_logger" in locals():
-            chat_logger.log_event("request_end", status="http_error")
         raise
     except Exception as e:
         print("Error:", str(e))
-        if "chat_logger" in locals():
-            chat_logger.log_error("chat_request", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1231,16 +1198,14 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
 
         # Create or validate conversation
         if conversation_id is None:
-            conversation_id = repo.create_conversation()
+            conversation_id = await repo.create_conversation()
         else:
-            if not repo.conversation_exists(conversation_id):
+            if not await repo.conversation_exists(conversation_id):
                 repo.close()
                 raise HTTPException(status_code=404, detail="Conversation not found")
 
         chat_id = str(conversation_id)
-        repo.save_message(conversation_id, "user", query)
-        chat_logger = logging_service.create_chat_log(query, conversation_id=conversation_id)
-        chat_logger.log_phase("request_start", "started", endpoint="/api/llm/target_companies/stream")
+        await repo.save_message(conversation_id, "user", query)
 
         chatbot_logger = logging_service.create_chatbot_logger(
             query,
@@ -1273,7 +1238,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             "timestamp": datetime.now().isoformat()
         })
 
-        parsed, initial_llm_prompt, peer_extraction_log = parse_query_and_get_companies(query)
+        parsed, initial_llm_prompt, peer_extraction_log = await parse_query_and_get_companies(query)
         chatbot_logger.log_nlp_breakdown({
             "intent": parsed.get("intent", {}),
             "entities": parsed.get("target_companies", {}),
@@ -1309,10 +1274,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                 invalid_companies.append(company_name)
 
         if invalid_companies:
-            answer = f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."
-            chat_logger.log_event("llm_response", response=answer, token_usage={})
-            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
-            repo.save_message(conversation_id, "llm", f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company.")
+            await repo.save_message(conversation_id, "llm", f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company.")
             repo.close()
             return StreamingResponse(
                 iter([_format_sse_event("message", f"Invalid company name(s): {', '.join(invalid_companies)}. Please try a different company."), _format_sse_event("done", "true")]),
@@ -1334,7 +1296,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             resolved_scrip_code = validation_info["resolved_scrip_code"]
             company["scrip_code"] = resolved_scrip_code
 
-            data = _fetch_company_data(repo, resolved_scrip_code, frequency, statement_type, period, time_horizon, query)
+            data = await _fetch_company_data(repo, resolved_scrip_code, frequency, statement_type, period, time_horizon, query)
             all_data[company_name] = data
             if not data:
                 missing_key = (company_name, resolved_scrip_code, frequency, period, time_horizon, False)
@@ -1360,7 +1322,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                     p_scrip = peer.get("scrip_code")
                     peer_name = peer.get("company", p_key)
                     if p_scrip:
-                        p_data = _fetch_company_data(repo, p_scrip, frequency, statement_type, period, time_horizon, query)
+                        p_data = await _fetch_company_data(repo, p_scrip, frequency, statement_type, period, time_horizon, query)
                         all_data[peer_name] = p_data
                         if not p_data:
                             missing_key = (peer_name, p_scrip, frequency, period, time_horizon, True)
@@ -1380,8 +1342,6 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                                 tracked_missing.add(missing_key)
                                 missing_processing_scheduled = True
 
-                chat_logger.log_event("database_data", data=all_data)
-
         has_data = bool(all_data) and any(all_data.values())
         chat_log.set_db_data(all_data)
 
@@ -1391,9 +1351,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             )
             chat_log.note("No DB data available; LLM skipped")
             chat_log.write()
-            repo.save_message(conversation_id, "llm", answer)
-            chat_logger.log_report("no_data", answer)
-            chat_logger.finalize(total_execution_time_ms=0, api_time_ms=0, db_time_ms=0, token_usage={})
+            await repo.save_message(conversation_id, "llm", answer)
             repo.close()
             return StreamingResponse(
                 iter([_format_sse_event("message", answer), _format_sse_event("done", "true")]),
@@ -1448,20 +1406,6 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                         news_context_parts.append(f"\n### {company_name} - Recent News\n{markdown_news}")
 
             news_context = "\n".join(news_context_parts) if news_context_parts else None
-            chat_logger.log_news_processing(
-                status="context_ready",
-                news_context=news_context,
-            )
-            exact_system_prompt, exact_user_prompt = _build_llm_prompts(
-                query, all_data, statement_type, frequency, news_context=news_context
-            )
-            chat_logger.log_event(
-                "llm_prompt",
-                phase="full_report_stream",
-                system_prompt=exact_system_prompt,
-                user_prompt=exact_user_prompt,
-                data=all_data,
-            )
 
             system_prompt, user_prompt, _ = prepare_chat_prompts(
                 query, all_data, statement_type, frequency, news_context=news_context, report_mode="single"
@@ -1475,7 +1419,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             )
 
             # Generate and stream full report with news
-            def event_generator_case1() -> Iterator[bytes]:
+            async def event_generator_case1() -> AsyncIterator[bytes]:
                 metadata = {"chat_id": chat_id, "conversation_id": conversation_id}
                 yield _format_sse_event("metadata", json.dumps(metadata))
 
@@ -1501,7 +1445,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
                         chat_log.set_phase2(response="(single-pass report; phase 2 not used)")
                         log_path = chat_log.write()
                         _log(f"Chat session log written: {log_path}", request_logger=chatbot_logger)
-                        repo.save_message(conversation_id, "llm", answer)
+                        await repo.save_message(conversation_id, "llm", answer)
                         chatbot_logger.log_report("case1", answer)
                         repo.close()
                     except Exception as e:
@@ -1589,22 +1533,6 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             finally:
                 report_queue.put(None)
 
-        fast_system_prompt, fast_user_prompt = _build_llm_prompts(
-            query,
-            all_data,
-            statement_type,
-            frequency,
-            news_context=None,
-            report_mode="multi-first",
-        )
-        chat_logger.log_event(
-            "llm_prompt",
-            phase="fast_report_stream",
-            system_prompt=fast_system_prompt,
-            user_prompt=fast_user_prompt,
-            data=all_data,
-        )
-
         async def event_generator_case2() -> AsyncIterator[bytes]:
             """Event generator for CASE 2: Fast path + background news collection."""
             metadata = {"chat_id": chat_id, "conversation_id": conversation_id}
@@ -1691,7 +1619,7 @@ async def stream_llm_target_companies(query: str, background_tasks: BackgroundTa
             try:
                 log_path = chat_log.write()
                 _log(f"Chat session log written: {log_path}", request_logger=chatbot_logger)
-                repo.save_message(conversation_id, "llm", complete_report)
+                await repo.save_message(conversation_id, "llm", complete_report)
                 chatbot_logger.log_report("case2", complete_report)
             except Exception as e:
                 _log(f"[ERROR] Failed to save complete report: {e}", request_logger=chatbot_logger)
@@ -1724,7 +1652,7 @@ async def get_chat_history():
     """Get all chat conversations."""
     try:
         repo = SqliteRepository()
-        chats = repo.get_conversation_list()
+        chats = await repo.get_conversation_list()
         repo.close()
 
         return [
@@ -1749,12 +1677,12 @@ async def get_chat(chat_id: str):
     try:
         conversation_id = int(chat_id)
         repo = SqliteRepository()
-        if not repo.conversation_exists(conversation_id):
+        if not await repo.conversation_exists(conversation_id):
             repo.close()
             raise HTTPException(status_code=404, detail="Chat not found")
 
-        conversation = repo.get_conversation(conversation_id)
-        messages = repo.get_conversation_messages(conversation_id)
+        conversation = await repo.get_conversation(conversation_id)
+        messages = await repo.get_conversation_messages(conversation_id)
         repo.close()
 
         title = "Chat"
@@ -1798,7 +1726,7 @@ async def delete_unknown_sector_companies():
     """
     try:
         repo = SqliteRepository()
-        deleted_count = repo.delete_companies_by_sector("")
+        deleted_count = await repo.delete_companies_by_sector("")
         repo.close()
         return {"message": f"Successfully deleted {deleted_count} companies with 'Unknown Sector'."}
     except Exception as e:

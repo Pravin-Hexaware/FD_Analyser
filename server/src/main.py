@@ -15,6 +15,7 @@ configure_langsmith()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
 from routes.companies import router as companies_router
 from routes.llm import router as llm_router
@@ -25,13 +26,61 @@ from routes.heal_demo import router as heal_demo_router
 from services.analysis_service import initialize_llm
 from services.logging_service import logging_service
 from utils.llm_testing import get_llm_provider_name
+from db.lifespan import init_db, close_db
 import importlib
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 import socket
 
-app = FastAPI(title="Financial Data Extractor API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    host = socket.gethostbyname(socket.gethostname())
+    logging_service.configure_server_file_logging()
+    session_log = logging_service.start_application_session(host=host, llm_provider=get_llm_provider_name())
+    logging_service.log_application_event("startup_begin", session_log=str(session_log))
+    try:
+        from services.analysis_service import get_llm_id
+        app.state.llm = initialize_llm()
+        app.state.llm_id = get_llm_id()
+        importlib.import_module("services.news_agent_service")
+        logging_service.append_audit_entry("APPLICATION STARTED", "-", host)
+        ls = langsmith_status()
+        logging_service.log_application_event(
+            "startup_success",
+            llm_provider=get_llm_provider_name(),
+            llm_id=app.state.llm_id,
+            langsmith_enabled=ls["enabled"],
+            langsmith_project=ls["project"],
+        )
+        print("[startup] Azure LLM and news agent initialized.")
+        if ls["enabled"]:
+            print(f"[OK] LangSmith tracing enabled (project={ls['project']})")
+        else:
+            print("[INFO] LangSmith tracing disabled (set LANGSMITH_API_KEY in .env to enable)")
+        print(f"[OK] LLM initialized with ID: {app.state.llm_id}")
+        print(f"[INFO] Session log: {session_log}")
+        print(f"[INFO] Agent sessions dir: {logging_service.agent_sessions_dir}")
+        try:
+            from services.nifty500_scheduler_service import Nifty500SchedulerService
+
+            await Nifty500SchedulerService.schedule_on_startup()
+        except Exception as nifty_exc:
+            print(f"[WARN] Nifty 500 scheduler failed to start: {nifty_exc}")
+            logging_service.log_application_event(
+                "nifty500_scheduler_start_failed", error=str(nifty_exc)
+            )
+    except Exception as exc:
+        logging_service.append_audit_entry("APPLICATION STARTED", "-", host)
+        logging_service.log_application_event("startup_failed", error=str(exc))
+        print(f"[ERROR] Startup initialization failed: {exc}")
+    yield
+    await close_db()
+
+
+app = FastAPI(title="Financial Data Extractor API", lifespan=lifespan)
 
 
 class AuditMiddleware(BaseHTTPMiddleware):
@@ -63,49 +112,6 @@ app.include_router(missing_companies_router, prefix="/api", tags=["missing_compa
 app.include_router(news_ws_router, prefix="/api", tags=["news_ws"])
 app.include_router(xbrl_ws_router, prefix="/api", tags=["xbrl_ws"])
 app.include_router(heal_demo_router, prefix="/api", tags=["heal_demo"])
-
-
-@app.on_event("startup")
-def startup_initialize_services() -> None:
-    host = socket.gethostbyname(socket.gethostname())
-    logging_service.configure_server_file_logging()
-    session_log = logging_service.start_application_session(host=host, llm_provider=get_llm_provider_name())
-    logging_service.log_application_event("startup_begin", session_log=str(session_log))
-    try:
-        from services.analysis_service import get_llm_id
-        app.state.llm = initialize_llm()
-        app.state.llm_id = get_llm_id()
-        importlib.import_module("services.news_agent_service")
-        logging_service.append_audit_entry("APPLICATION STARTED", "-", host)
-        ls = langsmith_status()
-        logging_service.log_application_event(
-            "startup_success",
-            llm_provider=get_llm_provider_name(),
-            llm_id=app.state.llm_id,
-            langsmith_enabled=ls["enabled"],
-            langsmith_project=ls["project"],
-        )
-        print("[startup] Azure LLM and news agent initialized.")
-        if ls["enabled"]:
-            print(f"[OK] LangSmith tracing enabled (project={ls['project']})")
-        else:
-            print("[INFO] LangSmith tracing disabled (set LANGSMITH_API_KEY in .env to enable)")
-        print(f"[OK] LLM initialized with ID: {app.state.llm_id}")
-        print(f"[INFO] Session log: {session_log}")
-        print(f"[INFO] Agent sessions dir: {logging_service.agent_sessions_dir}")
-        try:
-            from services.nifty500_scheduler_service import Nifty500SchedulerService
-
-            Nifty500SchedulerService.schedule_on_startup()
-        except Exception as nifty_exc:
-            print(f"[WARN] Nifty 500 scheduler failed to start: {nifty_exc}")
-            logging_service.log_application_event(
-                "nifty500_scheduler_start_failed", error=str(nifty_exc)
-            )
-    except Exception as exc:
-        logging_service.append_audit_entry("APPLICATION STARTED", "-", host)
-        logging_service.log_application_event("startup_failed", error=str(exc))
-        print(f"[ERROR] Startup initialization failed: {exc}")
 
 
 if __name__ == "__main__":

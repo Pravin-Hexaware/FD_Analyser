@@ -66,11 +66,11 @@ class ResultsPortal:
     POPUP_TIMEOUT: int = 4_000
     POST_CLICK_SETTLE_MS: int = 600
     locators: PortalLocators = PortalLocators(
-        search_input="div.get-input-section.c-md-pl.c-sm-mb input#scripsearchtxtbx",
+        search_input="div.get-input-section.c-md-pl.c-sm-mb #scripsearchtxtbx",
         suggestion_items="#SearchQuotediv2 #ulSearchQuote2 li",
-        result_period_dropdown="div.get-drop-section.c-md-pl.c-sm-mb select[name='ctl00$ContentPlaceHolder1$periioddd']",
-        industry_dropdown="#dllindustry",
-        broadcast_dropdown="#ddlBrodCastPeriod",
+        result_period_dropdown="div.get-drop-section.c-md-pl.c-sm-mb #ContentPlaceHolder1_periioddd",
+        industry_dropdown="div.get-drop-section.c-md-pl.c-sm-mb #dllindustry",
+        broadcast_dropdown="div.get-drop-section.c-md-pl.c-sm-mb #ddlBrodCastPeriod",
         submit_button="#ContentPlaceHolder1_btnSubmit",
         results_grid="#ContentPlaceHolder1_gvData",
     )

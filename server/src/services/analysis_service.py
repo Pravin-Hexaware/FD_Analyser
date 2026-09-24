@@ -92,25 +92,22 @@ def _get_hardcoded_peers(symbol: str) -> Optional[List[str]]:
 
 
 
-def _get_company_info_by_symbol(repo: SqliteRepository, symbol: str) -> Dict[str, Any]:
+async def _get_company_info_by_symbol(repo: SqliteRepository, symbol: str) -> Dict[str, Any]:
     """Get company info from database by symbol."""
     if not symbol:
         return {"symbol": "", "scrip_code": None, "company": "", "industry": None}
 
-    cur = repo._conn.cursor()
-    normalized_symbol = symbol.strip().lower()
-    cur.execute(
-        "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(symbol) = ? LIMIT 1",
-        (normalized_symbol,),
-    )
-    row = cur.fetchone()
+    from db.models import CompanyInfo
+
+    row = await CompanyInfo.filter(symbol__iexact=symbol.strip()).prefetch_related("industry").first()
     if not row:
         return {"symbol": symbol, "scrip_code": None, "company": symbol, "industry": None}
+    industry_name = row.industry.industry_name if row.industry else None
     return {
-        "symbol": row[0],
-        "scrip_code": row[1],
-        "company": row[2],
-        "industry": row[3],
+        "symbol": row.symbol,
+        "scrip_code": row.scrip_code,
+        "company": row.company_name,
+        "industry": industry_name,
     }
 
 def _normalize_company_folder_name(company_name: str) -> str:
@@ -277,66 +274,35 @@ async def _get_or_fetch_today_news_summary(company_name: Optional[str], scrip_co
         return None
 
 
-def _get_company_info_by_name(repo: SqliteRepository, company_name: Optional[str]) -> Dict[str, Any]:
+async def _get_company_info_by_name(repo: SqliteRepository, company_name: Optional[str]) -> Dict[str, Any]:
     if not company_name:
         return {"symbol": "", "scrip_code": None, "company": "", "industry": None}
 
-    normalized_name = company_name.strip().lower()
-    cur = repo._conn.cursor()
-    cur.execute(
-        "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(company_name) = ? LIMIT 1",
-        (normalized_name,),
-    )
-    row = cur.fetchone()
+    from db.models import CompanyInfo
+
+    normalized_name = company_name.strip()
+    row = await CompanyInfo.filter(company_name__iexact=normalized_name).prefetch_related("industry").first()
     if not row:
-        cur.execute(
-            "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(company_name) LIKE ? LIMIT 1",
-            (f"%{normalized_name}%",),
-        )
-        row = cur.fetchone()
+        row = await CompanyInfo.filter(company_name__icontains=normalized_name).prefetch_related("industry").first()
     if not row:
         return {"symbol": "", "scrip_code": None, "company": company_name, "industry": None}
+    industry_name = row.industry.industry_name if row.industry else None
     return {
-        "symbol": row[0],
-        "scrip_code": row[1],
-        "company": row[2],
-        "industry": row[3],
+        "symbol": row.symbol,
+        "scrip_code": row.scrip_code,
+        "company": row.company_name,
+        "industry": industry_name,
     }
-    #
-    # if not company_name:
-    #     return {"symbol": "", "scrip_code": None, "company": "", "industry": None}
-    #
-    # normalized_name = company_name.strip().lower()
-    # cur = repo._conn.cursor()
-    # cur.execute(
-    #     "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(company_name) = ? LIMIT 1",
-    #     (normalized_name,),
-    # )
-    # row = cur.fetchone()
-    # if not row:
-    #     cur.execute(
-    #         "SELECT symbol, scrip_code, company_name, sector FROM company_table WHERE LOWER(company_name) LIKE ? LIMIT 1",
-    #         (f"%{normalized_name}%",),
-    #     )
-    #     row = cur.fetchone()
-    # if not row:
-    #     return {"symbol": "", "scrip_code": None, "company": company_name, "industry": None}
-    # return {
-    #     "symbol": row[0],
-    #     "scrip_code": row[1],
-    #     "company": row[2],
-    #     "industry": row[3],
-    # }
 
 
-def _build_peer_list_from_hardcoded(repo: SqliteRepository, symbol: str) -> List[Dict[str, Any]]:
+async def _build_peer_list_from_hardcoded(repo: SqliteRepository, symbol: str) -> List[Dict[str, Any]]:
     peer_symbols = _get_hardcoded_peers(symbol)
     if not peer_symbols:
         return []
 
     peers = []
     for peer_symbol in peer_symbols:
-        peer_info = _get_company_info_by_symbol(repo, peer_symbol)
+        peer_info = await _get_company_info_by_symbol(repo, peer_symbol)
         peers.append(peer_info)
     return peers
 
@@ -801,7 +767,7 @@ def _find_value_by_keywords(data: Any, keywords: List[str]) -> Optional[float]:
     return None
 
 
-def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> Tuple[Dict[str, List[Dict[str, Any]]], str]:
+async def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> Tuple[Dict[str, List[Dict[str, Any]]], str]:
     """Get peers for each input request based on symbol or company name.
 
     Each request is a tuple of (request_key, parsed_symbol, company_name).
@@ -827,17 +793,17 @@ def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> T
                 log_messages.append(f"LOG: Hardcoded peer symbols found for input symbol '{symbol}': {hardcoded_peer_symbols}")
                 peer_list = []
                 for peer_symbol in hardcoded_peer_symbols:
-                    peer_info = _get_company_info_by_symbol(repo, peer_symbol)
+                    peer_info = await _get_company_info_by_symbol(repo, peer_symbol)
                     peer_info["peer_source"] = "hardcoded"
                     peer_list.append(peer_info)
                 peers_result[request_key] = peer_list
                 log_messages.append(f"LOG: Returning hardcoded peers for request {request_key}: {[p['symbol'] for p in peer_list]}")
                 continue
 
-            company_info = _get_company_info_by_symbol(repo, symbol) if symbol else {"scrip_code": None}
+            company_info = await _get_company_info_by_symbol(repo, symbol) if symbol else {"scrip_code": None}
             if not company_info.get("scrip_code"):
                 log_messages.append(f"LOG: Symbol lookup failed for '{symbol}', trying company name lookup for '{company_name}'")
-                company_info = _get_company_info_by_name(repo, company_name)
+                company_info = await _get_company_info_by_name(repo, company_name)
 
             if not company_info.get("scrip_code"):
                 log_messages.append(f"LOG: No company found in company_table for symbol '{symbol}' or name '{company_name}'")
@@ -847,14 +813,31 @@ def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> T
             target_scrip_code = company_info["scrip_code"]
             log_messages.append(f"LOG: Resolved company for request {request_key} to symbol {target_symbol}, scrip_code {target_scrip_code}")
 
-            hardcoded_peers = _build_peer_list_from_hardcoded(repo, target_symbol)
+            hardcoded_peers = await _build_peer_list_from_hardcoded(repo, target_symbol)
             if hardcoded_peers:
                 log_messages.append(f"LOG: Using hardcoded peers for {target_symbol}: {[p['symbol'] for p in hardcoded_peers]}")
                 peers_result[request_key] = hardcoded_peers
                 continue
 
-            # No sector-based peer finding; only use hardcoded peers
-            log_messages.append(f"LOG: No hardcoded peers found for {target_symbol}, skipping peer extraction")
+            # Fallback: industry peers from repository
+            peers_payload = await repo.find_peers(target_symbol)
+            industry_peers = peers_payload.get("peers") or []
+            if industry_peers:
+                peer_list = [
+                    {
+                        "symbol": p.get("symbol"),
+                        "scrip_code": p.get("scrip_code"),
+                        "company": p.get("company_name"),
+                        "industry": p.get("industry"),
+                        "peer_source": "industry",
+                    }
+                    for p in industry_peers
+                ]
+                peers_result[request_key] = peer_list
+                log_messages.append(f"LOG: Using industry peers for {target_symbol}: {[p['symbol'] for p in peer_list]}")
+                continue
+
+            log_messages.append(f"LOG: No peers found for {target_symbol}, skipping peer extraction")
             continue
 
         except Exception as e:
@@ -868,7 +851,7 @@ def Get_Peers_from_DB(input_requests: List[tuple[str, Optional[str], str]]) -> T
     return peers_result, full_log
 
 
-def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str, str]:
+async def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str, str]:
     """Parse user query using NLP-based extraction (replacing LLM-based approach).
     
     This function now uses deterministic NLP pattern matching and fuzzy matching
@@ -904,7 +887,7 @@ def parse_query_and_get_companies(query: str) -> Tuple[Dict[str, Any], str, str]
 
         if input_requests:
             print(f"Fetching peers for requests: {input_requests}")
-            peers_data, peer_extraction_log = Get_Peers_from_DB(input_requests)
+            peers_data, peer_extraction_log = await Get_Peers_from_DB(input_requests)
 
             # Add peers to the parsed response
             for request_key, peers in peers_data.items():

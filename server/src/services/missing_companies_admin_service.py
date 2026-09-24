@@ -13,12 +13,12 @@ class MissingCompaniesAdminService:
     def get_missing_companies(self) -> List[Dict[str, Any]]:
         return self.csv_repo.read_missing_companies()
 
-    def get_missing_companies_status(self) -> List[Dict[str, Any]]:
+    async def get_missing_companies_status(self) -> List[Dict[str, Any]]:
         missing_companies = self.get_missing_companies()
         companies_with_status = []
         for company in missing_companies:
             scrip_code = company.get("scrip_code", "")
-            filing_count = self.db.get_xbrl_filings_count(scrip_code)
+            filing_count = await self.db.get_xbrl_filings_count(scrip_code)
             companies_with_status.append({
                 **company,
                 "has_filings": filing_count > 0,
@@ -27,7 +27,7 @@ class MissingCompaniesAdminService:
             })
         return companies_with_status
 
-    def add_companies_to_bse_metadata(self, scrip_codes: List[str]) -> Dict[str, Any]:
+    async def add_companies_to_bse_metadata(self, scrip_codes: List[str]) -> Dict[str, Any]:
         missing_companies = self.get_missing_companies()
         scrip_codes_set = {s.strip().lower() for s in scrip_codes}
         companies_to_add = [
@@ -61,8 +61,8 @@ class MissingCompaniesAdminService:
                 "Industry": "",
             }
 
-            if not self.db.company_exists(scrip_code):
-                self.db.upsert_company(
+            if not await self.db.company_exists(scrip_code):
+                await self.db.upsert_company(
                     company_name=company["company_name"],
                     symbol=company["symbol"],
                     scrip_code=scrip_code,

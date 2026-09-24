@@ -8,6 +8,7 @@ from repositories.sqlite_repository import SqliteRepository
 from services.html_extraction_service import extract_ix_facts_from_root
 from services.xml_extraction_service import extract_xbrl_data_from_bytes
 from services.annual_extraction_service import extract_annual, ExtractAnnualRequest
+from services.xbrl_file_store import read_xbrl_raw
 from lxml import html as lxml_html
 import httpx
 
@@ -21,7 +22,7 @@ company_service = CompanyService()
 async def get_all_companies():
     """Get all companies from database"""
     try:
-        companies = company_service.get_all_companies()
+        companies = await company_service.get_all_companies()
         # Return array of company dicts directly for frontend compatibility
         return [
             {
@@ -52,7 +53,7 @@ async def search_companies(q: str = Query(..., min_length=1, max_length=100)):
     Response: array of suggestions with id, name, symbol, scripcode, sector
     """
     try:
-        companies = company_service.search_companies(q)
+        companies = await company_service.search_companies(q)
         # Return simplified suggestions format for auto-suggest dropdown
         suggestions = [
             {
@@ -99,7 +100,7 @@ async def extract_yearly_report(
         company = None
         if body.symbol or body.scrip_code:
             lookup = body.symbol or body.scrip_code
-            company = company_service.get_company_details(lookup)
+            company = await company_service.get_company_details(lookup)
 
         # DB metadata
         db_metadata = None
@@ -107,8 +108,8 @@ async def extract_yearly_report(
         db_quarterly = None
         if company:
             db_metadata = company.to_dict()
-            db_annual = company_service.get_latest_annual_data(company.symbol)
-            db_quarterly = company_service.get_latest_quarterly_data(company.symbol)
+            db_annual = await company_service.get_latest_annual_data(company.symbol)
+            db_quarterly = await company_service.get_latest_quarterly_data(company.symbol)
 
         # Call Indian API using provided API key
         indianapi_data = None
@@ -141,11 +142,11 @@ async def extract_yearly_report(
 async def get_company(company_id: str):
     """Resolve company by id/symbol/scrip_code and return company metadata."""
     try:
-        company = company_service.get_company_details(company_id)
+        company = await company_service.get_company_details(company_id)
 
         if not company:
             # fallback to search resolve if direct lookup fails
-            candidates = company_service.search_companies(company_id)
+            candidates = await company_service.search_companies(company_id)
             company = candidates[0] if candidates else None
 
         if not company:
@@ -169,10 +170,10 @@ async def get_company_financials(
 ):
     """Get financial data for a company."""
     try:
-        company = company_service.get_company_details(company_id)
+        company = await company_service.get_company_details(company_id)
 
         if not company:
-            candidates = company_service.search_companies(company_id)
+            candidates = await company_service.search_companies(company_id)
             company = candidates[0] if candidates else None
 
         if not company:
@@ -182,19 +183,19 @@ async def get_company_financials(
 
         financials_data = None
         if frequency.lower() == "annual":
-            annual = company_service.get_latest_annual_data(symbol_or_scrip)
+            annual = await company_service.get_latest_annual_data(symbol_or_scrip)
             if annual:
                 financials_data = [annual]
         elif frequency.lower() == "quarterly":
-            quarterly = company_service.get_latest_quarterly_data(symbol_or_scrip)
+            quarterly = await company_service.get_latest_quarterly_data(symbol_or_scrip)
             if quarterly:
                 financials_data = [quarterly]
         else:
-            financials_data = company_service.get_company_financials(symbol_or_scrip, years)
+            financials_data = await company_service.get_company_financials(symbol_or_scrip, years)
 
         # Fallback if not found initially
         if not financials_data:
-            financials_data = company_service.get_company_financials(symbol_or_scrip, years)
+            financials_data = await company_service.get_company_financials(symbol_or_scrip, years)
 
         if not financials_data:
             raise HTTPException(status_code=404, detail=f"Financials for company {company_id} not found")
@@ -224,10 +225,10 @@ async def get_company_financials(
 @router.get("/companies/{company_id}/quarterly")
 async def get_company_quarterly(company_id: str):
     try:
-        company = company_service.get_company_details(company_id)
+        company = await company_service.get_company_details(company_id)
         symbol = company.symbol if company else company_id
 
-        quarterly = company_service.get_latest_quarterly_data(symbol)
+        quarterly = await company_service.get_latest_quarterly_data(symbol)
         if not quarterly:
             raise HTTPException(status_code=404, detail=f"No quarterly data for {company_id}")
 
@@ -241,10 +242,10 @@ async def get_company_quarterly(company_id: str):
 @router.get("/companies/{company_id}/annual")
 async def get_company_annual(company_id: str):
     try:
-        company = company_service.get_company_details(company_id)
+        company = await company_service.get_company_details(company_id)
         symbol = company.symbol if company else company_id
 
-        annual = company_service.get_latest_annual_data(symbol)
+        annual = await company_service.get_latest_annual_data(symbol)
         if not annual:
             raise HTTPException(status_code=404, detail=f"No annual data for {company_id}")
 
@@ -435,10 +436,10 @@ async def compare_extraction(request: ExtractionCompareRequest):
 
         # Step 1: Get extraction records from appropriate table (annual or quarterly)
         for scrip_code in request.scrip_codes:
-            company = company_service.get_company_details(scrip_code)
+            company = await company_service.get_company_details(scrip_code)
             
             # Get extraction records from the appropriate table
-            extraction_records = repo.get_extraction_records(
+            extraction_records = await repo.get_extraction_records(
                 scrip_code,
                 extraction_type=frequency,
                 limit=10
@@ -479,7 +480,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
                     selected_record = extraction_records[0]
                 print(f"[EXTRACTION_COMPARE] requested period={request.period}, resolved_period={selected_period}")
 
-            # Step 3: If we have a record, use company_name + publication_date to find raw_content in xbrl_filing_table
+            # Step 3: Load raw XBRL from file store via filing metadata
             if selected_record:
                 company_name = selected_record.get("company_name")
                 publication_date = selected_record.get("publication_date")
@@ -487,23 +488,30 @@ async def compare_extraction(request: ExtractionCompareRequest):
                 
                 print(f"[EXTRACTION_COMPARE] selected_record for {scrip_code}: company_name={company_name}, publication_date={publication_date}, xbrl_link={xbrl_link}")
                 
-                # Query xbrl_filing_table using company_name and publication_date as keys
-                if company_name and publication_date:
-                    cur = repo._conn.cursor()
-                    cur.execute(
-                        """
-                        SELECT scrip_code, symbol, xbrl_link, publication_date, report_type, raw_content
-                        FROM xbrl_filing_table
-                        WHERE scrip_code = ? AND publication_date = ? AND raw_content IS NOT NULL
-                        LIMIT 1
-                        """,
-                        (scrip_code, publication_date)
+                if publication_date:
+                    filings = await repo.get_xbrl_filings(scrip_code)
+                    xbrl_record = next(
+                        (
+                            f for f in filings
+                            if (f.get("publication_date") or f.get("period")) == publication_date
+                        ),
+                        None,
                     )
-                    xbrl_record = cur.fetchone()
-                    
+                    if not xbrl_record and xbrl_link:
+                        xbrl_record = next(
+                            (f for f in filings if f.get("xbrl_link") == xbrl_link),
+                            None,
+                        )
+
                     if xbrl_record:
-                        raw_content = dict(xbrl_record).get("raw_content")
-                        print(f"[EXTRACTION_COMPARE] found raw_content in xbrl_filing_table for {scrip_code} with publication_date={publication_date}")
+                        category = (xbrl_record.get("category") or xbrl_record.get("report_type") or "std")
+                        if category not in ("std", "con"):
+                            category = "std"
+                        link = xbrl_record.get("xbrl_link") or xbrl_link or ""
+                        raw_content = read_xbrl_raw(
+                            scrip_code, category, publication_date, url=link
+                        )
+                        print(f"[EXTRACTION_COMPARE] found raw_content on disk for {scrip_code} with publication_date={publication_date}")
                         
                         # Step 4: Parse raw_content
                         if raw_content:
@@ -511,7 +519,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
                                 print(f"[EXTRACTION_COMPARE] parsing raw_content for {scrip_code}")
                                 
                                 # Determine content type and parse accordingly
-                                xbrl_link = dict(xbrl_record).get("xbrl_link", "")
+                                xbrl_link = link
                                 raw_text = raw_content if isinstance(raw_content, str) else raw_content.decode('utf-8', errors='replace')
                                 raw_preview = raw_text.lstrip()[:1024].lower()
                                 raw_bytes = raw_text.encode('utf-8')
@@ -599,7 +607,7 @@ async def compare_extraction(request: ExtractionCompareRequest):
                                 # Update company payload with extracted data
                                 companies_payload[scrip_code]["financials"] = [flattened]
                                 companies_payload[scrip_code]["publication_date"] = publication_date
-                                companies_payload[scrip_code]["report_type"] = dict(xbrl_record).get("report_type")
+                                companies_payload[scrip_code]["report_type"] = category
                                 companies_payload[scrip_code]["xbrl_url"] = xbrl_link
                                 companies_payload[scrip_code]["extraction"] = metrics
                                 
@@ -609,10 +617,12 @@ async def compare_extraction(request: ExtractionCompareRequest):
                                 import traceback
                                 print(f"[EXTRACTION_COMPARE] error parsing raw_content for {scrip_code}: {str(e)}")
                                 print(f"[EXTRACTION_COMPARE] traceback: {traceback.format_exc()}")
+                        else:
+                            print(f"[EXTRACTION_COMPARE] no raw_content on disk for {scrip_code} with publication_date={publication_date}")
                     else:
-                        print(f"[EXTRACTION_COMPARE] no raw_content found in xbrl_filing_table for {scrip_code} with publication_date={publication_date}")
+                        print(f"[EXTRACTION_COMPARE] no XBRL filing found for {scrip_code} with publication_date={publication_date}")
                 else:
-                    print(f"[EXTRACTION_COMPARE] selected record missing company_name or publication_date for {scrip_code}")
+                    print(f"[EXTRACTION_COMPARE] selected record missing publication_date for {scrip_code}")
             else:
                 print(f"[EXTRACTION_COMPARE] no extraction record found for {scrip_code} with period={request.period}")
 
@@ -648,7 +658,7 @@ async def compare_companies(request: dict):
         if not scrip_codes or len(scrip_codes) < 2:
             raise HTTPException(status_code=400, detail="At least 2 companies required for comparison")
 
-        result = company_service.compare_companies(scrip_codes, frequency)
+        result = await company_service.compare_companies(scrip_codes, frequency)
         if not result["companies"]:
             raise HTTPException(status_code=404, detail="No financial data found for companies")
         return result
@@ -662,7 +672,7 @@ async def compare_companies(request: dict):
 async def resolve_company(query: str = Query(..., min_length=1)):
     """Resolve company by id/symbol/scrip_code (fallback for UI stale ids)."""
     try:
-        companies = company_service.search_companies(query)
+        companies = await company_service.search_companies(query)
         return {
             "success": True,
             "companies": [c.to_dict() for c in companies],
@@ -675,7 +685,7 @@ async def resolve_company(query: str = Query(..., min_length=1)):
 async def get_trending_companies():
     """Get trending/popular companies"""
     try:
-        trending = company_service.get_trending_companies(limit=4)
+        trending = await company_service.get_trending_companies(limit=4)
         return {
             "success": True,
             "trending": [

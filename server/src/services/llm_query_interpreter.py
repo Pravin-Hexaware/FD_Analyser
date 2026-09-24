@@ -130,7 +130,7 @@ def interpret_time_window(period: str, time_horizon: str, frequency: str) -> tup
     return latest_only, last_n_years, period_filter, limit_records
 
 
-def fetch_company_data(
+async def fetch_company_data(
     repo: SqliteRepository,
     scrip_code: str,
     frequency: str,
@@ -149,11 +149,11 @@ def fetch_company_data(
         quarterly_limit = max(limit_records, last_n_years * 4)
 
     if frequency == "both":
-        annual_results = repo.get_extraction_records(
+        annual_results = await repo.get_extraction_records(
             scrip_code, "annual", period=period_filter,
             last_n_years=last_n_years, latest_only=latest_only, limit=annual_limit,
         )
-        quarterly_results = repo.get_extraction_records(
+        quarterly_results = await repo.get_extraction_records(
             scrip_code, "quarterly", period=period_filter,
             last_n_years=last_n_years, latest_only=latest_only, limit=quarterly_limit,
         )
@@ -164,17 +164,17 @@ def fetch_company_data(
     results = []
 
     if latest_only and not requires_historical and last_n_years is None:
-        latest_record = repo.get_latest_extraction(scrip_code, extraction_type)
+        latest_record = await repo.get_latest_extraction(scrip_code, extraction_type)
         if latest_record:
             results = [latest_record]
     else:
-        results = repo.get_extraction_records(
+        results = await repo.get_extraction_records(
             scrip_code, extraction_type, period=period_filter,
             last_n_years=last_n_years, latest_only=latest_only, limit=effective_limit,
         )
 
     if not results and not latest_only:
-        latest_record = repo.get_latest_extraction(scrip_code, extraction_type)
+        latest_record = await repo.get_latest_extraction(scrip_code, extraction_type)
         if latest_record:
             results = [latest_record]
 

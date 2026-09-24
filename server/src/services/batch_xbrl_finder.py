@@ -188,37 +188,10 @@ async def _grid_data_rows_locator(grid):
     return await PORTAL.data_rows(grid)
 
 def save_raw_content(scrip_code: str, xbrl_type: str, period: str, raw_content: str, url: str) -> Optional[str]:
-    """
-    Save raw_content to file in /raw_content folder.
-    Filename: {scripcode}-{std/con}-{period}.{html/xml}
-    Returns the file path if successful, None otherwise.
-    """
-    try:
-        # Create raw_content directory
-        raw_content_dir = Path(__file__).resolve().parent.parent / "raw_content"
-        raw_content_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Determine file extension from URL
-        if url.lower().endswith('.xml'):
-            ext = 'xml'
-        else:
-            ext = 'html'
-        
-        # Sanitize period for filename (replace special chars)
-        safe_period = re.sub(r"[/\\:*?\"<>|]", "_", period)
-        
-        # Construct filename: {scripcode}-{std/con}-{period}.{ext}
-        filename = f"{scrip_code}-{xbrl_type}-{safe_period}.{ext}"
-        file_path = raw_content_dir / filename
-        
-        # Write content to file
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(raw_content)
-        
-        return str(file_path)
-    except Exception as e:
-        print(f"Error saving raw content for {scrip_code}: {e}")
-        return None
+    """Thin wrapper — delegates to xbrl_file_store (Data/XBRLS/{std|con}/{scrip}/{period}.ext)."""
+    from services.xbrl_file_store import save_xbrl_raw
+
+    return save_xbrl_raw(scrip_code, xbrl_type, period, raw_content, url)
 
 async def fetch_xbrl_content(ctx, url: str) -> Optional[str]:
     """

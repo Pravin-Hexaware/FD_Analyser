@@ -21,6 +21,8 @@ from playwright.async_api import async_playwright
 from repositories.sqlite_repository import SqliteRepository
 from services.html_parser_service import html_dom_to_structured_json_from_content
 from services.xml_extraction_service import extract_xbrl_data_from_bytes
+from services.xbrl_file_store import save_xbrl_raw
+from repositories.xbrl_repository import update_metrics_json
 from utils.fiscal_year import is_within_5year_range
 
 PRODUCTION_PORTAL_PATH = Path(__file__).resolve().parents[1] / "automation" / "results_portal.py"
@@ -254,7 +256,7 @@ class MissingCompanyService:
         normalized_symbol = symbol.strip().upper() if symbol else None
 
         # Ensure company exists in database for joining later
-        repo.upsert_company(
+        await repo.upsert_company(
             company_name=normalized_company_name,
             symbol=normalized_symbol,
             scrip_code=scrip_code,
@@ -262,14 +264,22 @@ class MissingCompanyService:
             industry=industry.strip() if industry else None,
         )
 
-        if not repo.xbrl_filing_exists(scrip_code, xbrl_url, report_type=report_type):
-            repo.insert_xbrl_filing(
+        category = (report_type or "std").strip().lower()
+        if category not in ("std", "con"):
+            category = "std"
+        period = publication_date or ""
+
+        save_xbrl_raw(scrip_code, category, period, raw_text, xbrl_url)
+
+        if not await repo.xbrl_filing_exists(scrip_code, xbrl_url, report_type=category):
+            await repo.insert_xbrl_filing(
                 scrip_code=scrip_code,
                 symbol=symbol,
                 xbrl_link=xbrl_url,
                 publication_date=publication_date,
-                report_type=report_type,
-                raw_content=raw_text,
+                report_type=category,
+                category=category,
+                period=period,
             )
         result['stored_filing'] = True
 
@@ -306,7 +316,7 @@ class MissingCompanyService:
                 })
             return result
 
-        if repo.xbrl_extraction_exists(scrip_code, xbrl_url, extraction_type):
+        if await repo.xbrl_extraction_exists(scrip_code, xbrl_url, extraction_type):
             result['extracted'] = True
             if log_file is not None:
                 _append_missing_company_log(log_file, {
@@ -331,14 +341,23 @@ class MissingCompanyService:
                 'period': publication_date,
                 'parsed_json_path': str(parsed_output_file),
             })
+
+        await update_metrics_json(
+            scrip_code=scrip_code,
+            period=period,
+            category=category,
+            metrics_json=parsed_json_str,
+        )
+
         if extraction_type == 'quarterly':
             caps_company_name = company_name.strip().upper()
-            repo.insert_quarterly_extraction(
+            await repo.insert_quarterly_extraction(
                 scrip_code=scrip_code,
                 company_name=caps_company_name,
                 xbrl_link=xbrl_url,
                 publication_date=publication_date or '',
-                report_type=report_type,
+                report_type=category,
+                category=category,
                 parsed_json=parsed_json_str,
             )
         else:
@@ -358,13 +377,13 @@ class MissingCompanyService:
                 return result
 
             cap_company_name = company_name.strip().upper()
-            #cap_symbol = symbol.strip().upper() if symbol else None
-            repo.insert_annual_extraction(
+            await repo.insert_annual_extraction(
                 scrip_code=scrip_code,
                 company_name=cap_company_name,
                 xbrl_link=xbrl_url,
                 publication_date=publication_date or '',
-                report_type=report_type,
+                report_type=category,
+                category=category,
                 parsed_json=parsed_json_str,
             )
         result['extracted'] = True

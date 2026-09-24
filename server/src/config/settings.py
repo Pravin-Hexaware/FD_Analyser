@@ -9,6 +9,8 @@ MARKDOWN_DIR = SRC_DIR / "markdown"
 OVERALL_LOGS_DIR = SRC_DIR / "Overall_logs"
 
 DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "financial_data.db")))
+XBRLS_DIR = DATA_DIR / "XBRLS"
+WIPE_DB_ON_STARTUP = os.getenv("WIPE_DB_ON_STARTUP", "0").lower() in ("1", "true", "yes")
 COMPANY_METADATA_CSV = DATA_DIR / "Company_metadata.csv"
 VALIDATION_CSV = DATA_DIR / "Validation.csv"
 MISSING_COMPANIES_CSV = DATA_DIR / "missing_companies.csv"

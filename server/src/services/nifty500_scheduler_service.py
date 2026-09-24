@@ -1,9 +1,9 @@
 """Startup scheduler: refresh Nifty 500 list and enqueue missing FY XBRL coverage."""
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
-import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -146,15 +146,15 @@ class Nifty500SchedulerService:
     """Refresh nifty_500_list when stale and enqueue companies missing current-FY XBRL."""
 
     @staticmethod
-    def needs_refresh(repo: SqliteRepository, now: Optional[datetime] = None) -> bool:
+    async def needs_refresh(repo: SqliteRepository, now: Optional[datetime] = None) -> bool:
         current = now or datetime.utcnow()
-        last = repo.get_nifty500_last_updated()
+        last = await repo.get_nifty500_last_updated()
         if last is None:
             return True
         return (current - last) > timedelta(days=NIFTY500_REFRESH_DAYS)
 
     @staticmethod
-    def refresh_nifty500_list(repo: SqliteRepository) -> int:
+    async def refresh_nifty500_list(repo: SqliteRepository) -> int:
         isin_to_scrip = _load_isin_to_scrip_map(VALIDATION_CSV)
         text = _download_nifty_csv(NIFTY500_CSV_URL)
         if text:
@@ -176,20 +176,20 @@ class Nifty500SchedulerService:
             return 0
 
         updated_at = datetime.utcnow().isoformat()
-        count = repo.replace_nifty500_rows(rows, updated_at)
+        count = await repo.replace_nifty500_rows(rows, updated_at)
         print(f"[nifty500] Replaced nifty_500_list with {count} rows at {updated_at}")
         return count
 
     @staticmethod
-    def enqueue_missing_fiscal_coverage(repo: SqliteRepository) -> int:
+    async def enqueue_missing_fiscal_coverage(repo: SqliteRepository) -> int:
         year_pair = current_fiscal_year_pair()
-        companies = repo.get_all_nifty500()
+        companies = await repo.get_all_nifty500()
         scrip_codes = [
             (c.get("scrip_code") or "").strip()
             for c in companies
             if (c.get("scrip_code") or "").strip()
         ]
-        missing_codes = repo.get_scrip_codes_missing_fiscal_year(scrip_codes, year_pair)
+        missing_codes = await repo.get_scrip_codes_missing_fiscal_year(year_pair, scrip_codes)
         if not missing_codes:
             print(f"[nifty500] All Nifty companies have filings for {year_pair}")
             return 0
@@ -227,20 +227,20 @@ class Nifty500SchedulerService:
         return enqueued
 
     @classmethod
-    def run_on_startup(cls) -> None:
+    async def run_on_startup(cls) -> None:
         print("[nifty500] Startup scheduler begin")
         repo = SqliteRepository()
         try:
-            if cls.needs_refresh(repo):
+            if await cls.needs_refresh(repo):
                 print(
                     f"[nifty500] List stale or empty (>{NIFTY500_REFRESH_DAYS} days); refreshing"
                 )
-                cls.refresh_nifty500_list(repo)
+                await cls.refresh_nifty500_list(repo)
             else:
-                last = repo.get_nifty500_last_updated()
+                last = await repo.get_nifty500_last_updated()
                 print(f"[nifty500] List fresh (last updated {last}); skipping download")
 
-            enqueued = cls.enqueue_missing_fiscal_coverage(repo)
+            enqueued = await cls.enqueue_missing_fiscal_coverage(repo)
             if enqueued > 0:
                 schedule_missing_company_processing()
                 print("[nifty500] Scheduled missing-company XBRL batch")
@@ -259,7 +259,6 @@ class Nifty500SchedulerService:
         print("[nifty500] Startup scheduler end")
 
     @classmethod
-    def schedule_on_startup(cls) -> None:
-        thread = threading.Thread(target=cls.run_on_startup, daemon=True, name="nifty500-scheduler")
-        thread.start()
-        print("[nifty500] Background scheduler thread started")
+    async def schedule_on_startup(cls) -> None:
+        asyncio.create_task(cls.run_on_startup())
+        print("[nifty500] Background scheduler task started")

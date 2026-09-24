@@ -24,7 +24,7 @@ async def get_missing_companies():
 @router.get("/missing-companies/status")
 async def get_missing_companies_status():
     try:
-        return _admin_service.get_missing_companies_status()
+        return await _admin_service.get_missing_companies_status()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -35,7 +35,7 @@ async def add_missing_to_bse(request: ProcessMissingCompanyRequest):
         if not request.scrip_codes:
             raise HTTPException(status_code=400, detail="No companies selected")
 
-        result = _admin_service.add_companies_to_bse_metadata(request.scrip_codes)
+        result = await _admin_service.add_companies_to_bse_metadata(request.scrip_codes)
         if result["success"]:
             return {
                 "success": True,

@@ -9,7 +9,6 @@ from db.models.annual import AnnualMetrics
 from db.models.chat import Conversation, ChatHistory, ChatReference, ChatPersonalisation
 from db.models.watchlist import WatchList
 from db.models.screener import Screener
-from db.models.indexes import IndexMembership
 
 __all__ = [
     "Industry",
@@ -26,5 +25,4 @@ __all__ = [
     "ChatPersonalisation",
     "WatchList",
     "Screener",
-    "IndexMembership",
 ]

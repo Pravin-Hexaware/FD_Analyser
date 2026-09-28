@@ -4,26 +4,20 @@ Shared XBRL collect + extract pipeline used by Fetch Filings, missing-companies,
 Rules:
 1. Upsert company_info BEFORE collecting filings for that company.
 2. Collect both std and con; keep existing H/N skip + fiscal-range early-exit.
-3. On each stored filing, parse HTML/XML and write Quarterly_Metrics / Annual_Metrics.
+3. On each stored filing, parse HTML/XML and write Quarterly_Metrics / Annual_Metrics
+   using Metrics.ind_as catalog (no JSON blobs in those tables).
 """
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Optional, Tuple
 
-from lxml import etree as ET
 from lxml import html as lxml_html
 
 from repositories.sqlite_repository import SqliteRepository
-from repositories.xbrl_repository import update_metrics_json
 from services.html_extraction_service import extract_ix_facts_from_root
-from services.html_parser_service import html_dom_to_structured_json_from_content
+from services.metric_catalog_service import calculate_metrics_from_catalog
 from services.xbrl_file_store import save_xbrl_raw
-from services.xbrl_metrics_service import (
-    calculate_metrics,
-    calculate_metrics_fourd,
-    convert_xml_grouped_to_list,
-)
+from services.xbrl_metrics_service import convert_xml_grouped_to_list
 from services.xml_extraction_service import extract_xbrl_data_from_bytes
 from utils.fiscal_year import is_within_collection_range
 
@@ -66,7 +60,6 @@ def _fact_list_from_html(raw_bytes: bytes) -> list:
     try:
         root = lxml_html.fromstring(raw_bytes)
         rows = extract_ix_facts_from_root(root)
-        # normalize keys for metrics calculator
         out = []
         for r in rows or []:
             out.append(
@@ -83,23 +76,21 @@ def _fact_list_from_html(raw_bytes: bytes) -> list:
         return []
 
 
-def parse_and_compute_metrics(
+async def parse_and_compute_metrics(
     raw_text: str,
     url: str,
     extraction_type: str,
-) -> Tuple[Any, Optional[dict], Optional[list]]:
+) -> Tuple[Optional[dict], Optional[list]]:
     """
-    Returns (parsed_json_for_storage, flat_metrics_dict, fact_list_or_none).
+    Returns (flat_metrics_dict, fact_list_or_none).
+    Flat metrics come from Metrics.ind_as catalog — no JSON stored.
     """
     raw_bytes = raw_text.encode("utf-8") if isinstance(raw_text, str) else raw_text
-    flat: Optional[dict] = None
     fact_list: Optional[list] = None
 
     if is_html_content(raw_text, url):
-        parsed_json = html_dom_to_structured_json_from_content(raw_bytes)
         fact_list = _fact_list_from_html(raw_bytes)
         if not fact_list:
-            # Try XML/iXBRL walk on same bytes
             try:
                 grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
                 fact_list = convert_xml_grouped_to_list(grouped)
@@ -107,16 +98,15 @@ def parse_and_compute_metrics(
                 fact_list = []
     else:
         grouped = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
-        parsed_json = grouped
         fact_list = convert_xml_grouped_to_list(grouped)
 
+    flat: Optional[dict] = None
     if fact_list:
-        if extraction_type == "annual":
-            flat = calculate_metrics_fourd(fact_list)
-        else:
-            flat = calculate_metrics(fact_list)
-
-    return parsed_json, flat, fact_list
+        flat = await calculate_metrics_from_catalog(
+            fact_list,
+            extraction_type=extraction_type,
+        )
+    return flat, fact_list
 
 
 def flat_to_quarterly_kwargs(flat: Optional[dict]) -> dict:
@@ -149,7 +139,7 @@ def flat_to_quarterly_kwargs(flat: Optional[dict]) -> dict:
 
 
 def flat_to_annual_kwargs(flat: Optional[dict]) -> dict:
-    """Map calculate_metrics_fourd output → Annual_Metrics columns."""
+    """Map catalog annual output → Annual_Metrics columns."""
     if not flat:
         return {}
     base = flat_to_quarterly_kwargs(flat)
@@ -211,7 +201,6 @@ async def ensure_company_before_collect(
         industry=industry,
         isin_no=isin_no,
     )
-    # Confirm row exists before caller starts scrape/store
     exists = await repo.company_exists(code)
     if not exists:
         raise RuntimeError(f"company_info insert failed for scrip_code={code}")
@@ -241,8 +230,8 @@ async def store_filing_and_extract(
     industry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Save raw file → upsert XBRL_Data → parse → update metrics_json →
-    upsert Quarterly_Metrics or Annual_Metrics.
+    Save raw file → upsert XBRL_Data → compute Metrics.ind_as →
+    upsert Quarterly_Metrics or Annual_Metrics (scalars only).
     """
     result: Dict[str, Any] = {
         "scrip_code": scrip_code,
@@ -263,7 +252,6 @@ async def store_filing_and_extract(
     raw_text = raw_content if isinstance(raw_content, str) else str(raw_content)
 
     if industry and industry.strip():
-        # Industry refresh only — company_info row must already exist from ensure_company_before_collect
         await repo.upsert_company(
             company_name=company_name or symbol or scrip_code,
             symbol=symbol,
@@ -289,14 +277,7 @@ async def store_filing_and_extract(
     result["extraction_type"] = extraction_type
 
     try:
-        parsed_json, flat, _facts = parse_and_compute_metrics(raw_text, xbrl_url, extraction_type)
-        parsed_json_str = json.dumps(parsed_json, ensure_ascii=False, separators=(",", ":"))
-        await update_metrics_json(
-            scrip_code=scrip_code,
-            period=period,
-            category=category,
-            metrics_json=parsed_json_str,
-        )
+        flat, _facts = await parse_and_compute_metrics(raw_text, xbrl_url, extraction_type)
         if extraction_type == "annual":
             annual_flat = {**(flat or {}), **flat_to_annual_kwargs(flat)}
             await repo.insert_annual_extraction(
@@ -306,7 +287,6 @@ async def store_filing_and_extract(
                 publication_date=period,
                 report_type=category,
                 category=category,
-                parsed_json=parsed_json_str,
                 flat=annual_flat,
             )
         else:
@@ -318,7 +298,6 @@ async def store_filing_and_extract(
                 publication_date=period,
                 report_type=category,
                 category=category,
-                parsed_json=parsed_json_str,
                 flat=q_flat or flat,
             )
         result["extracted"] = True
@@ -333,5 +312,4 @@ def period_out_of_range_should_halt(consecutive_out_of_range: int, threshold: in
     return consecutive_out_of_range >= threshold
 
 
-# Re-export for call sites that previously imported from fiscal_year via local alias
 is_within_range = is_within_collection_range

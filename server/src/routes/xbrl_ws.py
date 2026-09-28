@@ -9,7 +9,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from config.settings import COMPANY_METADATA_CSV
 
 from repositories.sqlite_repository import SqliteRepository
-from repositories.xbrl_repository import update_metrics_json
 from services.batch_xbrl_finder import (
     check_bse_landing_site_health,
     create_browser_and_context,
@@ -40,9 +39,6 @@ SCRIP_FILTER_PER_COMPANY_TIMEOUT_S = 900
 CONSECUTIVE_EMPTY_GRID_HEAL_THRESHOLD = 3
 BSE_RESULTS_URL = "https://www.bseindia.com/corporates/comp_resultsnew"
 PRODUCTION_PORTAL_PATH = Path(__file__).resolve().parents[1] / "automation" / "results_portal.py"
-from services.xml_extraction_service import (
-    extract_xbrl_data_from_bytes,
-)
 from utils.fiscal_year import (
     calculate_5year_fiscal_range as _calculate_5year_fiscal_range,
     is_within_5year_range as _is_within_5year_range,
@@ -392,64 +388,22 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                 continue
 
             try:
+                from services.xbrl_collect_pipeline import parse_and_compute_metrics
+
                 raw_text = raw_content if isinstance(raw_content, str) else raw_content.decode('utf-8', errors='replace')
-                raw_preview = raw_text.lstrip()[:1024].lower()
-                raw_bytes = raw_text.encode('utf-8')
 
-                is_html_content = (
-                    xbrl_link.lower().endswith('.html')
-                    or xbrl_link.lower().endswith('.htm')
-                    or '<html' in raw_preview
-                    or '<!doctype html' in raw_preview
-                    or '<body' in raw_preview
-                    or '<ix:' in raw_preview
+                await websocket.send_json({
+                    "idx": idx,
+                    "status": "computing_metrics",
+                    "extraction_type": extraction_type,
+                    "detail": "Metrics.ind_as catalog",
+                })
+                await asyncio.sleep(0)
+
+                flat_metrics, _facts = await parse_and_compute_metrics(
+                    raw_text, xbrl_link or "", extraction_type
                 )
 
-                if is_html_content:
-                    # HTML / iXBRL content stored as raw HTML
-                    from services.html_parser_service import html_dom_to_structured_json_from_content
-
-                    await websocket.send_json({
-                        "idx": idx,
-                        "status": "parsing_html",
-                        "extraction_type": extraction_type,
-                    })
-                    await asyncio.sleep(0)
-
-                    parsed_json = html_dom_to_structured_json_from_content(raw_bytes)
-                else:
-                    # XML content from file store
-                    await websocket.send_json({
-                        "idx": idx,
-                        "status": "parsing_xml",
-                        "extraction_type": extraction_type,
-                    })
-                    await asyncio.sleep(0)
-
-                    parsed_json = extract_xbrl_data_from_bytes(raw_bytes, only_prefix="in-bse-fin")
-
-                parsed_json_str = json.dumps(parsed_json, ensure_ascii=False, separators=(',', ':'))
-
-                await update_metrics_json(
-                    scrip_code=scrip_code,
-                    period=publication_date,
-                    category=category,
-                    metrics_json=parsed_json_str,
-                )
-
-                flat_metrics = None
-                try:
-                    from services.xbrl_metrics_service import calculate_metrics, calculate_metrics_fourd, convert_xml_grouped_to_list
-                    if isinstance(parsed_json, list):
-                        flat_metrics = calculate_metrics_fourd(parsed_json)
-                    elif isinstance(parsed_json, dict) and not is_html_content:
-                        as_list = convert_xml_grouped_to_list(parsed_json) if callable(convert_xml_grouped_to_list) else None
-                        if as_list:
-                            flat_metrics = calculate_metrics_fourd(as_list)
-                except Exception as metrics_err:
-                    print(f"[extract] metrics compute skipped: {metrics_err}")
-
-                # Store in appropriate table
                 if extraction_type == "quarterly":
                     await repo.insert_quarterly_extraction(
                         scrip_code=scrip_code,
@@ -458,10 +412,9 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                         publication_date=publication_date,
                         report_type=category,
                         category=category,
-                        parsed_json=parsed_json_str,
                         flat=flat_metrics,
                     )
-                else:  # annual
+                else:
                     await repo.insert_annual_extraction(
                         scrip_code=scrip_code,
                         company_name=company_name,
@@ -469,7 +422,6 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                         publication_date=publication_date,
                         report_type=category,
                         category=category,
-                        parsed_json=parsed_json_str,
                         flat=flat_metrics,
                     )
 
@@ -479,7 +431,7 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
                     "company_name": company_name,
                     "status": "stored",
                     "extraction_type": extraction_type,
-                    "message": f"Parsed JSON stored in XBRL_Data + {extraction_type} metrics",
+                    "message": f"Scalar metrics stored in {extraction_type} table (no JSON)",
                 })
                 await asyncio.sleep(0)
 

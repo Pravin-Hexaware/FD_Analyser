@@ -1,20 +1,11 @@
-"""Quarterly_Metrics / Annual_Metrics repository — Tortoise only."""
+"""Quarterly_Metrics / Annual_Metrics repository — Tortoise only, no JSON blobs."""
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from typing import Any, Optional
 
 from db.models import AnnualMetrics, CompanyInfo, QuarterlyMetrics
-
-
-def _as_json_str(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _f(metrics: dict, *keys: str) -> Optional[float]:
@@ -32,23 +23,13 @@ async def upsert_quarterly_metrics(
     scrip_code: str,
     period: str,
     category: str = "std",
-    metrics_json: Any = None,
     currency: Optional[str] = None,
     level_of_rounding: Optional[str] = None,
     flat: Optional[dict] = None,
+    **_ignored: Any,
 ) -> int:
     flat = flat or {}
-    parsed = metrics_json
-    if isinstance(metrics_json, str):
-        try:
-            parsed = json.loads(metrics_json)
-        except Exception:
-            parsed = {}
-    if isinstance(parsed, dict):
-        flat = {**parsed, **flat}
-
     defaults = {
-        "metrics_json": _as_json_str(metrics_json if metrics_json is not None else flat),
         "currency": currency or flat.get("currency") or flat.get("Currency"),
         "level_of_rounding": level_of_rounding
         or flat.get("level_of_rounding")
@@ -98,29 +79,13 @@ async def upsert_annual_metrics(
     scrip_code: str,
     period: str,
     category: str = "std",
-    p_l_json: Any = None,
-    balance_sheet_json: Any = None,
-    cash_flow_json: Any = None,
-    ratios_json: Any = None,
-    metrics_json: Any = None,
     currency: Optional[str] = None,
     level_of_rounding: Optional[str] = None,
     flat: Optional[dict] = None,
+    **_ignored: Any,
 ) -> int:
     flat = flat or {}
-    if isinstance(metrics_json, dict):
-        flat = {**metrics_json, **flat}
-    elif isinstance(metrics_json, str):
-        try:
-            flat = {**json.loads(metrics_json), **flat}
-        except Exception:
-            pass
-
     defaults = {
-        "p_l_json": _as_json_str(p_l_json),
-        "balance_sheet_json": _as_json_str(balance_sheet_json),
-        "cash_flow_json": _as_json_str(cash_flow_json),
-        "ratios_json": _as_json_str(ratios_json),
         "currency": currency or flat.get("currency"),
         "level_of_rounding": level_of_rounding or flat.get("level_of_rounding"),
         "sales": _f(flat, "sales", "Sales"),
@@ -197,7 +162,6 @@ async def upsert_annual_metrics(
     return obj.id
 
 
-# Compat aliases for old insert_*_extraction signatures
 async def insert_quarterly_extraction(
     *,
     scrip_code: str,
@@ -214,7 +178,6 @@ async def insert_quarterly_extraction(
         scrip_code=scrip_code,
         period=publication_date or "",
         category=category if category in ("std", "con") else "std",
-        metrics_json=parsed_json,
         flat=flat,
     )
 
@@ -235,8 +198,6 @@ async def insert_annual_extraction(
         scrip_code=scrip_code,
         period=publication_date or "",
         category=category if category in ("std", "con") else "std",
-        p_l_json=parsed_json,
-        metrics_json=parsed_json,
         flat=flat,
     )
 
@@ -246,7 +207,6 @@ async def xbrl_extraction_exists(
     xbrl_link: str,
     extraction_type: str = "quarterly",
 ) -> bool:
-    # Old API keyed by link; new schema keys by period — check via XbrlData period if needed
     from db.models import XbrlData
 
     filing = await XbrlData.get_or_none(scrip_code=scrip_code, xbrl_link=xbrl_link)
@@ -262,17 +222,6 @@ async def xbrl_extraction_exists(
 
 
 def _row_to_extraction_dict(row, extraction_type: str) -> dict:
-    metrics_blob = None
-    if extraction_type == "quarterly":
-        metrics_blob = row.metrics_json
-    else:
-        metrics_blob = row.p_l_json or row.balance_sheet_json
-    parsed = None
-    if metrics_blob:
-        try:
-            parsed = json.loads(metrics_blob) if isinstance(metrics_blob, str) else metrics_blob
-        except Exception:
-            parsed = metrics_blob
     return {
         "id": row.id,
         "scrip_code": row.scrip_code,
@@ -280,8 +229,6 @@ def _row_to_extraction_dict(row, extraction_type: str) -> dict:
         "period": row.period,
         "report_type": row.category,
         "category": row.category,
-        "parsed_json": parsed if not isinstance(parsed, str) else parsed,
-        "metrics_json": metrics_blob,
         "extraction_type": extraction_type,
         "sales": row.sales,
         "expenses": row.expenses,
@@ -289,12 +236,14 @@ def _row_to_extraction_dict(row, extraction_type: str) -> dict:
         "opm_percentage": row.opm_percent,
         "net_profit": row.net_profit,
         "eps_in_rs": row.eps_in_rs,
+        "ebitda": getattr(row, "ebitda", None),
+        "currency": row.currency,
+        "level_of_rounding": row.level_of_rounding,
         "created_at": str(row.created_at) if row.created_at else None,
     }
 
 
 async def get_latest_quarterly_data(scrip_code: str) -> Optional[dict]:
-    # Resolve symbol → scrip if needed
     scrip = await _resolve_scrip(scrip_code)
     row = await QuarterlyMetrics.filter(scrip_code=scrip).order_by("-id").first()
     return _row_to_extraction_dict(row, "quarterly") if row else None

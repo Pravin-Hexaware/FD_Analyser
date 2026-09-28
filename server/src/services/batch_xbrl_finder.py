@@ -144,8 +144,78 @@ def is_c_or_q_period(period: Optional[str]) -> bool:
 def is_half_or_nine_month_period(period: Optional[str]) -> bool:
     if not period:
         return False
-    p = str(period).strip().upper()
-    return len(p) > 1 and p[1] in ("H", "N")
+    # Prefer canonical token (DC2025-2026) even if the cell has extra whitespace/text.
+    token = normalize_bse_period(period) or str(period).strip().upper()
+    return len(token) > 1 and token[1] in ("H", "N")
+
+
+_PERIOD_TOKEN_RE = re.compile(r"\b([MSDJ][QCHN]\d{4}-\d{4})\b", re.IGNORECASE)
+_XBRL_URL_RE = re.compile(
+    r"""https?://[^\s"'<>\\]+(?:XBRLFILES|xbrlfiles)[^\s"'<>\\]*""",
+    re.IGNORECASE,
+)
+
+
+def normalize_bse_period(period: Optional[str]) -> Optional[str]:
+    """Extract canonical BSE period token (e.g. DC2025-2026) from a grid cell."""
+    if not period:
+        return None
+    m = _PERIOD_TOKEN_RE.search(str(period))
+    if m:
+        return m.group(1).upper()
+    cleaned = re.sub(r"\s+", "", str(period).strip().upper())
+    m2 = re.match(r"^([MSDJ][QCHN]\d{4}-\d{4})", cleaned)
+    return m2.group(1) if m2 else None
+
+
+def _urls_from_text(*blobs: Optional[str]) -> List[str]:
+    found: List[str] = []
+    seen: set[str] = set()
+    for blob in blobs:
+        if not blob:
+            continue
+        for m in _XBRL_URL_RE.finditer(blob):
+            url = m.group(0).rstrip(".,);]'\"")
+            key = url.lower()
+            if key not in seen and not _is_bse_corporate_results_portal_url(url):
+                seen.add(key)
+                found.append(url)
+    return found
+
+
+async def _extract_xbrl_urls_from_anchor(anchor) -> List[str]:
+    """
+    Resolve XBRL document URLs from an anchor WITHOUT clicking.
+    Reads href / onclick / data-* / outerHTML so duplicate grid rows stay intact.
+    """
+    if anchor is None:
+        return []
+    try:
+        if not await anchor.count():
+            return []
+        a = anchor.first
+        href = (await a.get_attribute("href")) or ""
+        onclick = (await a.get_attribute("onclick")) or ""
+        data_url = (await a.get_attribute("data-url")) or ""
+        data_href = (await a.get_attribute("data-href")) or ""
+        try:
+            outer = await a.evaluate("el => el.outerHTML")
+        except Exception:
+            outer = ""
+        urls = _urls_from_text(href, onclick, data_url, data_href, outer)
+        # Absolute or protocol-relative http(s) href that isn't javascript
+        if href and not href.lower().startswith("javascript:"):
+            candidate = href
+            if candidate.startswith("//"):
+                candidate = "https:" + candidate
+            if candidate.lower().startswith("http") and not _is_bse_corporate_results_portal_url(candidate):
+                key = candidate.lower()
+                if key not in {u.lower() for u in urls}:
+                    urls.append(candidate)
+        return urls
+    except Exception as exc:
+        print(f"[XBRL] anchor URL extract failed: {exc}")
+        return []
 
 
 def _is_bse_corporate_results_portal_url(url: str) -> bool:
@@ -226,11 +296,13 @@ async def fetch_xbrl_content(ctx, url: str) -> Optional[str]:
         }
 
         response = requests.get(url, cookies=cookie_dict, headers=headers, timeout=30, verify=False)
-        if response.status_code == 200:
+        if response.status_code == 200 and _looks_like_xbrl_document(response.text):
             return response.text
+        if response.status_code == 200:
+            print(f"Rejected non-XBRL response for {url}: file moved or invalid document")
         else:
             print(f"Failed to load XBRL URL {url}: status {response.status_code}")
-            return None
+        return None
     except Exception as e:
         print(f"Error fetching XBRL content from {url}: {e}")
         return None
@@ -240,6 +312,36 @@ async def fetch_xbrl_content(ctx, url: str) -> Optional[str]:
                 await page.close()
             except Exception as e:
                 print(f"Error closing page {page}: {e}")
+
+
+def _looks_like_xbrl_document(content: str) -> bool:
+    """Return false for BSE moved/not-found pages returned with HTTP 200."""
+    lowered = (content or "").lower()
+    invalid_markers = (
+        "file has been moved",
+        "file not found",
+        "page not found",
+        "requested url was not found",
+        "object moved",
+        "http 404",
+        "404 - file or directory not found",
+    )
+    if any(marker in lowered for marker in invalid_markers):
+        return False
+    return any(
+        marker in lowered
+        for marker in (
+            "<ix:",
+            "<xbrl",
+            "xbrli:",
+            "xbrlfiles",
+            "in-bse-fin",
+            "xmlns:in-bse",
+            "contextref=",
+            "contextref ",
+            "dei:documenttypename",
+        )
+    )
 
 # -------------------- Browser/context helpers --------------------
 async def create_browser_and_context(p):
@@ -551,7 +653,7 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
         # Prefer a canonical period token in the row (e.g. DQ2025-2026)
         row_text = (await row.inner_text() or "").strip()
         if row_text:
-            m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", row_text)
+            m = re.search(r"\b(?:DQ|SQ|MQ|JQ|DC|MC|JC|SC|SH|DN)\d{4}-\d{4}\b", row_text)
             if m:
                 return m.group(0)
 
@@ -562,7 +664,7 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
             td3 = tds.nth(2)
             txt = (await td3.inner_text() or "").strip()
             if txt:
-                m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", txt)
+                m = re.search(r"\b(?:DQ|SQ|MQ|JQ|DC|MC|JC|SC|SH|DN)\d{4}-\d{4}\b", txt)
                 if m:
                     return m.group(0)
                 return txt
@@ -572,7 +674,7 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
         if await period_td.count():
             txt = (await period_td.inner_text() or "").strip()
             if txt:
-                m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", txt)
+                m = re.search(r"\b(?:DQ|SQ|MQ|JQ|DC|MC|JC|SC|SH|DN)\d{4}-\d{4}\b", txt)
                 if m:
                     return m.group(0)
                 return txt
@@ -585,7 +687,7 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
             txt = (await td.inner_text() or "").strip()
             if not txt:
                 continue
-            m = re.search(r"\b(?:DQ|SQ|MQ|JQ|SH|DN)\d{4}-\d{4}\b", txt)
+            m = re.search(r"\b(?:DQ|SQ|MQ|JQ|DC|MC|JC|SC|SH|DN)\d{4}-\d{4}\b", txt)
             if m:
                 return m.group(0)
 
@@ -604,6 +706,7 @@ async def _extract_period_from_anchor(anchor) -> Optional[str]:
 
 async def get_first_xbrl_url(
     page,
+    ctx,
     prefer: str = "any",
     expected_scrip: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -831,25 +934,36 @@ async def get_first_xbrl_url(
             })
 
         if rows_meta:
-            # filter by requested type and pick "latest"
+            # Try newest rows first, but keep duplicate-period rows as fallbacks.
             if prefer_mode == "quarterly":
                 candidates = [r for r in rows_meta if r["type"] == "quarterly"]
-                latest = max(candidates, key=lambda r: (r["fy_end"], r["q_order"] or 0)) if candidates else None
+                candidates.sort(key=lambda r: (r["fy_end"], r["q_order"] or 0), reverse=True)
             else:  # annual
                 candidates = [r for r in rows_meta if r["type"] == "annual"]
-                latest = max(candidates, key=lambda r: (r["fy_end"], 99)) if candidates else None
+                candidates.sort(key=lambda r: (r["fy_end"], 99), reverse=True)
 
-            if latest:
-                # resolve Std first; if missing, Con
-                url_final = await _resolve_from_anchor(latest["std_anchor"])
-                picked_anchor = latest["std_anchor"]
-                if not url_final:
-                    url_final = await _resolve_from_anchor(latest["con_anchor"])
-                    picked_anchor = latest["con_anchor"]
-
-                if url_final:
-                    period_text = latest["period"] or (await _extract_period_from_anchor(picked_anchor)) if picked_anchor else None
-                    return url_final, period_text
+            for candidate_row in candidates:
+                period_norm = normalize_bse_period(candidate_row["period"]) or candidate_row["period"]
+                tried_for_row: set[str] = set()
+                for col_idx, anchor in (
+                    (idx_std, candidate_row["std_anchor"]),
+                    (idx_con, candidate_row["con_anchor"]),
+                ):
+                    urls = await _extract_xbrl_urls_from_anchor(anchor) if anchor is not None else []
+                    if not urls and anchor is not None:
+                        url_final = await _resolve_from_anchor(anchor)
+                        if url_final:
+                            urls = [url_final]
+                    for url_final in urls:
+                        if not url_final or url_final.lower() in tried_for_row:
+                            continue
+                        tried_for_row.add(url_final.lower())
+                        if await fetch_xbrl_content(ctx, url_final):
+                            return url_final, period_norm
+                        print(
+                            f"[XBRL] Invalid document for {period_norm} at {url_final}; "
+                            "trying the next duplicate row/link"
+                        )
 
         # Fall through to generic strategy if typed path found nothing
 
@@ -1017,24 +1131,24 @@ async def fetch_xbrl_for_company(ctx, company: str, prefer: str = "any") -> Tupl
 
             if prefer == "annual":
                 annual_url, annual_period = await get_first_xbrl_url(
-                    page, prefer="annual", expected_scrip=expected_scrip
+                    page, ctx, prefer="annual", expected_scrip=expected_scrip
                 )
 
             elif prefer == "quarterly":
                 quarterly_url, quarterly_period = await get_first_xbrl_url(
-                    page, prefer="quarterly", expected_scrip=expected_scrip
+                    page, ctx, prefer="quarterly", expected_scrip=expected_scrip
                 )
 
             else:
                 annual_url, annual_period = await get_first_xbrl_url(
-                    page, prefer="annual", expected_scrip=expected_scrip
+                    page, ctx, prefer="annual", expected_scrip=expected_scrip
                 )
                 quarterly_url, quarterly_period = await get_first_xbrl_url(
-                    page, prefer="quarterly", expected_scrip=expected_scrip
+                    page, ctx, prefer="quarterly", expected_scrip=expected_scrip
                 )
                 if annual_url is None and quarterly_url is None:
                     fallback_url, fallback_period = await get_first_xbrl_url(
-                        page, prefer=prefer, expected_scrip=expected_scrip
+                        page, ctx, prefer=prefer, expected_scrip=expected_scrip
                     )
                     if fallback_url:
                         annual_url = fallback_url
@@ -1291,9 +1405,11 @@ async def get_all_std_xbrl_urls(ctx, company: str, expected_scrip: Optional[str]
 
     attempts = 0
 
-    # Deduplicate by report_type + URL (not period) so duplicate periods with
-    # different links are each attempted; dead links do not block working ones.
-    tried_urls: set[tuple[str, str]] = set()
+    # Snapshot every grid row first (no clicks / no fetches) so duplicate period
+    # rows stay addressable. Then try each candidate URL until valid XBRL loads.
+    # Keyed by (period, category) — first valid wins; other duplicates are fallbacks.
+    candidates: List[dict] = []
+    accepted_period_category: set[tuple[str, str]] = set()
 
     # Prefer caller-provided BSE code (CSV); otherwise resolve from search suggestions.
     scrip_hint: Optional[str] = None
@@ -1316,6 +1432,7 @@ async def get_all_std_xbrl_urls(ctx, company: str, expected_scrip: Optional[str]
             await wait_grid_ready(page)
 
             yielded_any = False
+            candidates.clear()
 
             grid = None
             for sel in [
@@ -1358,12 +1475,13 @@ async def get_all_std_xbrl_urls(ctx, company: str, expected_scrip: Optional[str]
                     idx_std = _idx("std xbrl", idx_std)
                     idx_con = _idx("con xbrl", idx_con)
                 except Exception as e:
-                    print("Error clicking anchor:", e)
+                    print("Error reading grid headers:", e)
 
-                # collect all rows (GridView may omit <tbody>)
+                # ---- Phase 1: snapshot ALL rows (no navigation / no fetch) ----
                 body_rows = await _grid_data_rows_locator(grid)
-                print(f"[XBRL] Results rows detected: {await body_rows.count()}", flush=True)
-                for r in range(await body_rows.count()):
+                row_count = await body_rows.count()
+                print(f"[XBRL] Results rows detected: {row_count}", flush=True)
+                for r in range(row_count):
                     tr = body_rows.nth(r)
                     tds = tr.locator("td")
                     try:
@@ -1376,59 +1494,124 @@ async def get_all_std_xbrl_urls(ctx, company: str, expected_scrip: Optional[str]
                         if not _row_belongs_to_scrip(code_cell, name_cell, row_scrip):
                             continue
 
-                        per = (await tds.nth(idx_period).inner_text()).strip()
-                        # Skip only half-yearly (SH) and nine-months (DN).
-                        if is_half_or_nine_month_period(per):
+                        per_raw = (await tds.nth(idx_period).inner_text()).strip() if await tds.count() > idx_period else ""
+                        per = normalize_bse_period(per_raw) or (per_raw or "").strip()
+                        if not per or is_half_or_nine_month_period(per):
                             continue
                         ind = (await tds.nth(idx_industry).inner_text()).strip() if await tds.count() > idx_industry else ""
                         std_a = tds.nth(idx_std).locator("a").first if await tds.count() > idx_std else None
                         con_a = tds.nth(idx_con).locator("a").first if await tds.count() > idx_con else None
 
-                        # Yield Std XBRL only when raw content loads successfully.
-                        if std_a and await std_a.count():
-                            href = (await std_a.first.get_attribute("href")) or ""
-                            if href and not href.lower().startswith("javascript:"):
-                                url = await _resolve(href)
-                            else:
-                                url = await _resolve_from_anchor(std_a)
-
-                            url_key = ("std", url) if url else None
-                            if url and url_key not in tried_urls:
-                                tried_urls.add(url_key)
-                                xbrl_content = await fetch_xbrl_content(ctx, url)
-                                if xbrl_content:
-                                    yielded_any = True
-                                    yield url, per, "std", xbrl_content, ind
-                                    await asyncio.sleep(2)  # Delay to avoid rate limiting
-                                # else: dead link logged by fetch_xbrl_content; try next row
-
-                        # Yield Con XBRL only when raw content loads successfully.
-                        if con_a and await con_a.count():
-                            href = (await con_a.first.get_attribute("href")) or ""
-                            if href and not href.lower().startswith("javascript:"):
-                                url = await _resolve(href)
-                            else:
-                                url = await _resolve_from_anchor(con_a)
-
-                            url_key = ("con", url) if url else None
-                            if url and url_key not in tried_urls:
-                                tried_urls.add(url_key)
-                                xbrl_content = await fetch_xbrl_content(ctx, url)
-                                if xbrl_content:
-                                    yielded_any = True
-                                    yield url, per, "con", xbrl_content, ind
-                                    await asyncio.sleep(2)  # Delay to avoid rate limiting
-
+                        for category, col_idx, anchor in (
+                            ("std", idx_std, std_a),
+                            ("con", idx_con, con_a),
+                        ):
+                            urls: List[str] = []
+                            if anchor is not None:
+                                urls = await _extract_xbrl_urls_from_anchor(anchor)
+                            if not urls and await tds.count() > col_idx:
+                                try:
+                                    cell_html = await tds.nth(col_idx).inner_html()
+                                    urls = _urls_from_text(cell_html)
+                                except Exception:
+                                    urls = []
+                            if not urls and anchor is not None:
+                                # Relative href without XBRLFILES in the string — resolve via page
+                                try:
+                                    if await anchor.count():
+                                        href = (await anchor.first.get_attribute("href")) or ""
+                                        if href and not href.lower().startswith("javascript:"):
+                                            resolved = await _resolve(href)
+                                            if resolved:
+                                                urls = [resolved]
+                                except Exception:
+                                    pass
+                            for url in urls:
+                                candidates.append(
+                                    {
+                                        "period": per,
+                                        "category": category,
+                                        "url": url,
+                                        "industry": ind,
+                                        "row_index": r,
+                                    }
+                                )
                     except Exception as e:
-                        print("Error clicking anchor:", e)
+                        print(f"[XBRL] Error snapshotting grid row {r}: {e}")
                         continue
+
+                # Group by (period, category); preserve first-seen order; keep all URL fallbacks
+                grouped: dict[tuple[str, str], List[dict]] = {}
+                group_order: List[tuple[str, str]] = []
+                for cand in candidates:
+                    key = (cand["period"], cand["category"])
+                    if key not in grouped:
+                        grouped[key] = []
+                        group_order.append(key)
+                    # Dedupe identical URLs inside the group, keep order
+                    existing_urls = {c["url"].lower() for c in grouped[key]}
+                    if cand["url"].lower() not in existing_urls:
+                        grouped[key].append(cand)
+
+                dup_groups = {k: v for k, v in grouped.items() if len(v) > 1}
+                if dup_groups:
+                    print(
+                        f"[XBRL] Duplicate period groups: "
+                        + ", ".join(f"{p}/{c}×{len(v)}" for (p, c), v in dup_groups.items()),
+                        flush=True,
+                    )
+                print(
+                    f"[XBRL] Snapshot: {len(candidates)} link(s) across "
+                    f"{len(group_order)} period+category group(s)",
+                    flush=True,
+                )
+
+                # ---- Phase 2: try each URL in a group until one is valid XBRL ----
+                for key in group_order:
+                    period, category = key
+                    if key in accepted_period_category:
+                        continue
+                    options = grouped[key]
+                    stored = False
+                    for opt_idx, opt in enumerate(options):
+                        url = opt["url"]
+                        print(
+                            f"[XBRL] Trying {category} {period} "
+                            f"candidate {opt_idx + 1}/{len(options)} row={opt['row_index']}: {url}",
+                            flush=True,
+                        )
+                        xbrl_content = await fetch_xbrl_content(ctx, url)
+                        if xbrl_content:
+                            accepted_period_category.add(key)
+                            yielded_any = True
+                            stored = True
+                            print(
+                                f"[XBRL] Accepted valid {category} for {period} "
+                                f"(candidate {opt_idx + 1}/{len(options)})",
+                                flush=True,
+                            )
+                            yield url, period, category, xbrl_content, opt.get("industry") or ""
+                            await asyncio.sleep(2)
+                            break
+                        print(
+                            f"[XBRL] Invalid/moved {category} for {period} "
+                            f"(candidate {opt_idx + 1}/{len(options)}); "
+                            f"{'trying next duplicate' if opt_idx + 1 < len(options) else 'no more candidates'}",
+                            flush=True,
+                        )
+                    if not stored:
+                        print(
+                            f"[XBRL] FAILED to obtain valid {category} XBRL for period {period} "
+                            f"after {len(options)} candidate(s)",
+                            flush=True,
+                        )
 
             # If we yielded any, success
             if yielded_any:
                 try:
                     await page.close()
                 except Exception as e:
-                    print("Error clicking anchor:", e)
+                    print("Error closing page after yield:", e)
                 return
 
             # Empty grid / no matching rows after search+submit.

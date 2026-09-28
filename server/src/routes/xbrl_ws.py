@@ -16,6 +16,7 @@ from services.batch_xbrl_finder import (
     fetch_xbrl_for_company,
     get_all_std_xbrl_urls,
     is_half_or_nine_month_period,
+    normalize_bse_period,
 )
 from services.heal_service import (
     BseWebsiteDown,
@@ -24,7 +25,11 @@ from services.heal_service import (
     is_heal_in_progress,
 )
 from services.logging_service import logging_service
-from services.xbrl_file_store import read_xbrl_raw, save_xbrl_raw
+from services.xbrl_collect_pipeline import (
+    ensure_company_before_collect,
+    store_filing_and_extract,
+)
+from services.xbrl_file_store import read_xbrl_raw
 from automation.results_portal import SiteHealth, WEBSITE_DOWN_DETAIL, is_site_down
 
 # Heal pipeline (analysis + DOM + up to 5 codegen/harness attempts) can take 15–25 min.
@@ -505,7 +510,7 @@ async def websocket_extract_from_db(websocket: WebSocket) -> None:
 
 
 
-@router.websocket("/ws/xbrl-fetch-all-std")
+@router.websocket("/ws/xbrl-fetch-all")
 async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
     """WebSocket endpoint that reads companies from CSV, fetches XBRL URLs, and stores them in SQLite.
 
@@ -677,14 +682,15 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                             try:
                                 async with asyncio.timeout(per_company_timeout):
                                     # Ensure company exists; if already present, keep it as-is
-                                    if not await repo.company_exists(scrip_code):
-                                        await repo.upsert_company(
-                                            company_name=name,
-                                            symbol=symbol,
-                                            scrip_code=scrip_code,
-                                            sector=sector,
-                                            industry=industry,
-                                        )
+                                    # STRICT: company_info first, then collect std+con XBRL
+                                    await ensure_company_before_collect(
+                                        repo,
+                                        scrip_code=scrip_code,
+                                        company_name=name,
+                                        symbol=symbol,
+                                        sector=sector,
+                                        industry=industry,
+                                    )
 
                                     # Send started message
                                     await websocket.send_json({
@@ -694,19 +700,25 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                         "symbol": symbol,
                                     })
 
-                                    # Prepare existing period/url lookup once to prevent repeated DB scans
-                                    # Using (publication_date, xbrl_link) key allows O(1) lookup instead of DB queries
+                                    # Skip only when we already have a valid filing for (period, category).
+                                    # Duplicate BSE grid periods with different URLs are tried until one stores.
                                     existing_filings = await repo.get_xbrl_filings(scrip_code)
-                                    existing_map = {
-                                        (f.get('publication_date'), f.get('xbrl_link')): f.get('id')
+                                    stored_period_category = {
+                                        (
+                                            normalize_bse_period(f.get("period") or f.get("publication_date"))
+                                            or (f.get("period") or f.get("publication_date")),
+                                            (f.get("category") or f.get("report_type") or "").strip().lower(),
+                                        )
                                         for f in existing_filings
+                                        if (f.get("period") or f.get("publication_date"))
+                                        and (f.get("category") or f.get("report_type"))
                                     }
 
                                     # Canonical flow: type scrip in Security Name field (not company name).
                                     search_query = scrip_code
                                     expected_scrip = scrip_code
 
-                                    # Fetch all Std XBRL URLs (only std, not con)
+                                    # Fetch std + con; duplicate periods yield only after valid raw content loads
                                     link_idx = 0
                                     consecutive_out_of_range = 0
                                     async for url, period, xbrl_type, raw_content, _industry in get_all_std_xbrl_urls(
@@ -714,18 +726,20 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                         search_query,
                                         expected_scrip=expected_scrip,
                                     ):
-                                        # FILTER 1: Only collect "std" XBRL, skip "con"
-                                        if xbrl_type.lower() != "std":
+                                        category = (xbrl_type or "std").strip().lower()
+                                        if category not in ("std", "con"):
                                             continue
 
-                                        # FILTER 2: Skip half-yearly (SH) / nine-months (DN) only
+                                        period = normalize_bse_period(period) or period
+
+                                        # Skip half-yearly (SH) / nine-months (DN) only
                                         if is_half_or_nine_month_period(period):
                                             await websocket.send_json({
                                                 "idx": idx,
                                                 "link_idx": link_idx,
                                                 "scrip_code": scrip_code,
                                                 "symbol": symbol,
-                                                "report_type": xbrl_type,
+                                                "report_type": category,
                                                 "period": period,
                                                 "url": url,
                                                 "status": "skipped_half_or_nine_month",
@@ -741,16 +755,16 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                                 "link_idx": link_idx,
                                                 "scrip_code": scrip_code,
                                                 "symbol": symbol,
-                                                "report_type": xbrl_type,
+                                                "report_type": category,
                                                 "period": period,
                                                 "url": url,
                                                 "status": "skipped_unprocessable",
-                                                "reason": "link present but raw content unavailable",
+                                                "reason": "link present but raw content unavailable (file moved or invalid)",
                                             })
                                             link_idx += 1
                                             continue
 
-                                        # FILTER 3: Only collect data from past 5 years + EARLY EXIT OPTIMIZATION
+                                        # Fiscal range filter + early exit
                                         if not _is_within_5year_range(period):
                                             consecutive_out_of_range += 1
                                             await websocket.send_json({
@@ -758,7 +772,7 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                                 "link_idx": link_idx,
                                                 "scrip_code": scrip_code,
                                                 "symbol": symbol,
-                                                "report_type": xbrl_type,
+                                                "report_type": category,
                                                 "period": period,
                                                 "url": url,
                                                 "status": "skipped_outside_5year_range",
@@ -779,59 +793,49 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
 
                                         consecutive_out_of_range = 0
 
-                                        if _industry and _industry.strip():
-                                            industry = _industry.strip()
-                                            await repo.upsert_company(
-                                                company_name=name,
-                                                symbol=symbol,
-                                                scrip_code=scrip_code,
-                                                sector=industry,
-                                                industry=industry,
-                                            )
-
-                                        if (period, url) in existing_map:
+                                        if (period, category) in stored_period_category:
                                             await websocket.send_json({
                                                 "idx": idx,
                                                 "link_idx": link_idx,
                                                 "scrip_code": scrip_code,
                                                 "symbol": symbol,
-                                                "report_type": xbrl_type,
+                                                "report_type": category,
                                                 "period": period,
                                                 "url": url,
                                                 "status": "skipped_duplicate",
-                                                "reason": f"Duplicate: same period ({period}) and URL for {scrip_code}",
+                                                "reason": (
+                                                    f"Already have valid {category} filing for period {period}; "
+                                                    "skipping further duplicate grid rows"
+                                                ),
                                             })
                                             link_idx += 1
                                             continue
 
                                         try:
-                                            category = (xbrl_type or "std").strip().lower()
-                                            if category not in ("std", "con"):
-                                                category = "std"
-                                            save_xbrl_raw(
-                                                scrip_code,
-                                                category,
-                                                period,
-                                                raw_content,
-                                                url,
-                                            )
-                                            filing_id = await repo.insert_xbrl_filing(
+                                            store_result = await store_filing_and_extract(
+                                                repo,
                                                 scrip_code=scrip_code,
                                                 symbol=symbol,
-                                                xbrl_link=url,
-                                                publication_date=period,
-                                                report_type=category,
-                                                category=category,
+                                                company_name=name,
+                                                xbrl_url=url,
                                                 period=period,
+                                                xbrl_type=category,
+                                                raw_content=raw_content,
+                                                industry=(_industry or industry or "").strip() or None,
                                             )
-                                            stored = True
+                                            filing_id = store_result.get("filing_id")
+                                            stored = bool(store_result.get("stored_filing"))
+                                            if stored:
+                                                stored_period_category.add((period, category))
+                                            if store_result.get("error") and not stored:
+                                                raise RuntimeError(store_result["error"])
                                         except Exception as insert_error:
                                             await websocket.send_json({
                                                 "idx": idx,
                                                 "link_idx": link_idx,
                                                 "scrip_code": scrip_code,
                                                 "symbol": symbol,
-                                                "report_type": xbrl_type,
+                                                "report_type": category,
                                                 "period": period,
                                                 "url": url,
                                                 "status": "error_inserting",
@@ -845,11 +849,12 @@ async def websocket_xbrl_fetch_all(websocket: WebSocket) -> None:
                                             "link_idx": link_idx,
                                             "scrip_code": scrip_code,
                                             "symbol": symbol,
-                                            "report_type": xbrl_type,
+                                            "report_type": category,
                                             "period": period,
                                             "url": url,
                                             "id": filing_id,
                                             "stored": stored,
+                                            "extracted": store_result.get("extracted"),
                                             "attempts": link_idx + 1,
                                         })
                                         link_idx += 1

@@ -9,6 +9,8 @@ class CompanyInfo(Model):
     symbol = fields.CharField(max_length=64, null=True)
     scrip_code = fields.CharField(max_length=32, unique=True)
     isin_no = fields.CharField(max_length=32, null=True)
+    is_in_nifty_500 = fields.CharField(max_length=1, default="F", index=True)
+    nifty500_updated_at = fields.DatetimeField(null=True)
     industry = fields.ForeignKeyField(
         "models.Industry",
         related_name="companies",

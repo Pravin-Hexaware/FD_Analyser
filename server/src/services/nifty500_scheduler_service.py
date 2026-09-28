@@ -143,7 +143,7 @@ def _existing_missing_scrip_codes() -> set[str]:
 
 
 class Nifty500SchedulerService:
-    """Refresh nifty_500_list when stale and enqueue companies missing current-FY XBRL."""
+    """Refresh company_info.is_in_nifty_500 when stale and enqueue missing FY XBRL coverage."""
 
     @staticmethod
     async def needs_refresh(repo: SqliteRepository, now: Optional[datetime] = None) -> bool:
@@ -155,6 +155,11 @@ class Nifty500SchedulerService:
 
     @staticmethod
     async def refresh_nifty500_list(repo: SqliteRepository) -> int:
+        """
+        Step 1: download Nifty 500 CSV.
+        Step 2–3 (in replace_nifty500_rows): set all is_in_nifty_500='F', then
+        mark list companies 'T' (adding any missing into company_info).
+        """
         isin_to_scrip = _load_isin_to_scrip_map(VALIDATION_CSV)
         text = _download_nifty_csv(NIFTY500_CSV_URL)
         if text:
@@ -177,7 +182,10 @@ class Nifty500SchedulerService:
 
         updated_at = datetime.utcnow().isoformat()
         count = await repo.replace_nifty500_rows(rows, updated_at)
-        print(f"[nifty500] Replaced nifty_500_list with {count} rows at {updated_at}")
+        print(
+            f"[nifty500] Updated company_info.is_in_nifty_500 for {count} companies "
+            f"at {updated_at} (others set to F)"
+        )
         return count
 
     @staticmethod

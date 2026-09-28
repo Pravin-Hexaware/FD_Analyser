@@ -75,7 +75,7 @@ NUMERIC_SYNONYMS = {
         "changesininventories"
     ],
     "employee": ["employeebenefitexpense", "employeebenefitexpenses"],
-    "power_fuel": ["powerandfuelexpenses", "powerandfuel"],  # optional; often missing
+    "power_fuel": ["powerandfuelexpenses", "powerandfuel"],
     "other_expenses": ["otherexpenses", "otherexpense"],
 
     # Non-operating
@@ -92,11 +92,11 @@ NUMERIC_SYNONYMS = {
     # Profit
     "pbt": [
         "profitbeforetax", "profitlossbeforetax", "pbt",
-        "profitbeforeexceptionalitemsandtax"  # sometimes used; we may adjust with exceptional items if needed
+        "profitbeforeexceptionalitemsandtax"
     ],
     "exceptional": ["exceptionalitemsbefortax", "exceptionalitemsbeforetax", "exceptionalitems"],
 
-    # Tax (total and components)
+    # Tax
     "tax_expense": ["taxexpense", "totaltaxexpenses", "taxexpenses"],
     "current_tax": ["currenttax", "currenttaxexpense", "currenttaxexpenses", "currenttaxes"],
     "deferred_tax": ["deferredtax", "deferredtaxexpense", "deferredtaxexpenses", "deferredtaxes"],
@@ -106,10 +106,41 @@ NUMERIC_SYNONYMS = {
 
     # EPS
     "eps_basic": [
-        "basicearningslosspersharefromcontinuinganddiscontinuedoperations",
         "basicearningslosspersharefromcontinuingoperations",
+        "basicearningslosspersharefromcontinuinganddiscontinuedoperations",
         "basicearningspershare", "earningspershare"
     ],
+
+    # Annual BS / CF / ratios tags
+    "equity_share_capital": ["equitysharecapital", "equitycapital", "paidupequitysharecapital"],
+    "other_equity": ["otherequity", "reserves", "reservesandexcedingrevaluationreserve"],
+    "liabilities": ["liabilities", "totalliabilities"],
+    "equity": ["equity", "totalequity"],
+    "assets": ["assets", "totalassets"],
+    "current_assets": ["currentassets"],
+    "current_liabilities": ["currentliabilities"],
+    "inventories": ["inventories", "inventory"],
+    "debt_equity_ratio": ["debtequityratio", "debttoequityratio"],
+    "cwip": ["capitalworkinprogress", "cwip"],
+    "noncurrent_investments": ["noncurrentinvestments"],
+    "current_investments": ["currentinvestments"],
+    "cfo": [
+        "cashflowsfromusedinoperatingactivities",
+        "netcashflowfromoperatingactivities",
+        "cashflowfromoperatingactivities",
+    ],
+    "cfi": [
+        "cashflowsfromusedininvestingactivities",
+        "cashflowfrominvestingactivities",
+    ],
+    "cff": [
+        "cashflowsfromusedinfinancingactivities",
+        "cashflowfromfinancingactivities",
+    ],
+    "dividends_paid": ["dividendspaidclassifiedasfinancingactivities", "dividendspaid"],
+    "dividends_received": ["dividendsreceivedclassifiedasinvestingactivities", "dividendsreceived"],
+    "trade_receivables_noncurrent": ["tradereceivablesnoncurrent"],
+    "trade_receivables_current": ["tradereceivablescurrent", "tradereceivables"],
 }
 
 
@@ -117,21 +148,48 @@ NUMERIC_SYNONYMS = {
 
 def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Build a key->value map ONLY for OneD context, then compute Screener-style metrics.
-    Returns plain python types; FastAPI/Pydantic will coerce.
+    Build Screener-style quarterly metrics from OneD XBRL facts.
+
+    Mapping (tags / formulas):
+      Sales                 = RevenueFromOperations
+      Exceptional items     = signed ExceptionalItemsBeforeTax
+      Other Income_normal   = OtherIncome
+      Interest              = FinanceCosts
+      Depreciation          = DepreciationDepletionAndAmortisationExpense
+      Profit before tax     = ProfitBeforeTax
+      Profit After Tax      = ProfitLossForPeriod
+      Tax                   = TaxExpense
+      EPS in Rs             = BasicEarningsLossPerShareFromContinuingOperations
+      Net Profit            = Profit After Tax
+      Other Income          = Other Income_normal + Exceptional items
+      Expenses              = Sales + Other Income - PBT - Depreciation - Interest
+      Operating Profit      = Sales - Expenses
+      EBITDA                = Operating Profit
+      Revenue Growth %      = Sales - Operating Profit
+      EBITDA Margin %       = (EBITDA / Sales) × 100
+      EBIT                  = PBT + Interest - Other Income
+      OPM %                 = (Operating Profit / Sales) × 100
+      Tax %                 = (Tax / PBT) × 100
+      Net Profit Margin     = (Net Profit / Sales) × 100
     """
-    # 1) Keep only OneD facts (quarterly), normalize to lowercase localnames
     oned: Dict[str, Decimal] = {}
     for item in extracted_data:
         ctx = (item.get("contextRef") or item.get("contextref") or "").strip().lower()
-        if ctx != "oned":
+        if ctx and ctx != "oned":
             continue
         local = str(item.get("localname", "")).strip().lower()
         val = _to_decimal(item.get("value"))
         if local and (val is not None) and (local not in oned):
             oned[local] = val
 
-    # 2) Collect meta strings from ANY context (these may not be OneD)
+    # If nothing matched OneD, fall back to first numeric per localname from any context
+    if not oned:
+        for item in extracted_data:
+            local = str(item.get("localname", "")).strip().lower()
+            val = _to_decimal(item.get("value"))
+            if local and val is not None and local not in oned:
+                oned[local] = val
+
     meta: Dict[str, Any] = {}
     for item in extracted_data:
         local = str(item.get("localname", "")).strip().lower()
@@ -141,7 +199,6 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         sval = str(raw).strip()
         if not sval:
             continue
-
         if local in STRING_SYNONYMS["currency"]:
             meta.setdefault("currency", sval)
         if local in STRING_SYNONYMS["level_of_rounding"]:
@@ -155,115 +212,104 @@ def calculate_metrics(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         if local in STRING_SYNONYMS["company_symbol"]:
             meta.setdefault("company_symbol", sval)
 
-    # Helper to resolve numeric via synonyms
     def G(key: str) -> Optional[Decimal]:
         return _first_by_keys(oned, NUMERIC_SYNONYMS.get(key, []))
 
-    # Fallback fuzzy lookup for missing numbers (tries to match key fragments)
-    def fuzzy_numeric(key: str, patterns: List[str]) -> Optional[Decimal]:
-        if key in oned and oned[key] is not None:
-            return oned[key]
-        low_keys = list(oned.keys())
+    def fuzzy_numeric(patterns: List[str]) -> Optional[Decimal]:
         for p in patterns:
-            for k in low_keys:
-                if p in k:
-                    v = oned.get(k)
-                    if v is not None:
-                        return v
+            for k, v in oned.items():
+                if p in k and v is not None:
+                    return v
         return None
 
-    # 3) Resolve fields (raw components)
-    Sales = G("sales") or fuzzy_numeric("sales", ["revenuefromoperations", "revenue", "turnover", "sales"])
-    OtherIncome = G("other_income") or fuzzy_numeric("other_income", ["otherincome", "nonoperating"])
+    Sales = G("sales") or fuzzy_numeric(["revenuefromoperations", "revenue", "turnover", "sales"])
+    OtherIncome_normal = G("other_income") or fuzzy_numeric(["otherincome", "nonoperating"])
+    Exceptional = G("exceptional") or fuzzy_numeric(["exceptionalitemsbefortax", "exceptionalitemsbeforetax", "exceptionalitems"])
+    # Keep signed exceptional value (sign(ExceptionalItemsBeforeTax))
+    if Exceptional is not None:
+        Exceptional = Decimal(Exceptional)  # already signed from parser
 
-    CostMaterials = G("cost_of_materials") or Decimal(0)
-    PurchasesTraded = G("purchases_traded") or Decimal(0)
-    InventoryChange = G("inventory_change") or Decimal(0)
-    Employee = G("employee") or Decimal(0)
-    PowerFuel = G("power_fuel") or Decimal(0)
-    OtherExp = G("other_expenses") or Decimal(0)
-
-    # Screener-style Operating Expenses (before depreciation)
-    Expenses = CostMaterials + PurchasesTraded + InventoryChange + Employee + PowerFuel + OtherExp
-
-    FinanceCosts = G("finance_costs") or fuzzy_numeric("finance_costs", ["interest", "finance"])
-    Depreciation = G("depreciation") or fuzzy_numeric("depreciation", ["depreciation", "amortisation"])
-
-    # Profit before tax (prefer true PBT; if only PBEIT + Exceptional available, we could adjust)
-    PBT = G("pbt") or fuzzy_numeric("pbt", ["profitbeforetax", "pbt"])
-
-    # Tax pieces
-    TaxTotal = G("tax_expense") or fuzzy_numeric("tax_expense", ["taxexpense", "taxexpenses"])
-    CurrentTax = G("current_tax") or fuzzy_numeric("current_tax", ["currenttax"])
-    DeferredTax = G("deferred_tax") or fuzzy_numeric("deferred_tax", ["deferredtax"])
-
-    # Infer missing components from available totals (without overriding explicit facts)
+    FinanceCosts = G("finance_costs") or fuzzy_numeric(["financecosts", "interest", "finance"])
+    Depreciation = G("depreciation") or fuzzy_numeric(["depreciationdepletionandamortisationexpense", "depreciation", "amortisation"])
+    PBT = G("pbt") or fuzzy_numeric(["profitbeforetax", "pbt"])
+    TaxTotal = G("tax_expense") or fuzzy_numeric(["taxexpense", "totaltaxexpenses", "taxexpenses"])
+    CurrentTax = G("current_tax") or fuzzy_numeric(["currenttax"])
+    DeferredTax = G("deferred_tax") or fuzzy_numeric(["deferredtax"])
     if TaxTotal is not None:
         if CurrentTax is None and DeferredTax is not None:
             CurrentTax = TaxTotal - DeferredTax
         elif DeferredTax is None and CurrentTax is not None:
             DeferredTax = TaxTotal - CurrentTax
-    else:
-        # If total not present but both components exist, set total = sum
-        if CurrentTax is not None and DeferredTax is not None:
-            TaxTotal = CurrentTax + DeferredTax
+    elif CurrentTax is not None and DeferredTax is not None:
+        TaxTotal = CurrentTax + DeferredTax
 
-    NetProfit = G("net_profit") or fuzzy_numeric("net_profit", ["profitlossforperiod", "netprofit"])
-    EPS = G("eps_basic") or fuzzy_numeric("eps_basic", ["eps", "earningspershare"])
+    PAT = G("net_profit") or fuzzy_numeric(["profitlossforperiod", "netprofit"])
+    EPS = G("eps_basic") or fuzzy_numeric(
+        ["basicearningslosspersharefromcontinuingoperations", "basicearningslosspershare", "eps", "earningspershare"]
+    )
 
-    # OperatingProfit = EBITDA = Sales - Expenses
-    OperatingProfit = None
-    if Sales is not None:
-        OperatingProfit = Sales - Expenses
+    # Other Income = Other Income_normal + Exceptional items
+    oi_n = OtherIncome_normal if OtherIncome_normal is not None else Decimal(0)
+    exc = Exceptional if Exceptional is not None else Decimal(0)
+    OtherIncome = None
+    if OtherIncome_normal is not None or Exceptional is not None:
+        OtherIncome = oi_n + exc
 
-    # Percentages
-    OPM_percentage = _pct(OperatingProfit, Sales) if (OperatingProfit is not None and Sales not in (None, Decimal("0"))) else None
-    Tax_percent = _pct(TaxTotal, PBT) if (TaxTotal is not None and PBT not in (None, Decimal("0"))) else None
+    # Expenses = sales + Other Income - Profit Before tax - Depreciation - Interest
+    Expenses = None
+    if Sales is not None and PBT is not None:
+        oi = OtherIncome if OtherIncome is not None else Decimal(0)
+        dep = Depreciation if Depreciation is not None else Decimal(0)
+        interest = FinanceCosts if FinanceCosts is not None else Decimal(0)
+        Expenses = Sales + oi - PBT - dep - interest
 
-    # 4) Build result (return None for components we truly did not find)
-    # For components where we "assumed 0" only for arithmetic, expose None if the exact tag was missing
-    def _as_float_or_none(val: Optional[Decimal], was_present: bool) -> Optional[float]:
-        return float(val) if (val is not None and was_present) else (float(val) if was_present else None)
+    # Operating Profit = Sales - Expenses
+    OperatingProfit = (Sales - Expenses) if (Sales is not None and Expenses is not None) else None
+    EBITDA = OperatingProfit
+    # Revenue Growth % mapping provided as Sales - Operating Profit
+    RevenueGrowth = (Sales - OperatingProfit) if (Sales is not None and OperatingProfit is not None) else None
+    EBITDAMargin = _pct(EBITDA, Sales) if EBITDA is not None else None
+    # EBIT = PBT + Interest - Other Income
+    EBIT = None
+    if PBT is not None:
+        interest = FinanceCosts if FinanceCosts is not None else Decimal(0)
+        oi = OtherIncome if OtherIncome is not None else Decimal(0)
+        EBIT = PBT + interest - oi
+    OPM = _pct(OperatingProfit, Sales) if OperatingProfit is not None else None
+    Tax_percent = _pct(TaxTotal, PBT) if TaxTotal is not None else None
+    NetProfit = PAT
+    NetProfitMargin = _pct(NetProfit, Sales) if NetProfit is not None else None
 
-    # Presence flags for explicit component discovery
-    present_cost = _first_by_keys(oned, NUMERIC_SYNONYMS["cost_of_materials"]) is not None
-    present_emp = _first_by_keys(oned, NUMERIC_SYNONYMS["employee"]) is not None
-    present_otherexp = _first_by_keys(oned, NUMERIC_SYNONYMS["other_expenses"]) is not None
-
-    result = {
+    return {
         "company_name": meta.get("company_name"),
         "company_symbol": meta.get("company_symbol"),
         "currency": meta.get("currency"),
         "level_of_rounding": meta.get("level_of_rounding"),
         "reporting_type": meta.get("reporting_type"),
         "NatureOfReport": meta.get("nature_of_report"),
-
         "Sales": float(Sales) if Sales is not None else None,
-        "Expenses": float(Expenses) if Expenses is not None else None,
-        "OperatingProfit": float(OperatingProfit) if OperatingProfit is not None else None,
-        "OPM_percentage": float(OPM_percentage) if OPM_percentage is not None else None,
-
+        "ExceptionalItems": float(Exceptional) if Exceptional is not None else None,
+        "OtherIncome_normal": float(OtherIncome_normal) if OtherIncome_normal is not None else None,
         "OtherIncome": float(OtherIncome) if OtherIncome is not None else None,
-        "CostOfMaterialsConsumed": float(CostMaterials) if present_cost else None,
-        "EmployeeBenefitExpense": float(Employee) if present_emp else None,
-        "OtherExpenses": float(OtherExp) if present_otherexp else None,
-
         "Interest": float(FinanceCosts) if FinanceCosts is not None else None,
         "Depreciation": float(Depreciation) if Depreciation is not None else None,
-
         "ProfitBeforeTax": float(PBT) if PBT is not None else None,
+        "ProfitAfterTax": float(PAT) if PAT is not None else None,
+        "Tax": float(TaxTotal) if TaxTotal is not None else None,
         "CurrentTax": float(CurrentTax) if CurrentTax is not None else None,
         "DeferredTax": float(DeferredTax) if DeferredTax is not None else None,
-        "Tax": float(TaxTotal) if TaxTotal is not None else None,
         "Tax_percent": float(Tax_percent) if Tax_percent is not None else None,
-
-        "NetProfit": float(NetProfit) if NetProfit is not None else None,
         "EPS_in_RS": float(EPS) if EPS is not None else None,
+        "NetProfit": float(NetProfit) if NetProfit is not None else None,
+        "Expenses": float(Expenses) if Expenses is not None else None,
+        "OperatingProfit": float(OperatingProfit) if OperatingProfit is not None else None,
+        "EBITDA": float(EBITDA) if EBITDA is not None else None,
+        "RevenueGrowth_percent": float(RevenueGrowth) if RevenueGrowth is not None else None,
+        "EBITDA_Margin_percent": float(EBITDAMargin) if EBITDAMargin is not None else None,
+        "EBIT": float(EBIT) if EBIT is not None else None,
+        "OPM_percentage": float(OPM) if OPM is not None else None,
+        "NetProfitMargin": float(NetProfitMargin) if NetProfitMargin is not None else None,
     }
-
-    # Optional: print for debug
-    # print(result)
-    return result
 
 
 # -------------------- API Route --------------------
@@ -300,7 +346,13 @@ def convert_xml_grouped_to_list(grouped_data: Dict[str, List[Dict[str, Any]]]) -
 
 
 def calculate_metrics_fourd(extracted_data: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Build metrics using FourD context (annual reports)."""
+    """
+    Annual metrics for Annual_Metrics (aligned with db/seed.py Annual catalog).
+
+    - Annual P&L particulars: values ONLY from contextRef=FourD
+    - Balancesheet / Cashflow / Ratios: ignore contextRef (first numeric per tag from any context)
+    """
+    # P&L map: FourD only (no fallback to other contexts)
     fourd: Dict[str, Decimal] = {}
     for item in extracted_data:
         ctx = (item.get("contextRef") or item.get("contextref") or "").strip().lower()
@@ -310,6 +362,14 @@ def calculate_metrics_fourd(extracted_data: List[Dict[str, Any]]) -> Dict[str, A
         val = _to_decimal(item.get("value"))
         if local and val is not None and local not in fourd:
             fourd[local] = val
+
+    # BS / CF / Ratios map: any context
+    any_ctx: Dict[str, Decimal] = {}
+    for item in extracted_data:
+        local = str(item.get("localname", "")).strip().lower()
+        val = _to_decimal(item.get("value"))
+        if local and val is not None and local not in any_ctx:
+            any_ctx[local] = val
 
     meta: Dict[str, Any] = {}
     for item in extracted_data:
@@ -333,68 +393,148 @@ def calculate_metrics_fourd(extracted_data: List[Dict[str, Any]]) -> Dict[str, A
         if local in STRING_SYNONYMS["company_symbol"]:
             meta.setdefault("company_symbol", sval)
 
-    def g(key: str) -> Optional[Decimal]:
+    def g_pl(key: str) -> Optional[Decimal]:
         return _first_by_keys(fourd, NUMERIC_SYNONYMS.get(key, []))
 
-    def fuzzy_numeric(key: str, patterns: List[str]) -> Optional[Decimal]:
-        if key in fourd and fourd[key] is not None:
-            return fourd[key]
+    def fuzzy_pl(patterns: List[str]) -> Optional[Decimal]:
         for p in patterns:
-            for k in fourd:
-                if p in k:
-                    v = fourd.get(k)
-                    if v is not None:
-                        return v
+            for k, v in fourd.items():
+                if p in k and v is not None:
+                    return v
         return None
 
-    sales = g("sales") or fuzzy_numeric("sales", ["revenuefromoperations", "revenue", "turnover", "sales"])
-    other_income = g("other_income") or fuzzy_numeric("other_income", ["otherincome", "nonoperating"])
+    def g_any(key: str) -> Optional[Decimal]:
+        return _first_by_keys(any_ctx, NUMERIC_SYNONYMS.get(key, []))
 
-    cost_materials = g("cost_of_materials") or Decimal(0)
-    purchases_traded = g("purchases_traded") or Decimal(0)
-    inventory_change = g("inventory_change") or Decimal(0)
-    employee = g("employee") or Decimal(0)
-    power_fuel = g("power_fuel") or Decimal(0)
-    other_exp = g("other_expenses") or Decimal(0)
-    expenses = cost_materials + purchases_traded + inventory_change + employee + power_fuel + other_exp
+    def fuzzy_any(patterns: List[str]) -> Optional[Decimal]:
+        for p in patterns:
+            for k, v in any_ctx.items():
+                if p in k and v is not None:
+                    return v
+        return None
 
-    finance_costs = g("finance_costs") or fuzzy_numeric("finance_costs", ["interest", "finance"])
-    depreciation = g("depreciation") or fuzzy_numeric("depreciation", ["depreciation", "amortisation"])
-    pbt = g("pbt") or fuzzy_numeric("pbt", ["profitbeforetax", "pbt"])
+    # --- Annual P&L (seed: Annual / P&L) — FourD only ---
+    Sales = g_pl("sales") or fuzzy_pl(["revenuefromoperations", "revenue", "turnover", "sales"])
+    OtherIncome_normal = g_pl("other_income") or fuzzy_pl(["otherincome"])
+    Exceptional = g_pl("exceptional") or fuzzy_pl(
+        ["exceptionalitemsbeforetax", "exceptionalitemsbefortax", "exceptionalitems"]
+    )
+    FinanceCosts = g_pl("finance_costs") or fuzzy_pl(["financecosts", "interest"])
+    Depreciation = g_pl("depreciation") or fuzzy_pl(
+        ["depreciationdepletionandamortisationexpense", "depreciation"]
+    )
+    PBT = g_pl("pbt") or fuzzy_pl(["profitbeforetax", "pbt"])
+    TaxTotal = g_pl("tax_expense") or fuzzy_pl(["taxexpense", "totaltaxexpenses"])
+    CurrentTax = g_pl("current_tax") or fuzzy_pl(["currenttax"])
+    DeferredTax = g_pl("deferred_tax") or fuzzy_pl(["deferredtax"])
+    if TaxTotal is not None:
+        if CurrentTax is None and DeferredTax is not None:
+            CurrentTax = TaxTotal - DeferredTax
+        elif DeferredTax is None and CurrentTax is not None:
+            DeferredTax = TaxTotal - CurrentTax
+    elif CurrentTax is not None and DeferredTax is not None:
+        TaxTotal = CurrentTax + DeferredTax
 
-    tax_total = g("tax_expense") or fuzzy_numeric("tax_expense", ["taxexpense", "taxexpenses"])
-    current_tax = g("current_tax") or fuzzy_numeric("current_tax", ["currenttax"])
-    deferred_tax = g("deferred_tax") or fuzzy_numeric("deferred_tax", ["deferredtax"])
-    if tax_total is not None:
-        if current_tax is None and deferred_tax is not None:
-            current_tax = tax_total - deferred_tax
-        elif deferred_tax is None and current_tax is not None:
-            deferred_tax = tax_total - current_tax
-    elif current_tax is not None and deferred_tax is not None:
-        tax_total = current_tax + deferred_tax
+    PAT = g_pl("net_profit") or fuzzy_pl(["profitlossforperiod", "netprofit"])
+    EPS = g_pl("eps_basic") or fuzzy_pl(
+        ["basicearningslosspersharefromcontinuingoperations", "eps"]
+    )
 
-    net_profit = g("net_profit") or fuzzy_numeric("net_profit", ["profitlossforperiod", "netprofit"])
-    eps = g("eps_basic") or fuzzy_numeric("eps_basic", ["eps", "earningspershare"])
-    operating_profit = sales - expenses if sales is not None else None
-    opm_percentage = _pct(operating_profit, sales) if operating_profit is not None and sales not in (None, Decimal("0")) else None
-    tax_percent = _pct(tax_total, pbt) if tax_total is not None and pbt not in (None, Decimal("0")) else None
+    oi_n = OtherIncome_normal if OtherIncome_normal is not None else Decimal(0)
+    exc = Exceptional if Exceptional is not None else Decimal(0)
+    OtherIncome = (oi_n + exc) if (OtherIncome_normal is not None or Exceptional is not None) else None
 
-    equity_capital = g("equity_share_capital") or fuzzy_numeric("equity_share_capital", ["equitysharecapital", "equitycapital", "sharecapital"])
-    reserves = g("reserves") or fuzzy_numeric("reserves", ["otherequity", "reserves", "retainedearnings"])
-    borrowings = g("borrowings") or fuzzy_numeric("borrowings", ["borrowings", "longtermborrowings", "shorttermborrowings"])
-    other_liabilities = g("other_liabilities") or fuzzy_numeric("other_liabilities", ["otherliabilities", "otherliability"])
-    total_liabilities = g("total_liabilities") or fuzzy_numeric("total_liabilities", ["liabilities", "equityandliabilities", "totalliabilities"])
-    assets = g("total_assets") or fuzzy_numeric("total_assets", ["assets", "totalassets"])
-    total_equity = g("equity") or fuzzy_numeric("equity", ["equity", "totalequity"])
+    Expenses = None
+    if Sales is not None and PBT is not None:
+        oi = OtherIncome if OtherIncome is not None else Decimal(0)
+        dep = Depreciation if Depreciation is not None else Decimal(0)
+        interest = FinanceCosts if FinanceCosts is not None else Decimal(0)
+        Expenses = Sales + oi - PBT - dep - interest
 
-    ppe = _first_by_keys(fourd, ["propertyplantandequipment", "ppe"])
-    intangibles = _first_by_keys(fourd, ["otherintangibleassets", "intangibleassets"])
-    fixed_assets = (ppe or Decimal(0)) + (intangibles or Decimal(0)) if ppe is not None or intangibles is not None else None
-    cwip = g("cwip") or fuzzy_numeric("cwip", ["capitalworkinprogress"])
-    investments = g("investments") or Decimal(0)
-    cfo = _first_by_keys(fourd, ["cashflowsfromusedinoperatingactivities", "netcashflowfromoperatingactivities", "cashflowfromoperatingactivities"])
-    cfi = _first_by_keys(fourd, ["cashflowsfromusedininvestingactivities", "cashflowfrominvestingactivities"])
-    cff = _first_by_keys(fourd, ["cashflowsfromusedinfinancingactivities", "cashflowfromfinancingactivities"])
+    OperatingProfit = (Sales - Expenses) if (Sales is not None and Expenses is not None) else None
+    EBITDA = OperatingProfit
+    RevenueGrowth = (Sales - OperatingProfit) if (Sales is not None and OperatingProfit is not None) else None
+    EBITDAMargin = _pct(EBITDA, Sales)
+    EBIT = None
+    if PBT is not None:
+        interest = FinanceCosts if FinanceCosts is not None else Decimal(0)
+        oi = OtherIncome if OtherIncome is not None else Decimal(0)
+        EBIT = PBT + interest - oi
+    OPM = _pct(OperatingProfit, Sales)
+    Tax_percent = _pct(TaxTotal, PBT)
+    NetProfit = PAT
+    NetProfitMargin = _pct(NetProfit, Sales)
+
+    # Dividend Paid / Payout are Annual P&L in seed → FourD only
+    DividendPaid = g_any("dividends_paid") or fuzzy_pl(
+        ["dividendspaidclassifiedasfinancingactivities", "dividendspaid"]
+    )
+    DividendPayout = _pct(DividendPaid, NetProfit) if DividendPaid is not None else None
+
+    # --- Balancesheet (seed: Annual / Balancesheet) — any context ---
+    EquityCapital = g_any("equity_share_capital") or fuzzy_any(["equitysharecapital", "equitycapital"])
+    Reserves = g_any("other_equity") or fuzzy_any(["otherequity", "reserves"])
+    TotalLiabilities = g_any("liabilities") or fuzzy_any(["liabilities", "totalliabilities"])
+    CurrentAssets = g_any("current_assets") or fuzzy_any(["currentassets"])
+    CurrentLiabilities = g_any("current_liabilities") or fuzzy_any(["currentliabilities"])
+    Inventories = g_any("inventories") or fuzzy_any(["inventories", "inventory"])
+    TotalEquity = g_any("equity") or fuzzy_any(["equity", "totalequity"])
+    TotalAssets = g_any("assets") or fuzzy_any(["assets", "totalassets"])
+    DebtEquityRatio = g_any("debt_equity_ratio") or fuzzy_any(["debtequityratio", "debttoequity"])
+
+    CurrentRatio = _div(CurrentAssets, CurrentLiabilities)
+    QuickRatio = None
+    if CurrentAssets is not None and CurrentLiabilities not in (None, Decimal("0")):
+        inv = Inventories if Inventories is not None else Decimal(0)
+        QuickRatio = (CurrentAssets - inv) / CurrentLiabilities
+
+    WorkingCapital = None
+    if CurrentAssets is not None and CurrentLiabilities is not None:
+        WorkingCapital = CurrentAssets - CurrentLiabilities
+
+    CWIP = g_any("cwip") or fuzzy_any(["capitalworkinprogress"])
+    NonCurInv = g_any("noncurrent_investments") or fuzzy_any(["noncurrentinvestments"])
+    CurInv = g_any("current_investments") or fuzzy_any(["currentinvestments"])
+    Investments = None
+    if NonCurInv is not None or CurInv is not None:
+        Investments = (NonCurInv or Decimal(0)) + (CurInv or Decimal(0))
+
+    Borrowings = None
+    if DebtEquityRatio is not None and TotalEquity is not None:
+        Borrowings = DebtEquityRatio * TotalEquity
+
+    DebtToAssets = _div(Borrowings, TotalAssets)
+
+    # --- Cashflow (seed: Annual / Cashflow) — any context ---
+    CFO = g_any("cfo") or fuzzy_any(["cashflowsfromusedinoperatingactivities", "cashflowfromoperating"])
+    CFI = g_any("cfi") or fuzzy_any(["cashflowsfromusedininvestingactivities", "cashflowfrominvesting"])
+    CFF = g_any("cff") or fuzzy_any(["cashflowsfromusedinfinancingactivities", "cashflowfromfinancing"])
+    DividendsReceived = g_any("dividends_received") or fuzzy_any(
+        ["dividendsreceivedclassifiedasinvestingactivities", "dividendsreceived"]
+    )
+
+    CashConversion = _div(CFO, EBITDA)
+    NetCashFlow = None
+    if CFO is not None or CFI is not None or CFF is not None:
+        NetCashFlow = (CFO or Decimal(0)) + (CFI or Decimal(0)) + (CFF or Decimal(0))
+    CFO_OP = _div(CFO, OperatingProfit)
+
+    # --- Ratios (seed: Annual / Ratios) — any context inputs + P&L FourD where needed ---
+    ROA = _pct(NetProfit, TotalAssets)
+    ROE = _pct(NetProfit, TotalEquity)
+    ROCE = None
+    if EBIT is not None and TotalEquity is not None:
+        capital = TotalEquity + (Borrowings or Decimal(0))
+        ROCE = _pct(EBIT, capital)
+
+    TradeRecvNC = g_any("trade_receivables_noncurrent") or fuzzy_any(["tradereceivablesnoncurrent"])
+    TradeRecvC = g_any("trade_receivables_current") or fuzzy_any(
+        ["tradereceivablescurrent", "tradereceivables"]
+    )
+    DebtorDays = None
+    if Sales not in (None, Decimal("0")) and (TradeRecvNC is not None or TradeRecvC is not None):
+        recv = (TradeRecvNC or Decimal(0)) + (TradeRecvC or Decimal(0))
+        DebtorDays = (recv / Sales) * Decimal(365)
 
     return {
         "company_name": meta.get("company_name"),
@@ -402,31 +542,52 @@ def calculate_metrics_fourd(extracted_data: List[Dict[str, Any]]) -> Dict[str, A
         "currency": meta.get("currency"),
         "level_of_rounding": meta.get("level_of_rounding"),
         "reporting_type": meta.get("reporting_type"),
-        "Sales": float(sales) if sales is not None else None,
-        "Expenses": float(expenses) if expenses is not None else None,
-        "OperatingProfit": float(operating_profit) if operating_profit is not None else None,
-        "OPM_percentage": float(opm_percentage) if opm_percentage is not None else None,
-        "OtherIncome": float(other_income) if other_income is not None else None,
-        "Interest": float(finance_costs) if finance_costs is not None else None,
-        "Depreciation": float(depreciation) if depreciation is not None else None,
-        "ProfitBeforeTax": float(pbt) if pbt is not None else None,
-        "CurrentTax": float(current_tax) if current_tax is not None else None,
-        "DeferredTax": float(deferred_tax) if deferred_tax is not None else None,
-        "Tax": float(tax_total) if tax_total is not None else None,
-        "Tax_percent": float(tax_percent) if tax_percent is not None else None,
-        "NetProfit": float(net_profit) if net_profit is not None else None,
-        "EPS_in_RS": float(eps) if eps is not None else None,
-        "EquityCapital": float(equity_capital) if equity_capital is not None else None,
-        "Reserves": float(reserves) if reserves is not None else None,
-        "Borrowings": float(borrowings) if borrowings is not None else None,
-        "OtherLiabilities": float(other_liabilities) if other_liabilities is not None else None,
-        "TotalLiabilities": float(total_liabilities) if total_liabilities is not None else None,
-        "TotalAssets": float(assets) if assets is not None else None,
-        "TotalEquity": float(total_equity) if total_equity is not None else None,
-        "FixedAssets": float(fixed_assets) if fixed_assets is not None else None,
-        "CWIP": float(cwip) if cwip is not None else None,
-        "Investments": float(investments) if investments is not None else None,
-        "CashFromOperatingActivity": float(cfo) if cfo is not None else None,
-        "CashFromInvestingActivity": float(cfi) if cfi is not None else None,
-        "CashFromFinancingActivity": float(cff) if cff is not None else None,
+        "Sales": float(Sales) if Sales is not None else None,
+        "ExceptionalItems": float(Exceptional) if Exceptional is not None else None,
+        "OtherIncome_normal": float(OtherIncome_normal) if OtherIncome_normal is not None else None,
+        "OtherIncome": float(OtherIncome) if OtherIncome is not None else None,
+        "Interest": float(FinanceCosts) if FinanceCosts is not None else None,
+        "Depreciation": float(Depreciation) if Depreciation is not None else None,
+        "ProfitBeforeTax": float(PBT) if PBT is not None else None,
+        "ProfitAfterTax": float(PAT) if PAT is not None else None,
+        "Tax": float(TaxTotal) if TaxTotal is not None else None,
+        "CurrentTax": float(CurrentTax) if CurrentTax is not None else None,
+        "DeferredTax": float(DeferredTax) if DeferredTax is not None else None,
+        "Tax_percent": float(Tax_percent) if Tax_percent is not None else None,
+        "EPS_in_RS": float(EPS) if EPS is not None else None,
+        "NetProfit": float(NetProfit) if NetProfit is not None else None,
+        "Expenses": float(Expenses) if Expenses is not None else None,
+        "OperatingProfit": float(OperatingProfit) if OperatingProfit is not None else None,
+        "EBITDA": float(EBITDA) if EBITDA is not None else None,
+        "RevenueGrowth_percent": float(RevenueGrowth) if RevenueGrowth is not None else None,
+        "EBITDA_Margin_percent": float(EBITDAMargin) if EBITDAMargin is not None else None,
+        "EBIT": float(EBIT) if EBIT is not None else None,
+        "OPM_percentage": float(OPM) if OPM is not None else None,
+        "NetProfitMargin": float(NetProfitMargin) if NetProfitMargin is not None else None,
+        "DividendPaid": float(DividendPaid) if DividendPaid is not None else None,
+        "DividendPayout_percent": float(DividendPayout) if DividendPayout is not None else None,
+        "EquityCapital": float(EquityCapital) if EquityCapital is not None else None,
+        "Reserves": float(Reserves) if Reserves is not None else None,
+        "TotalLiabilities": float(TotalLiabilities) if TotalLiabilities is not None else None,
+        "CurrentRatio": float(CurrentRatio) if CurrentRatio is not None else None,
+        "QuickRatio": float(QuickRatio) if QuickRatio is not None else None,
+        "TotalEquity": float(TotalEquity) if TotalEquity is not None else None,
+        "TotalAssets": float(TotalAssets) if TotalAssets is not None else None,
+        "DebtToEquity": float(DebtEquityRatio) if DebtEquityRatio is not None else None,
+        "WorkingCapital": float(WorkingCapital) if WorkingCapital is not None else None,
+        "CWIP": float(CWIP) if CWIP is not None else None,
+        "Investments": float(Investments) if Investments is not None else None,
+        "Borrowings": float(Borrowings) if Borrowings is not None else None,
+        "DebtToAssets": float(DebtToAssets) if DebtToAssets is not None else None,
+        "CashFromOperatingActivity": float(CFO) if CFO is not None else None,
+        "CashFromInvestingActivity": float(CFI) if CFI is not None else None,
+        "DividendsReceived": float(DividendsReceived) if DividendsReceived is not None else None,
+        "CashFromFinancingActivity": float(CFF) if CFF is not None else None,
+        "CashConversionRatio": float(CashConversion) if CashConversion is not None else None,
+        "NetCashFlow": float(NetCashFlow) if NetCashFlow is not None else None,
+        "CFO_OP": float(CFO_OP) if CFO_OP is not None else None,
+        "ROA": float(ROA) if ROA is not None else None,
+        "ROE": float(ROE) if ROE is not None else None,
+        "ROCE_percent": float(ROCE) if ROCE is not None else None,
+        "DebtorDays": float(DebtorDays) if DebtorDays is not None else None,
     }

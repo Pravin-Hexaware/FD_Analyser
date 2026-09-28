@@ -14,16 +14,18 @@ from services.batch_xbrl_finder import (
     create_browser_and_context,
     fetch_xbrl_content,
     get_all_std_xbrl_urls,
+    is_half_or_nine_month_period,
+    normalize_bse_period,
 )
 from services.heal_service import BseWebsiteDown, PlaywrightHealBatchHalt, heal_results_portal
 from automation.results_portal import WEBSITE_DOWN_DETAIL, is_site_down
 from playwright.async_api import async_playwright
 from repositories.sqlite_repository import SqliteRepository
-from services.html_parser_service import html_dom_to_structured_json_from_content
-from services.xml_extraction_service import extract_xbrl_data_from_bytes
-from services.xbrl_file_store import save_xbrl_raw
-from repositories.xbrl_repository import update_metrics_json
-from utils.fiscal_year import is_within_5year_range
+from services.xbrl_collect_pipeline import (
+    ensure_company_before_collect,
+    store_filing_and_extract,
+)
+from utils.fiscal_year import is_within_collection_range as is_within_5year_range
 
 PRODUCTION_PORTAL_PATH = Path(__file__).resolve().parents[1] / "automation" / "results_portal.py"
 
@@ -186,6 +188,7 @@ class MissingCompanyService:
         raw_content: Optional[Any] = _RAW_CONTENT_UNSET,
         industry: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Compat wrapper → shared store_filing_and_extract pipeline."""
         result: Dict[str, Any] = {
             'scrip_code': scrip_code,
             'company_name': company_name,
@@ -205,7 +208,6 @@ class MissingCompanyService:
         if raw_content is _RAW_CONTENT_UNSET:
             raw_content = await fetch_xbrl_content(ctx, xbrl_url)
         elif not raw_content:
-            # Prefetched by collector but unprocessable (404/empty) — do not re-fetch.
             result['error'] = f'skipped_unprocessable: no raw content for {xbrl_url}'
             if log_file is not None:
                 _append_missing_company_log(log_file, {
@@ -220,173 +222,42 @@ class MissingCompanyService:
 
         if not raw_content:
             result['error'] = f'Unable to fetch raw XBRL content from {xbrl_url}'
-            if log_file is not None:
-                _append_missing_company_log(log_file, {
-                    'stage': 'skipped_unprocessable',
-                    'scrip_code': scrip_code,
-                    'company_name': company_name,
-                    'xbrl_url': xbrl_url,
-                    'period': publication_date,
-                    'reason': 'unable to fetch raw content',
-                })
             return result
 
-        raw_text = raw_content if isinstance(raw_content, str) else raw_content
-        raw_bytes = raw_text.encode('utf-8') if isinstance(raw_text, str) else raw_text
-
-        if log_file is not None:
-            _append_missing_company_log(log_file, {
-                'stage': 'found_url',
-                'scrip_code': scrip_code,
-                'company_name': company_name,
-                'xbrl_url': xbrl_url,
-                'period': publication_date,
-                'message': 'URL discovered with raw content; storing',
-            })
-
-        print(json.dumps({
-            'scrip_code': scrip_code,
-            'company_name': company_name,
-            'url': xbrl_url,
-            'period': publication_date,
-            'industry': industry,
-        }, ensure_ascii=False))
-
-        normalized_company_name = company_name.strip().upper()
-        normalized_symbol = symbol.strip().upper() if symbol else None
-
-        # Ensure company exists in database for joining later
-        await repo.upsert_company(
-            company_name=normalized_company_name,
-            symbol=normalized_symbol,
+        await ensure_company_before_collect(
+            repo,
             scrip_code=scrip_code,
-            sector=industry.strip() if industry else None,
+            company_name=company_name,
+            symbol=symbol,
             industry=industry.strip() if industry else None,
+            sector=industry.strip() if industry else None,
         )
 
-        category = (report_type or "std").strip().lower()
-        if category not in ("std", "con"):
-            category = "std"
-        period = publication_date or ""
-
-        save_xbrl_raw(scrip_code, category, period, raw_text, xbrl_url)
-
-        if not await repo.xbrl_filing_exists(scrip_code, xbrl_url, report_type=category):
-            await repo.insert_xbrl_filing(
-                scrip_code=scrip_code,
-                symbol=symbol,
-                xbrl_link=xbrl_url,
-                publication_date=publication_date,
-                report_type=category,
-                category=category,
-                period=period,
-            )
-        result['stored_filing'] = True
-
-        extraction_type = MissingCompanyService._determine_extraction_type(publication_date)
-
-        try:
-            parsed_json = (
-                html_dom_to_structured_json_from_content(raw_bytes)
-                if MissingCompanyService._is_html_content(raw_text)
-                else extract_xbrl_data_from_bytes(raw_bytes, only_prefix='in-bse-fin')
-            )
-        except Exception as parse_error:
-            result['error'] = f'Failed to parse XBRL content: {parse_error}'
-            if log_file is not None:
-                _append_missing_company_log(log_file, {
-                    'stage': 'parse_error',
-                    'scrip_code': scrip_code,
-                    'company_name': company_name,
-                    'xbrl_url': xbrl_url,
-                    'period': publication_date,
-                    'error': str(parse_error),
-                })
-            return result
-
-        if parsed_json is None:
-            result['error'] = 'Parsed XBRL content was empty.'
-            if log_file is not None:
-                _append_missing_company_log(log_file, {
-                    'stage': 'empty_parse',
-                    'scrip_code': scrip_code,
-                    'company_name': company_name,
-                    'xbrl_url': xbrl_url,
-                    'period': publication_date,
-                })
-            return result
-
-        if await repo.xbrl_extraction_exists(scrip_code, xbrl_url, extraction_type):
-            result['extracted'] = True
-            if log_file is not None:
-                _append_missing_company_log(log_file, {
-                    'stage': 'already_extracted',
-                    'scrip_code': scrip_code,
-                    'company_name': company_name,
-                    'xbrl_url': xbrl_url,
-                    'period': publication_date,
-                    'extraction_type': extraction_type,
-                })
-            return result
-
-        parsed_json_str = json.dumps(parsed_json, ensure_ascii=False, separators=(',', ':'))
-        parsed_output_file = None
-        if log_file is not None:
-            parsed_output_file = _write_parsed_json_file(scrip_code, company_name, publication_date or 'unknown', parsed_json)
-            _append_missing_company_log(log_file, {
-                'stage': 'parsed_json_saved',
-                'scrip_code': scrip_code,
-                'company_name': company_name,
-                'xbrl_url': xbrl_url,
-                'period': publication_date,
-                'parsed_json_path': str(parsed_output_file),
-            })
-
-        await update_metrics_json(
+        store_result = await store_filing_and_extract(
+            repo,
             scrip_code=scrip_code,
-            period=period,
-            category=category,
-            metrics_json=parsed_json_str,
+            symbol=symbol,
+            company_name=company_name,
+            xbrl_url=xbrl_url,
+            period=publication_date or '',
+            xbrl_type=report_type,
+            raw_content=raw_content if isinstance(raw_content, str) else str(raw_content),
+            industry=industry,
         )
-
-        if extraction_type == 'quarterly':
-            caps_company_name = company_name.strip().upper()
-            await repo.insert_quarterly_extraction(
-                scrip_code=scrip_code,
-                company_name=caps_company_name,
-                xbrl_link=xbrl_url,
-                publication_date=publication_date or '',
-                report_type=category,
-                category=category,
-                parsed_json=parsed_json_str,
-            )
-        else:
-            if not publication_date or len(publication_date) < 2 or publication_date[1].upper() != 'C':
-                result['error'] = (
-                    f"Skipped annual extraction because period does not meet required format: {publication_date}"
-                )
-                if log_file is not None:
-                    _append_missing_company_log(log_file, {
-                        'stage': 'skipped_annual_extraction',
-                        'scrip_code': scrip_code,
-                        'company_name': company_name,
-                        'xbrl_url': xbrl_url,
-                        'period': publication_date,
-                        'reason': 'period[1] != C',
-                    })
-                return result
-
-            cap_company_name = company_name.strip().upper()
-            await repo.insert_annual_extraction(
-                scrip_code=scrip_code,
-                company_name=cap_company_name,
-                xbrl_link=xbrl_url,
-                publication_date=publication_date or '',
-                report_type=category,
-                category=category,
-                parsed_json=parsed_json_str,
-            )
-        result['extracted'] = True
+        result.update({
+            'stored_filing': store_result.get('stored_filing'),
+            'extracted': store_result.get('extracted'),
+            'extraction_type': store_result.get('extraction_type'),
+            'report_type': store_result.get('category') or report_type,
+            'error': store_result.get('error'),
+        })
+        if log_file is not None:
+            _append_missing_company_log(log_file, {
+                'stage': 'stored_and_extracted',
+                'scrip_code': scrip_code,
+                'period': publication_date,
+                'result': result,
+            })
         return result
 
     @staticmethod
@@ -411,22 +282,48 @@ class MissingCompanyService:
         })
 
         async def _collect_and_store(active_ctx) -> tuple:
+            # STRICT: company_info first — only then scrape/store XBRLs for this company
+            await ensure_company_before_collect(
+                repo,
+                scrip_code=scrip_code,
+                company_name=company_name,
+                symbol=symbol,
+            )
+            _append_missing_company_log(log_file, {
+                'stage': 'company_info_saved',
+                'scrip_code': scrip_code,
+                'company_name': company_name,
+                'message': 'company_info ready; starting XBRL collection',
+            })
             attempts = 0
             results = []
             consecutive_out_of_range = 0
+            stored_period_category: set[tuple[str, str]] = set()
             async for xbrl_url, xbrl_period, xbrl_type, raw_content, industry in get_all_std_xbrl_urls(
                 active_ctx,
                 query,
                 expected_scrip=expected_scrip,
             ):
-                if not xbrl_url or str(xbrl_type).lower() != 'std':
+                category = str(xbrl_type or "std").lower()
+                if not xbrl_url or category not in ("std", "con"):
                     continue
 
-                # Same past-5-FY gate + early exit as Fetch Filings WS
+                xbrl_period = normalize_bse_period(xbrl_period) or xbrl_period
+
+                if is_half_or_nine_month_period(xbrl_period):
+                    _append_missing_company_log(log_file, {
+                        'stage': 'skipped_half_or_nine_month',
+                        'scrip_code': scrip_code,
+                        'period': xbrl_period,
+                        'url': xbrl_url,
+                        'category': category,
+                    })
+                    continue
+
                 if not is_within_5year_range(xbrl_period):
                     consecutive_out_of_range += 1
                     _append_missing_company_log(log_file, {
-                        'stage': 'skipped_outside_5year_range',
+                        'stage': 'skipped_outside_collection_range',
                         'scrip_code': scrip_code,
                         'period': xbrl_period,
                         'url': xbrl_url,
@@ -437,28 +334,70 @@ class MissingCompanyService:
                             'stage': 'halting_collection',
                             'scrip_code': scrip_code,
                             'reason': (
-                                '2 consecutive records outside 5-year range. '
-                                'All remaining records assumed to be older.'
+                                '2 consecutive records older than FY 2020-2021. '
+                                'Proceeding after collecting last available periods.'
                             ),
                         })
                         break
                     continue
 
                 consecutive_out_of_range = 0
+                if not raw_content:
+                    _append_missing_company_log(log_file, {
+                        'stage': 'skipped_unprocessable',
+                        'scrip_code': scrip_code,
+                        'period': xbrl_period,
+                        'url': xbrl_url,
+                        'reason': 'link present but raw content unavailable (file moved or invalid)',
+                    })
+                    continue
+
+                period_key = (str(xbrl_period or "").strip(), category)
+                if period_key in stored_period_category:
+                    _append_missing_company_log(log_file, {
+                        'stage': 'skipped_duplicate_period',
+                        'scrip_code': scrip_code,
+                        'period': xbrl_period,
+                        'category': category,
+                        'url': xbrl_url,
+                        'reason': 'already stored valid filing for this period+category',
+                    })
+                    continue
+
                 attempts += 1
-                results.append(await MissingCompanyService._fetch_and_store_xbrl_for_company(
-                    active_ctx,
+                store_result = await store_filing_and_extract(
                     repo,
-                    scrip_code,
-                    company_name,
-                    symbol,
-                    xbrl_url,
-                    xbrl_period,
-                    log_file=log_file,
-                    report_type='std',
+                    scrip_code=scrip_code,
+                    symbol=symbol,
+                    company_name=company_name,
+                    xbrl_url=xbrl_url,
+                    period=xbrl_period or "",
+                    xbrl_type=category,
                     raw_content=raw_content,
                     industry=industry,
-                ))
+                )
+                if store_result.get("stored_filing"):
+                    stored_period_category.add(period_key)
+                results.append({
+                    'scrip_code': scrip_code,
+                    'company_name': company_name,
+                    'symbol': symbol or '',
+                    'xbrl_url': xbrl_url,
+                    'publication_date': xbrl_period,
+                    'report_type': category,
+                    'stored_filing': store_result.get('stored_filing'),
+                    'extracted': store_result.get('extracted'),
+                    'extraction_type': store_result.get('extraction_type'),
+                    'error': store_result.get('error'),
+                })
+                _append_missing_company_log(log_file, {
+                    'stage': 'stored_and_extracted',
+                    'scrip_code': scrip_code,
+                    'period': xbrl_period,
+                    'category': category,
+                    'extracted': store_result.get('extracted'),
+                    'error': store_result.get('error'),
+                })
             return attempts, results
 
         try:

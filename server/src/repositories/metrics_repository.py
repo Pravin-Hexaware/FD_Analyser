@@ -67,12 +67,18 @@ async def upsert_quarterly_metrics(
         "expenses": _f(flat, "expenses", "Expenses"),
         "operating_profit": _f(flat, "operating_profit", "OperatingProfit"),
         "ebitda": _f(flat, "ebitda", "EBITDA"),
-        "revenue_growth_percent": _f(flat, "revenue_growth_percentage", "revenue_growth_percent"),
-        "ebitda_margin_percent": _f(flat, "ebitda_margin_percentage", "ebitda_margin_percent"),
+        "revenue_growth_percent": _f(
+            flat, "revenue_growth_percentage", "revenue_growth_percent", "RevenueGrowth_percent"
+        ),
+        "ebitda_margin_percent": _f(
+            flat, "ebitda_margin_percentage", "ebitda_margin_percent", "EBITDA_Margin_percent"
+        ),
         "ebit": _f(flat, "ebit", "EBIT"),
         "opm_percent": _f(flat, "opm_percentage", "OPM_percentage", "opm_percent"),
         "tax_percent": _f(flat, "tax_percent", "Tax_percent"),
-        "net_profit_margin": _f(flat, "net_profit_margin_percentage", "net_profit_margin"),
+        "net_profit_margin": _f(
+            flat, "net_profit_margin_percentage", "net_profit_margin", "NetProfitMargin"
+        ),
     }
     obj, created = await QuarterlyMetrics.get_or_create(
         scrip_code=str(scrip_code).strip(),
@@ -119,7 +125,7 @@ async def upsert_annual_metrics(
         "level_of_rounding": level_of_rounding or flat.get("level_of_rounding"),
         "sales": _f(flat, "sales", "Sales"),
         "exceptional_items": _f(flat, "exceptional_items", "ExceptionalItems"),
-        "other_income_normal": _f(flat, "other_income_normal"),
+        "other_income_normal": _f(flat, "other_income_normal", "OtherIncome_normal"),
         "interest": _f(flat, "interest", "Interest"),
         "depreciation": _f(flat, "depreciation", "Depreciation"),
         "profit_before_tax": _f(flat, "profit_before_tax", "ProfitBeforeTax"),
@@ -131,28 +137,52 @@ async def upsert_annual_metrics(
         "expenses": _f(flat, "expenses", "Expenses"),
         "operating_profit": _f(flat, "operating_profit", "OperatingProfit"),
         "ebitda": _f(flat, "ebitda", "EBITDA"),
-        "revenue_growth_percent": _f(flat, "revenue_growth_percentage"),
-        "ebitda_margin_percent": _f(flat, "ebitda_margin_percentage"),
+        "revenue_growth_percent": _f(
+            flat, "revenue_growth_percentage", "revenue_growth_percent", "RevenueGrowth_percent"
+        ),
+        "ebitda_margin_percent": _f(
+            flat, "ebitda_margin_percentage", "ebitda_margin_percent", "EBITDA_Margin_percent"
+        ),
         "ebit": _f(flat, "ebit", "EBIT"),
-        "opm_percent": _f(flat, "opm_percentage", "OPM_percentage"),
+        "opm_percent": _f(flat, "opm_percentage", "OPM_percentage", "opm_percent"),
         "tax_percent": _f(flat, "tax_percent", "Tax_percent"),
-        "net_profit_margin": _f(flat, "net_profit_margin_percentage"),
+        "net_profit_margin": _f(
+            flat, "net_profit_margin_percentage", "net_profit_margin", "NetProfitMargin"
+        ),
+        "dividend_paid": _f(flat, "dividend_paid", "DividendPaid"),
+        "dividend_payout_percent": _f(
+            flat, "dividend_payout_percent", "DividendPayout_percent"
+        ),
         "equity_capital": _f(flat, "equity_capital", "EquityCapital"),
         "reserves": _f(flat, "reserves", "Reserves"),
         "total_liabilities": _f(flat, "total_liabilities", "TotalLiabilities"),
+        "current_ratio": _f(flat, "current_ratio", "CurrentRatio"),
+        "quick_ratio": _f(flat, "quick_ratio", "QuickRatio"),
         "total_equity": _f(flat, "total_equity", "TotalEquity"),
         "total_assets": _f(flat, "total_assets", "TotalAssets"),
-        "borrowings": _f(flat, "borrowings", "Borrowings"),
+        "debt_to_equity": _f(flat, "debt_to_equity", "DebtToEquity"),
+        "working_capital": _f(flat, "working_capital", "WorkingCapital"),
         "cwip": _f(flat, "cwip", "CWIP"),
         "investments": _f(flat, "investments", "Investments"),
-        "cash_from_operating_activity": _f(flat, "cash_from_operating_activity", "CashFromOperatingActivity"),
-        "cash_from_investing_activity": _f(flat, "cash_from_investing_activity", "CashFromInvestingActivity"),
-        "cash_from_financing_activity": _f(flat, "cash_from_financing_activity", "CashFromFinancingActivity"),
-        "debt_to_equity": _f(flat, "debt_to_equity"),
-        "debt_to_assets": _f(flat, "debt_to_assets"),
-        "working_capital": _f(flat, "working_capital"),
-        "current_ratio": _f(flat, "current_ratio"),
-        "quick_ratio": _f(flat, "quick_ratio"),
+        "borrowings": _f(flat, "borrowings", "Borrowings"),
+        "debt_to_assets": _f(flat, "debt_to_assets", "DebtToAssets"),
+        "cash_from_operating_activity": _f(
+            flat, "cash_from_operating_activity", "CashFromOperatingActivity"
+        ),
+        "cash_from_investing_activity": _f(
+            flat, "cash_from_investing_activity", "CashFromInvestingActivity"
+        ),
+        "dividends_received": _f(flat, "dividends_received", "DividendsReceived"),
+        "cash_from_financing_activity": _f(
+            flat, "cash_from_financing_activity", "CashFromFinancingActivity"
+        ),
+        "cash_conversion_ratio": _f(flat, "cash_conversion_ratio", "CashConversionRatio"),
+        "net_cash_flow": _f(flat, "net_cash_flow", "NetCashFlow"),
+        "cfo_op": _f(flat, "cfo_op", "CFO_OP"),
+        "roa": _f(flat, "roa", "ROA"),
+        "roe": _f(flat, "roe", "ROE"),
+        "roce_percent": _f(flat, "roce_percent", "ROCE_percent"),
+        "debtor_days": _f(flat, "debtor_days", "DebtorDays"),
     }
     obj, created = await AnnualMetrics.get_or_create(
         scrip_code=str(scrip_code).strip(),

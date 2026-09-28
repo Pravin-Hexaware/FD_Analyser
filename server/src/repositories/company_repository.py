@@ -217,6 +217,8 @@ def _company_to_dict(row: CompanyInfo) -> dict:
         "symbol": row.symbol,
         "scrip_code": row.scrip_code,
         "isin_no": row.isin_no,
+        "is_in_nifty_500": row.is_in_nifty_500,
+        "nifty500_updated_at": str(row.nifty500_updated_at) if row.nifty500_updated_at else None,
         "sector": industry_name,
         "industry": industry_name,
     }

@@ -1,4 +1,4 @@
-"""Annual metrics (Excel: Annual_Metrics)."""
+"""Annual metrics (Excel: Annual_Metrics) — scalar columns only, no JSON."""
 from tortoise import fields
 from tortoise.models import Model
 
@@ -8,10 +8,6 @@ class AnnualMetrics(Model):
     scrip_code = fields.CharField(max_length=32, index=True)
     period = fields.CharField(max_length=64, index=True)
     category = fields.CharField(max_length=16, index=True)  # std | con
-    p_l_json = fields.TextField(null=True)
-    balance_sheet_json = fields.TextField(null=True)
-    cash_flow_json = fields.TextField(null=True)
-    ratios_json = fields.TextField(null=True)
     currency = fields.CharField(max_length=16, null=True)
     level_of_rounding = fields.CharField(max_length=64, null=True)
 

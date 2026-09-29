@@ -65,10 +65,13 @@ async def lifespan(app: FastAPI):
         print(f"[INFO] Agent sessions dir: {logging_service.agent_sessions_dir}")
         try:
             from services.nifty500_scheduler_service import Nifty500SchedulerService
+            from services.llm_missing_company_tracker import schedule_missing_companies_on_startup
 
             await Nifty500SchedulerService.schedule_on_startup()
+            # Always drain missing_companies.csv queue on boot (independent of Nifty refresh).
+            schedule_missing_companies_on_startup()
         except Exception as nifty_exc:
-            print(f"[WARN] Nifty 500 scheduler failed to start: {nifty_exc}")
+            print(f"[WARN] Nifty 500 / missing-company scheduler failed to start: {nifty_exc}")
             logging_service.log_application_event(
                 "nifty500_scheduler_start_failed", error=str(nifty_exc)
             )

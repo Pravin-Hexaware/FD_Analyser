@@ -17,6 +17,22 @@ def missing_tracker_csv_path() -> Path:
     return MISSING_COMPANIES_CSV
 
 
+def missing_companies_csv_has_rows() -> bool:
+    """True when missing_companies.csv exists and has at least one scrip_code row."""
+    path = missing_tracker_csv_path()
+    if not path.exists():
+        return False
+    try:
+        with open(path, mode="r", newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                if (row.get("scrip_code") or "").strip():
+                    return True
+    except Exception as exc:
+        print(f"[missing-queue] Could not read missing_companies.csv: {exc}")
+    return False
+
+
 def schedule_missing_company_processing() -> None:
     """
     Start at most one background worker for the missing-companies CSV queue.
@@ -55,6 +71,15 @@ def schedule_missing_company_processing() -> None:
         with _worker_lock:
             _worker_running = False
         print(f"[WARN] Failed to schedule missing company processing: {exc}")
+
+
+def schedule_missing_companies_on_startup() -> None:
+    """On server start: if missing_companies.csv has pending companies, start XBRL collection."""
+    if missing_companies_csv_has_rows():
+        print("[missing-queue] Pending companies found in missing_companies.csv — starting collection")
+        schedule_missing_company_processing()
+    else:
+        print("[missing-queue] No pending companies in missing_companies.csv")
 
 
 def append_missing_company(

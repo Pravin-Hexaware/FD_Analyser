@@ -9,7 +9,7 @@ class XbrlData(Model):
     period = fields.CharField(max_length=64, index=True)
     xbrl_link = fields.TextField()
     category = fields.CharField(max_length=16, index=True)  # std | con
-    metrics_json = fields.TextField(null=True)  # full parsed document JSON
+    #metrics_json = fields.TextField(null=True)  # full parsed document JSON
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:

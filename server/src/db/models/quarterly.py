@@ -1,4 +1,4 @@
-"""Quarterly metrics (Excel: Quarterly_Metrics)."""
+"""Quarterly metrics (Excel: Quarterly_Metrics) — scalar columns only, no JSON."""
 from tortoise import fields
 from tortoise.models import Model
 
@@ -8,7 +8,6 @@ class QuarterlyMetrics(Model):
     scrip_code = fields.CharField(max_length=32, index=True)
     period = fields.CharField(max_length=64, index=True)
     category = fields.CharField(max_length=16, index=True)  # std | con
-    metrics_json = fields.TextField(null=True)
     currency = fields.CharField(max_length=16, null=True)
     level_of_rounding = fields.CharField(max_length=64, null=True)
 
